@@ -40,6 +40,15 @@ Set `DATA_DIR` to an absolute writable directory, `WEB_DIST` to the built `web/d
 
 On an explicitly disposable demonstration database, `servicehub seed-demo` creates the personas and module seed data. **Both `seed-demo` and `reset-demo` wipe existing records and files.** Do not use either command on operational data. Set `DEMO_MODE=false` for operational installations. `DEMO_RESET_HOURS=0` disables periodic reset in demo mode; `DEMO_ENDS_AT` only applies to demos.
 
+## Demo mode vs self-hosted
+
+`DEMO_MODE` chooses between two operating modes of the same binary:
+
+- **Demo (`DEMO_MODE=true`).** The `/demo` persona-picker page and its sign-in endpoints are enabled, and staff personas get a one-click TOTP via the on-screen demo authenticator. `DEMO_RESET_HOURS` (default `6`, `0` disables) schedules a wipe-and-reseed of all data — everything visitors create is deleted. A banner shows the next reset. With `DEMO_ENDS_AT` set (RFC 3339 timestamp), the site serves a static "demo has ended" page and API requests return `410` once the time passes; `REPO_URL` is linked from that page so visitors can run their own copy.
+- **Self-hosted (`DEMO_MODE=false`, the default).** `/demo`, the persona endpoints and the demo authenticator return `404`. There is no scheduled reset and `DEMO_ENDS_AT` has no effect — the installation has no expiry or phone-home. Accounts are created by an administrator at `/admin/users`; staff enrol their own authenticator at first login. Seed data is optional and `seed-demo`/`reset-demo` must never be run against operational data — both wipe the database and blobs.
+
+Everything else — the application, migrations, backups, restore tooling — is identical in both modes.
+
 ## Upgrade with a pre-migration backup
 
 1. Build and test the new image without replacing the running service.
@@ -62,7 +71,7 @@ A backup contains `servicehub.db`, `blobs/<prefix>/<sha256>`, and `manifest.json
 
 The restore check copies the backup into a unique scratch directory under `DATA_DIR`, opens that isolated database, performs `integrity_check` and `foreign_key_check`, compares all table counts and blob inventories to the manifest, verifies every file hash, and reads a document for every case that has a live document. It never replaces the live database. Success/failure details appear in `backup_runs` and `/admin/backups`. CLI failure has a non-zero exit status.
 
-The `records.backup` job performs a backup and restore check, then queues the next day's job. Demo seeding queues the first run. A fresh, unseeded installation also needs the platform scheduler to call `records::schedule_daily(tx, state)`; this is an outstanding S5 integration request. Until that hook is connected, run the two CLI commands from a daily system timer or cron entry. Use a wrapper that generates a distinct directory per run, stops on backup failure, and alerts an operator when either command exits unsuccessfully.
+The `records.backup` job performs a backup and restore check, then queues the next day's job. Demo seeding queues the first run; for a fresh, unseeded installation the platform scheduler enqueues it on its next tick (`jobs::schedule_tick` calls `records::schedule_daily`, deduplicated per day). No external timer is required. Results are recorded in `backup_runs` and visible at `/admin/backups`; alert operators when a run records a failure. You may additionally run the two CLI commands above from a system timer — a second snapshot never overwrites an existing one.
 
 Copy verified snapshots off the application server. Preserve access controls and encryption while transporting/storing backups: the database contains account data and confidential case content. Restore checks verify consistency and integrity, not an external signature against malicious replacement of the entire manifest.
 
