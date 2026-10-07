@@ -45,6 +45,9 @@ A demonstration of a single web application where Norfolk Island residents and b
 | `COOKIE_SECURE` | `true` | set `false` for plain-http local dev |
 | `WEBHOOK_SECRET` | random per start | HMAC secret shared by DemoPay and the webhook handler |
 | `MOCK_API_KEY` | random per start | header `X-Mock-Key` required on server-to-server `/mock/**` APIs |
+| `TRUST_PROXY` | `true` | client IP (rate limits, audit) from the first `X-Forwarded-For` hop |
+| `SEED_DATA_DIR` | `./seed-data`, else `server/seed-data` | seed files (`holidays.csv`, …) |
+| `REPO_URL` | unset | source link on the "demonstration has ended" page |
 
 ## 2. Backend module map (`server/src/`)
 
@@ -219,6 +222,7 @@ Every submitted case stores the full definition snapshot (`submissions.definitio
 ```rust
 // platform
 pub struct Actor { pub user_id: i64, pub kind: UserKind, pub roles: Vec<RoleGrant>, pub display_name: String, pub mfa_passed: bool }
+Actor::system()   // user_id 0, no roles: background jobs, webhooks, automatic advances; persist `actor.db_id()` (None for system)
 pub enum CaseAccess { None, Applicant, Staff { can_manage: bool }, TaskOnly }
 authz::case_access(tx, &Actor, case_id) -> AppResult<CaseAccess>
 authz::require_case(tx, &Actor, case_id) -> AppResult<(CaseRow, CaseAccess)>   // not_found if None
@@ -240,9 +244,9 @@ calendar::add_business_days(tx, start_local_date, n) -> AppResult<NaiveDate>
 pdf::simple_document(title, meta: &[(&str, String)], sections: &[(&str, String)]) -> Vec<u8>
 
 // services (cases workflow)
-cases::workflow::advance(tx, &Actor, case_id, expected_revision, note) -> AppResult<CaseRow>
-cases::workflow::try_auto_advance(tx, case_id) -> AppResult<()>          // system advance if current step guard passes
-cases::workflow::close(tx, &Actor, case_id, outcome, reason) -> AppResult<()>  // calls records::api::on_case_closed
+cases::workflow::advance(tx, &AppState, &Actor, case_id, expected_revision, note: Option<String>) -> AppResult<CaseRow>
+cases::workflow::try_auto_advance(tx, &AppState, case_id) -> AppResult<()>          // system advance if current step guard passes
+cases::workflow::close(tx, &AppState, &Actor, case_id, outcome, reason) -> AppResult<()>  // calls records::api::on_case_closed
 cases::messages::post_staff_message(tx, &Actor, case_id, body, document_version_id: Option<i64>, requires_response: bool) -> AppResult<i64>
 deadlines::api::pause_for_applicant(tx, case_id, message_id, reason) -> AppResult<()>
 deadlines::api::resume(tx, case_id, why) -> AppResult<()>

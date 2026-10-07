@@ -1,0 +1,18 @@
+services:
+  servicehub:
+    build: .
+    image: norfolk-servicehub:latest
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATA_DIR: /data
+    ports:
+      # Bind to loopback only; the host's reverse proxy terminates TLS.
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - servicehub-data:/data
+
+volumes:
+  servicehub-data:
