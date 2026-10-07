@@ -227,7 +227,7 @@ function HeroPreview() {
           steps={[
             { key: 'check', label: 'Request checked' },
             { key: 'pay', label: 'Hire fee and bond paid' },
-            { key: 'confirm', label: 'Booking confirmed' },
+            { key: 'confirm', label: 'Confirming your booking' },
             { key: 'event', label: 'Event and hall inspection' },
             { key: 'bond', label: 'Bond returned' },
           ]}

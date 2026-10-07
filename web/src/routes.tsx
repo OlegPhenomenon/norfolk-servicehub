@@ -17,20 +17,20 @@ import { PublicLayout } from './layout/PublicLayout'
 import { ResidentLayout } from './layout/ResidentLayout'
 import { Root } from './layout/Root'
 import { StaffLayout } from './layout/StaffLayout'
-import { AdminHomePage, ResidentHomePage, StaffHomePage } from './pages/AreaHomePages'
+import { AdminHomePage } from './pages/AreaHomePages'
 import { DemoMailPage } from './pages/DemoMailPage'
 import { NotFoundPage, RouteErrorPage } from './pages/ErrorPages'
 import { HomePage } from './pages/HomePage'
 import { adminRoutes, publicRoutes, residentRoutes, staffRoutes } from './registry'
 import { LoadingState } from './ui'
 
-/** Area children: the platform overview page unless a feature provides an index route, then a 404 catch-all. */
-function areaChildren(featureRoutes: RouteObject[], Overview: () => React.JSX.Element): RouteObject[] {
+/** Feature-owned area routes, an optional configuration landing page, then a 404 catch-all. */
+function areaChildren(featureRoutes: RouteObject[], Overview?: () => React.JSX.Element): RouteObject[] {
   const hasIndex = featureRoutes.some((r) => r.index)
   return [
     {
       errorElement: <RouteErrorPage />,
-      children: [...(hasIndex ? [] : [{ index: true, Component: Overview }]), ...featureRoutes, { path: '*', Component: NotFoundPage }],
+      children: [...(hasIndex || !Overview ? [] : [{ index: true, Component: Overview }]), ...featureRoutes, { path: '*', Component: NotFoundPage }],
     },
   ]
 }
@@ -61,8 +61,8 @@ export const routes: RouteObject[] = [
           },
         ],
       },
-      { path: '/my', Component: ResidentLayout, children: areaChildren(residentRoutes, ResidentHomePage) },
-      { path: '/staff', Component: StaffLayout, children: areaChildren(staffRoutes, StaffHomePage) },
+      { path: '/my', Component: ResidentLayout, children: areaChildren(residentRoutes) },
+      { path: '/staff', Component: StaffLayout, children: areaChildren(staffRoutes) },
       { path: '/admin', Component: AdminLayout, children: areaChildren(adminRoutes, AdminHomePage) },
     ],
   },

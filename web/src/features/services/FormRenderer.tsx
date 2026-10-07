@@ -1,12 +1,13 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { Answers, AnswerValue, FieldDef, ServiceDefinition } from '@/api/types'
 import { api } from '@/api/client'
+import { humanize } from '@/ui/status'
 import { fieldTypes } from '@/registry'
 import { Alert, Checkbox, DateTime, EmptyState, ErrorAlert, Field, FileInput, Select, Textarea, TextInput } from '@/ui'
 
-interface Props { definition: ServiceDefinition; answers: Answers; onChange: (answers: Answers) => void; errors?: Record<string, string>; caseId?: number; disabled?: boolean; review?: boolean }
-export function FormRenderer({ definition, answers, onChange, errors = {}, caseId, disabled, review }: Props) {
+interface Props { definition: ServiceDefinition; answers: Answers; onChange: (answers: Answers) => void; errors?: Record<string, string>; caseId?: number; disabled?: boolean; review?: boolean; submitted?: boolean }
+export function FormRenderer({ definition, answers, onChange, errors = {}, caseId, disabled, review, submitted }: Props) {
   // Evaluate conditions against earlier visible answers, matching the authoritative server.
   const visible: Answers = {}
   const fields = definition.fields.filter((f) => {
@@ -15,7 +16,7 @@ export function FormRenderer({ definition, answers, onChange, errors = {}, caseI
     return true
   })
   const change = (key: string, value: unknown) => onChange({ ...answers, [key]: value as AnswerValue })
-  if (review) return <div className="space-y-4">{fields.map((f) => <div key={f.key}><h3 className="font-semibold">{f.label}</h3><p className="text-muted break-words">{readable(answers[f.key])}</p></div>)}<Alert title="Before you submit">Check your details and documents. Receiving your request does not mean it is approved.</Alert></div>
+  if (review) return <div className="space-y-4">{fields.map((f) => <div key={f.key}><h3 className="font-semibold">{f.label}</h3><p className="text-muted break-words">{readable(answers[f.key], f)}</p></div>)}{!submitted && <Alert title="Before you submit">Check your details and documents. Receiving your request does not mean it is approved.</Alert>}</div>
   return <div className="space-y-5">{fields.map((f) => {
     const Custom = fieldTypes[f.type]
     if (Custom) return <Custom key={f.key} field={f} value={answers[f.key]} onChange={(v) => change(f.key, v)} error={errors[f.key]} disabled={disabled} />
@@ -26,12 +27,18 @@ export function FormRenderer({ definition, answers, onChange, errors = {}, caseI
     return <Field key={f.key} label={f.label} required={f.required} hint={typeof f.help === 'string' ? f.help : f.hint} error={errors[f.key]}>{f.type === 'select' ? <Select options={f.options ?? []} placeholder="Choose an option" value={String(answers[f.key] ?? '')} onChange={(e) => change(f.key, e.target.value)} disabled={disabled} /> : f.type === 'textarea' ? <Textarea value={String(answers[f.key] ?? '')} onChange={(e) => change(f.key, e.target.value)} maxLength={f.max_length} disabled={disabled} /> : <TextInput type={f.type === 'phone' ? 'tel' : ['number', 'email', 'date', 'time'].includes(f.type) ? f.type : 'text'} value={String(answers[f.key] ?? '')} onChange={(e) => change(f.key, f.type === 'number' && e.target.value !== '' ? Number(e.target.value) : e.target.value)} maxLength={f.max_length} min={f.min} max={f.max} disabled={disabled} />}</Field>
   })}{definition.documents.length > 0 && <section aria-label="Documents to attach" className="space-y-4"><h2 className="font-serif text-xl">Supporting documents</h2>{caseId ? <DocumentSlots caseId={caseId} definition={definition} errors={errors} disabled={disabled} /> : <p className="text-muted">{definition.documents.map((d) => `${d.label}${d.required ? ' (required)' : ''}`).join('; ')}. Save the request before uploading documents.</p>}</section>}</div>
 }
-function readable(value: unknown): string {
-  if (value === undefined || value === '') return 'Not provided'
+function readable(value: unknown, field: FieldDef): ReactNode {
+  if (value === undefined || value === null || value === '') return 'Not provided'
   if (typeof value === 'boolean') return value ? 'Yes' : 'No'
-  if (Array.isArray(value)) return value.join(', ')
-  if (value && typeof value === 'object') return Object.entries(value).map(([key, value]) => `${key.replaceAll('_', ' ')}: ${String(value)}`).join('; ')
-  return String(value)
+  const optionLabel = (v: unknown) => field.options?.find((o) => o.value === v)?.label ?? String(v)
+  if (Array.isArray(value)) return value.map(optionLabel).join(', ')
+  if (value && typeof value === 'object') {
+    const labels: Record<string, string> = { unit_code: 'Space', start_at: 'Starts', end_at: 'Ends', attendees: 'Guests', decision_id: 'Approval reference', site_text: 'Work site' }
+    const spaces: Record<string, string> = { 'rawson-main': 'Main hall', 'rawson-supper': 'Supper room', 'rawson-whole': 'Whole hall' }
+    return Object.entries(value).map(([key, item], i) => <span key={key}>{i > 0 && '; '}{labels[key] ?? humanize(key)}: {key === 'unit_code' ? spaces[String(item)] ?? humanize(String(item)) : ['start_at', 'end_at'].includes(key) ? <DateTime value={String(item)} /> : key === 'preferred_date' ? <DateTime value={String(item)} format="date" /> : String(item)}</span>)
+  }
+  if (field.type === 'date') return <DateTime value={String(value)} format="date" />
+  return optionLabel(value)
 }
 function LocationField({ field, value, onChange, error, disabled }: { field: FieldDef; value: unknown; onChange: (v: unknown) => void; error?: string; disabled?: boolean }) {
   const v = (value ?? { lat: -29.04, lng: 167.95, description: '' }) as { lat: number; lng: number; description: string }

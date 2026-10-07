@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { test, expect, login, ready, startHall, futureDate } from '../helpers';
 
-test('regenerate the ten README screenshots from a fresh seeded demo', async ({ page, browser, baseURL }) => {
+test('regenerate the demo screenshots from a fresh seeded demo', async ({ page, browser, baseURL }) => {
   const directory = resolve(import.meta.dirname, '../../docs/screenshots');
   mkdirSync(directory, { recursive: true });
   const capture = async (name: string) => {
@@ -17,6 +17,9 @@ test('regenerate the ten README screenshots from a fresh seeded demo', async ({ 
   await page.goto('/services');
   await expect(page.getByRole('link', { name: /Rawson Hall/ }).first()).toBeVisible();
   await capture('catalogue.png');
+  await page.goto('/services/rawson-hall-hire');
+  await ready(page);
+  await page.screenshot({ path: resolve(directory, 'service-detail.png'), fullPage: true, animations: 'disabled' });
   await page.goto('/notices');
   await page.getByRole('link', { name: 'Read notice and published documents' }).first().click();
   await page.locator('summary').first().click();
@@ -26,6 +29,7 @@ test('regenerate the ten README screenshots from a fresh seeded demo', async ({ 
   await page.getByRole('heading', { level: 1 }).evaluate(el => window.scrollTo(0, window.scrollY + el.getBoundingClientRect().top - 32));
   await capture('exhibition.png');
   await login(page, 'Alexey');
+  await capture('resident-requests.png');
   await startHall(page);
   await page.getByLabel('Date', { exact: true }).fill(futureDate(7));
   await page.getByLabel('Start (Norfolk time)').fill('18:00');
@@ -38,12 +42,17 @@ test('regenerate the ten README screenshots from a fresh seeded demo', async ({ 
   try {
     const olga = await olgaContext.newPage();
     await login(olga, 'Olga');
+    await olga.screenshot({ path: resolve(directory, 'staff-home.png'), animations: 'disabled' });
     await olga.goto('/staff/cases?service=rawson-hall-hire&status=in_progress');
     // The paid confirmation and upcoming field-task cases have active action bars.
     await olga.locator('main table a').first().click();
     await expect(olga.getByRole('button', { name: 'Cancel request', exact: true })).toBeVisible();
     await olga.evaluate(() => document.fonts.ready);
     await olga.screenshot({ path: resolve(directory, 'staff-case.png'), animations: 'disabled' });
+    await olga.getByRole('button', { name: 'Cancel request', exact: true }).click();
+    await olga.getByRole('dialog').getByLabel('Reason', { exact: true }).fill('Event cancelled at the applicant’s request.');
+    await olga.screenshot({ path: resolve(directory, 'cancel-confirmation.png'), animations: 'disabled' });
+    await olga.getByRole('dialog').getByRole('button', { name: 'Back', exact: true }).click();
     await olga.goto('/staff/calendar');
     await olga.getByLabel('Week starting').fill(futureDate(6));
     await expect(olga.locator('table')).toContainText('Rawson Hall');
@@ -58,6 +67,8 @@ test('regenerate the ten README screenshots from a fresh seeded demo', async ({ 
   await expect(page.getByText('Open requests', { exact: true }).first()).toBeVisible();
   await capture('dashboard.png');
   await login(page, 'Mark');
+  await page.goto('/admin');
+  await capture('admin-home.png');
   await page.goto('/admin/services');
   await page.getByRole('link', { name: /Dog registration/i }).click();
   await page.getByRole('tab', { name: 'Fields', exact: true }).click();

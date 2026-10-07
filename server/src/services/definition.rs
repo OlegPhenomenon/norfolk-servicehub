@@ -23,6 +23,9 @@ pub struct ServiceDefinition {
     pub price_note: String,
     #[serde(default)]
     pub keywords: Vec<String>,
+    /// Optional applicant-facing conditions; older definitions omit this list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<String>,
     #[serde(default)]
     pub fields: Vec<FieldDef>,
     #[serde(default)]
@@ -285,6 +288,7 @@ mod tests {
           "pricing": [{ "item": "PLANNING_CERT", "quantity": 1 }]
         }"#;
         let d = ServiceDefinition::parse(json).unwrap();
+        assert!(d.conditions.is_empty());
         assert_eq!(d.fields[1].field_type, FieldType::BookingSlot);
         assert_eq!(d.fields[1].extra["venue"], "Rawson Hall");
         assert_eq!(d.fields[3].show_if.as_ref().unwrap().field, "alcohol");

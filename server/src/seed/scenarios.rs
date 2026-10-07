@@ -211,6 +211,11 @@ pub async fn run(state: &AppState) -> AppResult<()> {
     d.drain().await?;
     clock_sweep(&d).await?;
     verify(&mut d).await?;
+    // Personas have already worked through historical updates. Keep at most three of today's
+    // staff notifications unread for the visitor, without changing live notification delivery.
+    sqlx::query("UPDATE notifications SET status='read',read_at=? WHERE channel='in_app' AND read_at IS NULL AND user_id IN (SELECT id FROM users WHERE kind='staff' AND persona_key IS NOT NULL) AND (created_at<? OR id NOT IN (SELECT recent.id FROM notifications recent WHERE recent.user_id=notifications.user_id AND recent.channel='in_app' AND recent.created_at>=? ORDER BY recent.id DESC LIMIT 3))")
+        .bind(time::fmt(d.state.now())).bind(time::fmt(present)).bind(time::fmt(present))
+        .execute(&state.db).await?;
     d.clear_sessions().await?;
     Ok(())
 }

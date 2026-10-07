@@ -18,6 +18,7 @@ import { Button, Card, Field, TextInput, StatusPill, Money, DateTime, useToast }
 - Focus rings are global (yellow outline on `:focus-visible`). Don't remove outlines.
 - Money is integer cents → `<Money cents={…} />`. Times are UTC strings → `<DateTime value={…} />` (shown in Norfolk time).
 - Statuses → `<StatusPill status={row.status} />`; never hand-colour a status.
+- Destructive actions: use `variant="danger-outline"` after positive and neutral actions. Confirm in a dialog; reserve solid `danger` for its final confirmation.
 - Data fetching: `useQuery` + `api` from `@/api/client`; render with `<QueryView>`; show mutation errors with `<ErrorAlert>`;
   show field errors from `ApiError.fields` in `<Field error>`; confirm success with `useToast().success(...)`.
 - Page layout: wrap public pages in `<PageContainer>` (`@/layout/PageContainer`); `/my`, `/staff`, `/admin` layouts

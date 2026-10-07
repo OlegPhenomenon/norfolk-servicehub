@@ -5,7 +5,7 @@ import { ButtonLink, cn, Icon } from '@/ui'
 import { NotificationBell } from './NotificationBell'
 import { UserMenu } from './UserMenu'
 import { Wordmark } from './Wordmark'
-import { publicNav } from '@/registry'
+import { publicNav, residentNav } from '@/registry'
 
 /** Header of the public site and the resident area. */
 export function SiteHeader() {
@@ -19,6 +19,9 @@ export function SiteHeader() {
     setMenuOpen(false)
   }
   const user = me?.user
+  const inResidentArea = location.pathname === '/my' || location.pathname.startsWith('/my/')
+  const siteNav = inResidentArea ? publicNav.filter((item) => !residentNav.some((local) => local.to === item.to)) : publicNav
+  const showWorkspaceLink = !!user && !inResidentArea
 
   const navLinkClass = ({ isActive }: { isActive: boolean }) =>
     cn('inline-flex min-h-11 items-center rounded-lg px-3 font-medium', isActive ? 'text-primary bg-primary-50' : 'text-ink/85 hover:text-primary hover:bg-primary-50/60')
@@ -28,12 +31,12 @@ export function SiteHeader() {
       <div className="mx-auto flex max-w-7xl items-center gap-2 px-4 py-2.5 sm:gap-4 sm:px-6">
         <Wordmark />
         <nav aria-label="Main" className="ml-6 hidden items-center gap-1 xl:flex">
-          {publicNav.map((l) => (
+          {siteNav.map((l) => (
             <NavLink key={l.to} to={l.to} className={navLinkClass}>
               {l.label}
             </NavLink>
           ))}
-          {user ? (
+          {showWorkspaceLink && user ? (
             <NavLink to={user.kind === 'staff' ? '/staff' : '/my'} className={navLinkClass}>
               {user.kind === 'staff' ? 'Staff workspace' : 'My requests'}
             </NavLink>
@@ -72,14 +75,14 @@ export function SiteHeader() {
       {menuOpen ? (
         <nav id="mobile-nav" aria-label="Main" className="border-t border-line px-4 py-2 xl:hidden">
           <ul className="flex flex-col">
-            {publicNav.map((l) => (
+            {siteNav.map((l) => (
               <li key={l.to}>
                 <NavLink to={l.to} className={navLinkClass}>
                   {l.label}
                 </NavLink>
               </li>
             ))}
-            {user ? (
+            {showWorkspaceLink && user ? (
               <li>
                 <NavLink to={user.kind === 'staff' ? '/staff' : '/my'} className={navLinkClass}>
                   {user.kind === 'staff' ? 'Staff workspace' : 'My requests'}

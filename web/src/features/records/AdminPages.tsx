@@ -22,7 +22,7 @@ function UserCard({ user }: { user: StaffUser }) {
   const deactivate = useCommand(`/api/admin/users/${user.id}/deactivate`, 'Account deactivated')
   return <Card title={user.display_name} description={`${user.email} · ${user.kind} · ${user.is_active ? 'Active' : 'Inactive'}`}><ErrorAlert error={grant.error ?? deactivate.error} />
     {user.kind === 'staff' && <><QueryView query={grants}>{roles => <div className="flex flex-wrap gap-3">{roles.filter(g => !g.revoked_at).map(g => <RoleGrant key={g.id} userId={user.id} grant={g} />)}</div>}</QueryView><form className="mt-4 flex flex-wrap items-end gap-4" onSubmit={e => { e.preventDefault(); grant.mutate({ role }) }}><Field label="Staff role" required><Select value={role} onChange={e => setRole(e.target.value as Role)} options={Object.entries(ROLE_LABELS).map(([value, label]) => ({ value, label }))} /></Field><Button type="submit" loading={grant.isPending}>Grant role</Button></form></>}
-    {user.is_active === 1 && <Button variant="danger" className="mt-4" loading={deactivate.isPending} onClick={() => deactivate.mutate({})}>Deactivate account</Button>}
+    {user.is_active === 1 && <Button variant="danger-outline" className="mt-4" loading={deactivate.isPending} onClick={() => deactivate.mutate({})}>Deactivate account</Button>}
   </Card>
 }
 function RoleGrant({ userId, grant }: { userId: number; grant: { id: number; role: Role } }) {

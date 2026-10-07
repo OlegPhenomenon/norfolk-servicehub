@@ -131,7 +131,7 @@ function BookingContent({
             >
               Reschedule
             </Button>
-            <Button variant="danger" onClick={() => setDialog('cancel')}>
+            <Button variant="danger-outline" onClick={() => setDialog('cancel')}>
               Cancel booking
             </Button>
           </div>
@@ -179,7 +179,8 @@ function BookingContent({
         footer={
           <Button
             loading={op.isPending}
-            disabled={dialog === 'move' && !preview.data?.available}
+            variant={dialog === 'move' ? 'primary' : 'danger'}
+            disabled={dialog === 'move' ? !preview.data?.available : !reason.trim()}
             onClick={() =>
               op.mutate(
                 {
@@ -317,6 +318,7 @@ function StaffTask({
 }) {
   const [worker, setWorker] = useState(String(t.assigned_to ?? ''))
   const [reason, setReason] = useState('')
+  const [cancelOpen, setCancelOpen] = useState(false)
   const op = useOperation()
   return (
     <Card title={t.title}>
@@ -357,24 +359,14 @@ function StaffTask({
           >
             Assign
           </Button>
-          <Field label="Cancellation reason">
-            <Textarea
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-            />
-          </Field>
-          <Button
-            variant="danger"
-            disabled={!reason.trim()}
-            onClick={() =>
-              op.mutate({
-                path: `/api/tasks/${t.id}/cancel`,
-                body: { reason, expected_revision: t.revision },
-              })
-            }
-          >
-            Cancel task
-          </Button>
+          <Button variant="danger-outline" onClick={() => { setReason(''); setCancelOpen(true) }}>Cancel task</Button>
+          <Dialog open={cancelOpen} onClose={() => { if (!op.isPending) setCancelOpen(false) }} title="Cancel task?" description="Record why this task is no longer needed." footer={<>
+            <Button variant="secondary" disabled={op.isPending} onClick={() => setCancelOpen(false)}>Back</Button>
+            <Button variant="danger" loading={op.isPending} disabled={!reason.trim()} onClick={() => op.mutate({ path: `/api/tasks/${t.id}/cancel`, body: { reason, expected_revision: t.revision } }, { onSuccess: () => setCancelOpen(false) })}>Cancel task</Button>
+          </>}>
+            <Field label="Cancellation reason" required><Textarea value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
+            {op.error && <ErrorAlert error={op.error} />}
+          </Dialog>
         </div>
       )}
       {op.error && <ErrorAlert error={op.error} />}

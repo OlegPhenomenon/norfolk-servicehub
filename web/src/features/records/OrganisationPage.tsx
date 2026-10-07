@@ -19,7 +19,7 @@ function OrganisationCard({ organisation: o }: { organisation: Organisation }) {
 }
 function RevokeMember({ organisationId, memberId }: { organisationId: number; memberId: number }) {
   const revoke = useCommand(`/api/my/organisations/${organisationId}/members/${memberId}/revoke`, 'Access revoked')
-  return <><Button variant="danger" loading={revoke.isPending} onClick={() => revoke.mutate({})}>Revoke access</Button><ErrorAlert error={revoke.error} /></>
+  return <><Button variant="danger-outline" loading={revoke.isPending} onClick={() => revoke.mutate({})}>Revoke access</Button><ErrorAlert error={revoke.error} /></>
 }
 export function InvitePage() {
   const { token } = useParams()

@@ -18,13 +18,13 @@ export function FinancePage() {
         { key: 'number', header: 'Invoice', cell: r => <ButtonLink variant="ghost" to={`/staff/cases/${r.case_id}?tab=finance.money`}>{r.number}</ButtonLink> },
         { key: 'applicant', header: 'Applicant', cell: r => r.applicant_name },
         { key: 'due', header: 'Outstanding', cell: r => <Money cents={r.outstanding_cents} /> },
-      ]} empty={<EmptyState title="No outstanding invoices" />} /></Card>
+      ]} empty={<EmptyState title="No outstanding invoices" description="All issued invoices are settled. New charges will appear here when payment is due." />} /></Card>
       <Card title="Today's receipts (Norfolk Island time)"><Table caption="Today's receipts" rows={data.todays_receipts} rowKey={r => r.id} columns={[
         { key: 'case', header: 'Request', cell: r => r.case_id ? <ButtonLink variant="ghost" to={`/staff/cases/${r.case_id}?tab=finance.money`}>{r.case_number}</ButtonLink> : 'Unmatched transfer' },
         { key: 'source', header: 'Source', cell: r => r.source.replaceAll('_', ' ') },
         { key: 'amount', header: 'Received', cell: r => <Money cents={r.amount_cents} /> },
         { key: 'time', header: 'Time', cell: r => <DateTime value={r.received_at} format="time" /> },
-      ]} empty={<EmptyState title="No receipts today" />} /></Card>
+      ]} empty={<EmptyState title="No receipts today" description="Confirmed payments received today will appear here." />} /></Card>
       <QueryView query={ledger}>{data => <LedgerTable data={data} />}</QueryView>
     </div>}</QueryView>
   </RequireStaff>

@@ -8,7 +8,7 @@ import { SiteFooter } from './SiteFooter'
 import { SiteHeader } from './SiteHeader'
 import { SkipLink } from './SkipLink'
 
-/** `/my` — signed-in residents and businesses. Sub-navigation = Overview + `residentNav` from features. */
+/** `/my` — signed-in residents and businesses. Sub-navigation = `residentNav` from features. */
 export function ResidentLayout() {
   return (
     <RequireAuth>
@@ -28,7 +28,7 @@ export function ResidentLayout() {
 
 function ResidentSubnav() {
   const { data: me } = useMe()
-  const items = [{ to: '/my', label: 'Overview', icon: 'home' as const, end: true }, ...residentNav]
+  const items = residentNav
   return (
     <div className="border-b border-line bg-surface">
       <nav aria-label="Your account" className="mx-auto flex max-w-7xl items-center gap-1 overflow-x-auto px-4 sm:px-6">

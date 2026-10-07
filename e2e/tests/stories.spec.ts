@@ -121,7 +121,7 @@ test('d: Mark builds and publishes a service, a new resident submits it', async 
     await page.getByLabel('Summary', { exact: false }).fill('Request access to the fictional community garden.');
     await page.getByLabel('What the applicant receives').fill('A written garden access response.');
     await page.getByLabel('Who can apply').fill('Norfolk Island residents.');
-    await page.getByLabel('Price calculation and demo policy note').fill('No fee for this fictional demonstration.');
+    await page.getByLabel('Price calculation', { exact: true }).fill('No fee for this fictional demonstration.');
     await page.getByRole('tab', { name: 'Fields', exact: true }).click();
     await page.getByRole('button', { name: 'Add field', exact: true }).click();
     await page.getByLabel('Key', { exact: false }).fill('purpose');

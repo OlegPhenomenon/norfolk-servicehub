@@ -328,6 +328,7 @@ export interface PricingItem {
 
 /** `service_versions.definition_json` */
 export interface ServiceDefinition {
+  conditions?: string[]
   summary: string
   outcome: string
   who_can_apply: string

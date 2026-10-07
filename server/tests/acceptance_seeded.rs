@@ -37,6 +37,9 @@ async fn seeded_history_is_complete_balanced_repeatable_and_leaves_the_visitor_s
     clock::scope(state.clock.clone(), seed::reset_demo(&state)).await.unwrap();
     assert!(started.elapsed().as_secs_f64() < 15.0, "seed took {:?}", started.elapsed());
     let first = counts(&state).await;
+    assert_eq!(scalar(&state, "SELECT COUNT(*) FROM notifications n JOIN users u ON u.id=n.user_id WHERE u.kind='staff' AND n.channel='in_app' AND n.created_at<'2026-10-07T03:15:00Z' AND n.read_at IS NULL").await, 0);
+    assert!(scalar(&state, "SELECT COALESCE(MAX(unread),0) FROM (SELECT COUNT(*) AS unread FROM notifications n JOIN users u ON u.id=n.user_id WHERE u.kind='staff' AND n.channel='in_app' AND n.read_at IS NULL GROUP BY n.user_id)").await <= 3);
+    assert!(scalar(&state, "SELECT COUNT(*) FROM notifications n JOIN users u ON u.id=n.user_id WHERE u.persona_key='jake' AND n.channel='in_app' AND n.read_at IS NOT NULL").await > 0);
     assert_eq!(
         scalar(&state, "SELECT COUNT(*) FROM bookings b JOIN cases c ON c.id=b.case_id WHERE c.status='completed'")
             .await,

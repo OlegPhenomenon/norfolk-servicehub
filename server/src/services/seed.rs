@@ -15,8 +15,31 @@ fn select(key: &str, label: &str, options: &[&str]) -> Value {
 fn doc(key: &str, label: &str, required: bool) -> Value {
     json!({"key":key,"label":label,"required":required,"accept":["application/pdf","image/png","image/jpeg"],"public_candidate":false})
 }
+fn staff_label<'a>(key: &str, fallback: &'a str) -> &'a str {
+    match key {
+        "assessment" if fallback == "Finding the requested record" => "Find requested record",
+        "triage" if fallback == "Reviewing your complaint" => "Review complaint",
+        "intake" => "Check request",
+        "assessment" => "Assess application",
+        "confirm" => "Confirm booking",
+        "prep" => "Prepare hall",
+        "inspect" => "Inspect hall",
+        "bond" => "Settle bond",
+        "schedule" => "Schedule equipment",
+        "job" => "Complete equipment job",
+        "usage" => "Approve actual usage",
+        "triage" => "Triage report",
+        "investigation" => "Investigate complaint",
+        "inspection" => "Inspect road issue",
+        "site" => "Inspect site",
+        "preparation" => "Prepare certificate",
+        "repair" => "Repair road",
+        "response" => "Issue response",
+        _ => fallback,
+    }
+}
 fn step(key: &str, kind: &str, role: Option<&str>, label: &str, applicant: &str) -> Value {
-    let mut s = json!({"key":key,"kind":kind,"label":label,"applicant_label":applicant});
+    let mut s = json!({"key":key,"kind":kind,"label":staff_label(key, label),"applicant_label":applicant});
     if let Some(r) = role {
         s["role"] = json!(r);
     }
@@ -151,7 +174,7 @@ pub fn catalogue() -> Vec<(&'static str, &'static str, &'static str, &'static st
         ),
     ];
     entries.into_iter().map(|(slug,name,category,m,department,url)|{
-        let mut fields=contact();let mut docs=vec![];let mut pricing=vec![];
+        let mut fields=contact();let mut docs=vec![];let mut pricing=vec![];let mut conditions=vec![];
         let intake=review("intake","intake","Checking your request");
         let assessment=review("assessment","specialist","Assessing your application");
         let mut steps=vec![intake.clone(),assessment.clone(),done()];
@@ -162,7 +185,8 @@ pub fn catalogue() -> Vec<(&'static str, &'static str, &'static str, &'static st
                 fields.extend([field("insurance_agreement","checkbox","Public liability policy or Council casual hirer agreement is attached",true),field("conditions","checkbox","I accept the Conditions of Hire and responsibility for the key",true)]);
                 docs=vec![doc("insurance","Public liability policy ($20 million) or Council casual hirer agreement",true),doc("nonprofit","Non-profit supporting documents, if applicable",false)];
                 steps=vec![intake.clone(),payment(),module("confirm","operations.booking_confirmed","intake","Confirming your booking",false),task("prep","venue_prep","Preparing the hall",false),task("inspect","venue_inspection","Inspecting the hall after your event",false),module("bond","finance.deposits_settled","finance","Processing your bond decision and refund",false),done()];
-                ("Hire the Main Hall, Supper Room or both for an event. A submitted request is not a confirmed booking. Music stops by 10 pm unless agreed. Return keys and property by noon on the next business day. Provide $20M public liability insurance or agreed casual-hirer cover. Meeting cancellations need more than seven days notice; weddings, concerts, stage shows and balls need thirty days notice.","A confirmed booking with rooms, dates and conditions, followed by a bond decision.",vec!["hall","party","wedding","venue","room hire"])
+                conditions=vec!["A submitted request is not a confirmed booking.","Music stops by 10 pm unless agreed.","Return keys and property by noon on the next business day.","Provide $20 million public liability insurance or agreed casual-hirer cover.","Meeting cancellations need more than seven days notice; weddings, concerts, stage shows and balls need thirty days notice."];
+                ("Hire the Main Hall, Supper Room or both for an event.","A confirmed booking with rooms, dates and conditions, followed by a bond decision.",vec!["hall","party","wedding","venue","room hire"])
             },
             "development-application"|"modify-approval"=>{
                 fields.extend(property());fields.extend([select("land_tenure","Land tenure",&["Freehold","Crown Lease","Vacant Crown Land","Road Reserve","Un-alienated Crown Land"]),select("zoning","Zoning",&["Rural","Rural Residential","Residential","Mixed Use","Business","Light Industry","Industry","Open Space","Conservation","Special Use","Airport","Roads"]),field("current_use","textarea","What is the land currently used for?",true),field("proposal","textarea",if slug=="modify-approval"{"Description of proposed modification"}else{"Description of proposal"},true),field("estimated_cost","number","Total estimated cost of building and works (AUD)",true),field("owners_consent","checkbox","All landowners consent to lodging this application",true)]);
@@ -193,14 +217,14 @@ pub fn catalogue() -> Vec<(&'static str, &'static str, &'static str, &'static st
         };
         fields.push(field("declaration","checkbox","I declare that the information is correct",true));
         let first=steps.first().unwrap()["key"].as_str().unwrap();let second=steps.get(1).unwrap()["key"].as_str().unwrap();
-        let deadlines=json!([{"kind":"completeness","label":"Initial completeness check (illustrative demo target)","days":if m=="building"{10}else{3},"basis":"business","starts":"submitted","stops":format!("step:{second}"),"pausable":false},{"kind":"response","label":"Reply (illustrative demo target)","days":20,"basis":"business","starts":format!("step:{first}"),"stops":"closed","pausable":true,"max_pause_days":30}]);
+        let deadlines=json!([{"kind":"completeness","label":"Initial check","days":if m=="building"{10}else{3},"basis":"business","starts":"submitted","stops":format!("step:{second}"),"pausable":false},{"kind":"response","label":"Reply","days":20,"basis":"business","starts":format!("step:{first}"),"stops":"closed","pausable":true,"max_pause_days":30}]);
         let calculation=match m {
-            "venue_booking"=>"Hall fees are charged per calendar day touched by the booking, plus a refundable bond. This per-day interpretation is a demo rule.",
+            "venue_booking"=>"Hire fee plus a refundable bond. Hall fees are charged per calendar day touched by the booking.",
             "equipment_hire"=>"Final charges use actual approved minutes and any agreed pass-through expenses. Rates include fuel, oil and the operator's ordinary-time wages.",
-            _=>"Council reviews the applicable fixed fee or advises the calculation before payment. Unsourced amounts are illustrative demo prices.",
+            _=>"Council will confirm the fee before payment.",
         };
-        let price_note=format!("FY2026-27 schedule (demo copy — confirm with Council). {calculation} Workflow time targets are illustrative demo values.");
-        let def=json!({"module":m,"summary":format!("{summary} Time targets are illustrative demo values."),"outcome":outcome,"who_can_apply":"Residents and businesses, or an authorised representative. All demo applicants are fictional.","price_note":price_note,"keywords":keywords,"fields":fields,"documents":docs,"workflow":{"steps":steps},"deadlines":deadlines,"pricing":pricing});
+        let price_note=if matches!(slug,"road-issue"|"complaint"){"No fee applies."}else{calculation};
+        let def=json!({"module":m,"summary":summary,"conditions":conditions,"outcome":outcome,"who_can_apply":"Residents and businesses, or an authorised representative.","price_note":price_note,"keywords":keywords,"fields":fields,"documents":docs,"workflow":{"steps":steps},"deadlines":deadlines,"pricing":pricing});
         let source=if url.is_empty(){"https://www.nirc.gov.au/Customer-Service/Customer-Service-Forms".into()}else{format!("{ROOT}{url}")};
         (slug,name,category,m,department,def,source)
     }).collect()

@@ -318,8 +318,11 @@ async fn seeded_module_handlers_and_task_kinds_reach_their_owner_implementations
         let def = crate::services::definition::load_for_case(&mut tx, &c).await.unwrap();
         if slug == "rawson-hall-hire" {
             assert!(def.field("event_name").is_some() && def.field("setup_notes").is_some());
-            for condition in ["10 pm", "noon", "$20M", "seven days", "thirty days"] {
-                assert!(def.summary.contains(condition));
+            assert_eq!(def.step("intake").unwrap().label, "Check request");
+            assert_eq!(def.step("prep").unwrap().label, "Prepare hall");
+            assert_eq!(def.step("prep").unwrap().applicant_label, "Preparing the hall");
+            for condition in ["10 pm", "noon", "$20 million", "seven days", "thirty days"] {
+                assert!(def.conditions.iter().any(|text| text.contains(condition)));
             }
         }
         if slug == "modify-approval" {

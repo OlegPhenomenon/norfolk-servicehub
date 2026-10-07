@@ -37,7 +37,7 @@ export function UnmatchedPage() {
       { key: 'payer', header: 'Payer and reference', cell: r => <><p>{r.payer_name || 'Unknown payer'}</p><p>{r.reference || 'No reference'}</p><p className="text-sm text-muted">{r.description} · {r.bank_txn_id}</p>{r.suggested_case_id ? <ButtonLink variant="ghost" to={`/staff/cases/${r.suggested_case_id}?tab=finance.money`}>View suggested request</ButtonLink> : null}</> },
       { key: 'amount', header: 'Amount', cell: r => <Money cents={r.amount_cents} /> },
       { key: 'actions', header: 'Resolve', cell: r => <div className="flex gap-2 flex-wrap"><Button onClick={() => setMatch(r)}>Match</Button><Button variant="secondary" onClick={() => setIgnore(r)}>Ignore with note</Button></div> },
-    ]} empty={<EmptyState title="No unmatched transfers" />} />
+    ]} empty={<EmptyState title="No unmatched transfers" description="No transfers need matching. Import a bank statement to check new receipts." />} />
       <Card title="Receipt evidence" description={data.evidence_note}>{data.evidence.length ? data.evidence.map(e => <p key={e.id}><ButtonLink variant="ghost" to={`/staff/cases/${e.case_id}?tab=finance.money`}>{e.case_number}: {e.title}</ButtonLink> · Evidence only — not money</p>) : <EmptyState title="No proof of payment uploaded" />}</Card>
     </div>}</QueryView>
     <Dialog open={!!match} onClose={() => setMatch(null)} title="Match bank transfer">{match ? <MatchForm key={match.id} row={match} onDone={() => setMatch(null)} /> : null}</Dialog>

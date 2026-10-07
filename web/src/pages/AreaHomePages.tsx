@@ -1,19 +1,10 @@
 import { Link } from 'react-router'
-import { ROLE_LABELS } from '@/api/types'
 import { useMe } from '@/auth/useMe'
 import type { NavItem } from '@/featureTypes'
-import { adminNav, staffNav, visibleNav } from '@/registry'
-import { ButtonLink, Card, EmptyState, Icon, PageHeader } from '@/ui'
+import { adminNav, visibleNav } from '@/registry'
+import { Card, Icon, PageHeader } from '@/ui'
 
-/*
- * Placeholder overview pages for /my, /staff and /admin. A feature slice replaces one by exporting an
- * `index: true` route in its residentRoutes / staffRoutes / adminRoutes.
- */
-
-function greeting(): string {
-  const hour = Number(new Intl.DateTimeFormat('en-AU', { hour: 'numeric', hour12: false, timeZone: 'Pacific/Norfolk' }).format(new Date()))
-  return hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening'
-}
+/* Configuration landing page for /admin. */
 
 function NavTiles({ items }: { items: NavItem[] }) {
   return (
@@ -30,35 +21,6 @@ function NavTiles({ items }: { items: NavItem[] }) {
         </li>
       ))}
     </ul>
-  )
-}
-
-/** `/my` overview (until the services slice provides its own). */
-export function ResidentHomePage() {
-  const { data: me } = useMe()
-  const firstName = me?.user?.name.split(' ')[0] ?? ''
-  return (
-    <>
-      <PageHeader eyebrow="My requests" title={`${greeting()}, ${firstName}`} description="Your requests, messages from the council, payments and results." actions={<ButtonLink to="/services" icon="plus">Start a new request</ButtonLink>} />
-      <EmptyState icon="folder" title="No requests yet" description="When you ask the council for a service, it appears here with its progress and anything you need to do." action={<ButtonLink to="/services" variant="secondary">Browse services</ButtonLink>} />
-    </>
-  )
-}
-
-/** `/staff` overview. */
-export function StaffHomePage() {
-  const { data: me } = useMe()
-  const items = visibleNav(staffNav, me?.roles ?? [])
-  const firstName = me?.user?.name.split(' ')[0] ?? ''
-  return (
-    <>
-      <PageHeader
-        eyebrow="Staff workspace"
-        title={`${greeting()}, ${firstName}`}
-        description={me?.roles.length ? `You are working as ${me.roles.map((r) => ROLE_LABELS[r]).join(', ')}.` : 'You have no roles yet. Ask the systems administrator to grant one.'}
-      />
-      {items.length > 0 ? <NavTiles items={items} /> : <EmptyState icon="clipboard" title="Nothing to work on yet" description="Work queues for your roles appear here." />}
-    </>
   )
 }
 

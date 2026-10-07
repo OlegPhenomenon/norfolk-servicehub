@@ -1,6 +1,6 @@
 import { cn } from './cn'
 
-export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'accent'
+export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'danger-outline' | 'accent'
 export type ButtonSize = 'md' | 'sm' | 'lg'
 
 const VARIANTS: Record<ButtonVariant, string> = {
@@ -8,6 +8,7 @@ const VARIANTS: Record<ButtonVariant, string> = {
   accent: 'bg-pine text-white shadow-sm hover:bg-pine-700 active:bg-pine-900',
   secondary: 'bg-surface text-primary border border-line-strong shadow-sm hover:bg-primary-50 hover:border-primary-200',
   ghost: 'text-primary hover:bg-primary-50',
+  'danger-outline': 'bg-surface text-danger border border-danger/50 hover:bg-danger-50 hover:border-danger',
   danger: 'bg-danger text-white shadow-sm hover:brightness-95 active:brightness-90',
 }
 

@@ -18,6 +18,7 @@ import {
   EmptyState,
   Dialog,
 } from '@/ui'
+import { humanize } from '@/ui/status'
 import { useOutbox } from './useOutbox'
 import {
   fetchTask,
@@ -62,7 +63,7 @@ function OutboxStatus({
             }
           </Badge>
           <p>
-            {String(c.body.kind ?? 'Equipment usage')} — saved{' '}
+            {humanize(String(c.body.kind ?? 'Equipment usage'))} — saved{' '}
             <DateTime value={c.created} />
           </p>
           {c.error && <p>{c.error}</p>}
@@ -390,7 +391,7 @@ function TaskContent({
         {t.updates.length ? (
           t.updates.map((u) => (
             <div key={u.id} className="border-b border-line py-3">
-              <strong>{u.kind}</strong> —{' '}
+              <strong>{humanize(u.kind)}</strong> —{' '}
               <DateTime value={u.created_offline_at ?? u.created_at} />
               <p className="whitespace-pre-line">
                 {u.kind === 'checklist' ? 'Checklist updated' : u.body}
