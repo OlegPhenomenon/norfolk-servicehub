@@ -235,6 +235,12 @@ pub async fn load_for_case(conn: &mut SqliteConnection, case: &CaseRow) -> AppRe
     ServiceDefinition::parse(&json)
 }
 
+fn default_module() -> String {
+    "generic".into()
+}
+
+pub use super::validation::{ValidationIssue, validate_definition};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,9 +303,3 @@ mod tests {
         assert!(ServiceDefinition::parse(&json.replace("\"type\": \"text\"", "\"type\": \"script\"")).is_err());
     }
 }
-
-fn default_module() -> String {
-    "generic".into()
-}
-
-pub use super::validation::{ValidationIssue, validate_definition};
