@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.104"
 argon2 = "0.5"
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 base64 = "0.22"
 chrono = { version = "0.4.45", features = ["serde"] }
 chrono-tz = "0.10.4"
@@ -15,7 +15,7 @@ futures-util = "0.3.34"
 hex = "0.4.3"
 hmac = "0.12"
 infer = "0.22.0"
-printpdf = "0.7"
+printpdf = { version = "0.7", features = ["embedded_images"] }
 qrcode = "0.14.1"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
@@ -53,3 +53,7 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.libsqlite3-sys]
 opt-level = 3
+
+# Keep debug builds small: line tables are enough for backtraces.
+[profile.dev]
+debug = "line-tables-only"
