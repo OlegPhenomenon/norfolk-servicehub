@@ -1,16 +1,30 @@
-// OWNER: operations
 import type { NavItem } from '@/featureTypes'
-
-/*
- * Navigation entries of the "operations" feature. `to` is absolute; `roles` limits visibility.
- *   { to: '/staff/bookings', label: 'Bookings', icon: 'calendar', roles: ['intake', 'manager'] }
- */
-
-/** Sidebar of the staff workspace. */
-export const staffNav: NavItem[] = []
-
-/** Sidebar of the admin area. */
-export const adminNav: NavItem[] = []
-
-/** Menu of the resident area (`/my`); `roles` is ignored there. */
-export const residentNav: NavItem[] = []
+export const staffNav: NavItem[] = [
+  {
+    to: '/staff/calendar',
+    label: 'Calendar',
+    icon: 'calendar',
+    roles: ['intake', 'specialist', 'manager'],
+  },
+  {
+    to: '/staff/field',
+    label: 'Field tasks',
+    icon: 'wrench',
+    roles: ['field_worker', 'intake', 'specialist', 'manager'],
+  },
+]
+export const adminNav: NavItem[] = [
+  {
+    to: '/admin/resources',
+    label: 'Resources',
+    icon: 'calendar',
+    roles: ['manager', 'sysadmin'],
+  },
+]
+export const residentNav: NavItem[] = [
+  { to: '/map', label: 'Road issues map', icon: 'map' },
+]
+// Platform's public header currently has fixed links; expose this for the orchestrator to connect.
+export const publicNav: NavItem[] = [
+  { to: '/map', label: 'Road issues map', icon: 'map' },
+]
