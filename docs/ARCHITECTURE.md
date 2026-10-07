@@ -40,6 +40,8 @@ A demonstration of a single web application where Norfolk Island residents and b
 | `WEB_DIST` | `../web/dist` | static SPA |
 | `DEMO_MODE` | `false` | persona login, demo authenticator, scheduled reset, demo banner |
 | `DEMO_RESET_HOURS` | `6` | reset interval in demo mode (0 = never) |
+| `DEMO_ENDS_AT` | unset | demo mode only: after this RFC 3339 instant the public demo serves a "demonstration has ended — get the code" page; self-hosted installs have no expiry |
+| `AI_ENABLED` | `true` | show the (mock) AI service-suggestion helper; `false` hides it, nothing else changes |
 | `COOKIE_SECURE` | `true` | set `false` for plain-http local dev |
 | `WEBHOOK_SECRET` | random per start | HMAC secret shared by DemoPay and the webhook handler |
 | `MOCK_API_KEY` | random per start | header `X-Mock-Key` required on server-to-server `/mock/**` APIs |
@@ -77,6 +79,8 @@ Ownership matters: a module **writes only its own tables** (see section comments
 
 Each module exposes `pub fn routes() -> Router<AppState>` merged in `main.rs`, and optionally `pub mod api` (cross-module functions), `pub async fn handle_job(...)` and `pub fn seed(...)`.
 
+Table ownership exceptions to the section comments in `0001_init.sql`: `building_projects` → documents; `complaint_subjects`, `case_access_denials`, `memberships`, `legal_holds` and the `cases.confidential / legal_hold / retention_until` columns → records; `cases.location_* / public_map` → operations; `cases.building_project_id` → documents; `workflow_step_runs`, `submission_documents` → services; records' admin screens may write `users`, `role_grants`, `settings` (platform tables) through `auth`/`settings` helpers.
+
 ## 3. Conventions
 
 - **API:** JSON under `/api`. Resident and staff use the same endpoints; responses are projected by `authz`.
@@ -85,7 +89,9 @@ Each module exposes `pub fn routes() -> Router<AppState>` merged in `main.rs`, a
 - **Staff 2FA:** staff sessions have `mfa_passed=0` until TOTP verified; staff endpoints return `mfa_required` until then.
 - **Concurrency:** staff commands on cases/bookings/tasks carry `expected_revision`; mismatch → `stale_revision`. All write transactions use `db::write_tx()` (`BEGIN IMMEDIATE`).
 - **Idempotency:** case submission, payment confirmation, offline task sync and refund requests accept `Idempotency-Key` header; same key + same body returns the stored response, different body → `idempotency_mismatch`.
-- **Money:** integer cents, AUD; `quantity_milli` for fractional quantities; rounding half-up at line level only.
+- **Money:** integer cents, AUD; `quantity_milli` for display quantities; rounding half-up at line level only. Hourly lines carry `quantity_minutes` and `amount = round_half_up(quantity_minutes × hourly_rate_cents / 60)` (never via rounded thousandths of an hour). Every invoice is priced for one explicit `pricing_date` (venue: event date; equipment: date of actual use; others: submission date).
+- **Settlement:** an issued `invoice` is settled when `Σ lines − Σ issued credit notes crediting it (credits_invoice_id) − Σ active confirmed allocations to its lines = 0`. Estimates and credit notes themselves are never "owed".
+- **Storage inside transactions:** SQLite has one writer, so never open a second connection while holding `write_tx`. Use `storage::stage(state, bytes, name, allow) -> Staged` (validate + write file, no DB) and `storage::register(tx, staged, actor) -> BlobRow` inside the caller's transaction. `storage::put` = stage + register in its own transaction for plain upload endpoints. Blob bytes are deleted only by `storage::gc()` when no row references them.
 - **Time:** stored UTC; displayed and reasoned about in `Pacific/Norfolk`.
 - **Audit:** every state-changing command writes `audit_log` and, when case-related, a `case_events` row with a plain-English `summary`.
 - **AI:** optional helper only. It suggests service-definition drafts; it never computes amounts, deadlines or decisions. With AI disabled everything works.
@@ -105,9 +111,12 @@ Each module exposes `pub fn routes() -> Router<AppState>` merged in `main.rs`, a
 
 Rules evaluated by `authz::case_access(tx, actor, case_id) -> CaseAccess`:
 1. A row in `case_access_denials` for (case, actor) → **no access**, overriding everything.
-2. Applicant access: `applicant_user_id = actor`, or active membership in `applicant_org_id`, or active `case_representatives` row. Projection: `Applicant` (no internal notes, no staff-visibility events/documents/comments).
-3. `confidential = 1` cases: only `complaints_officer`, active assignees, and managers (unless denied by rule 1).
-4. Otherwise staff per table above. Field workers get `TaskOnly`.
+2. Applicant access (projection `Applicant`: no internal notes, no staff-visibility events/documents/comments):
+   - personal case (`applicant_org_id IS NULL`): `applicant_user_id = actor`;
+   - organisation case (`applicant_org_id` set): active membership in that organisation — the submitting employee loses access when their membership is revoked;
+   - any case: an active `case_representatives` row for the actor.
+3. `confidential = 1` cases: staff access only for holders of `complaints_officer` or `manager` (unless denied by rule 1). Nobody else, assignment or not.
+4. Otherwise staff per table above (`finance` gets the full staff read view; only money actions are allowed to them). Field workers get `TaskOnly` (task endpoints only). `sysadmin` alone → none.
 `authz::case_scope_sql(actor)` returns a SQL predicate over alias `c` implementing **the same rules** for listings, search, counts, dashboard drill-downs and exports. Tests assert both functions agree.
 
 Decision authority: `decision_authorities` rows, granted by a manager to someone else; `sysadmin` cannot grant or hold it implicitly.
@@ -140,40 +149,68 @@ Decision authority: `decision_authorities` rows, granted by a manager to someone
     { "key": "payment",  "kind": "payment",  "role": "finance", "label": "Fees and bond paid",
       "applicant_label": "Payment required: hire fee and bond." },
     { "key": "confirm",  "kind": "module",   "role": "intake",  "label": "Confirm booking",
+      "handler": "operations.booking_confirmed",
       "applicant_label": "Payment received — confirming your booking." },
     { "key": "prep",     "kind": "task",     "role": "field_worker", "task_kind": "venue_prep",
       "label": "Prepare hall", "applicant_label": "Your booking is confirmed." },
     { "key": "inspect",  "kind": "task",     "role": "field_worker", "task_kind": "venue_inspection",
       "label": "Post-event inspection", "applicant_label": "Event finished — hall inspection." },
     { "key": "bond",     "kind": "module",   "role": "finance", "label": "Bond decision and refund",
+      "handler": "finance.deposits_settled",
       "applicant_label": "We are processing your bond." },
     { "key": "done",     "kind": "complete", "label": "Closed", "applicant_label": "Hire completed." }
   ]},
   "deadlines": [
     { "kind": "completeness", "label": "Initial check", "days": 3, "basis": "business",
-      "starts": "submitted", "stops": "step:payment", "pausable": false },
-    { "kind": "decision", "label": "Decision", "days": 20, "basis": "business",
-      "starts": "step:assessment", "stops": "decision_issued", "pausable": true, "max_pause_days": 30 }
+      "starts": "submitted", "stops": "step:payment", "pausable": false }
   ],
-  "pricing": [ { "item": "PLANNING_CERT", "quantity": 1 } ],
-  "decision_types": ["planning_certificate"]
+  "pricing": []          // venue fees come from the chosen bookable unit via hooks::pricing_lines
 }
 ```
+A planning-certificate style service instead uses `"pricing": [{ "item": "PLANNING_CERT", "quantity": 1 }]` and a step
+`{ "key": "decision", "kind": "decision", "role": "specialist", "decision_types": ["planning_certificate"], … }`.
+Steps may set `"optional": true`; staff holding the step role may skip such a step with a recorded reason (event + audit).
+When a guard for a `payment`, `task` or `module` step becomes satisfied by a background event (webhook, task completion, refund confirmation), the owning module calls `cases::workflow::try_auto_advance(tx, case_id)`, which advances only if the current step's guard passes.
 
-Field types: `text`, `textarea`, `number`, `date`, `time`, `email`, `phone`, `select`, `multiselect`, `checkbox`, `property_ref` (Portion/Lot reference), `location` (map point + description), `booking_slot` (operations), `equipment_request` (operations). Conditional display: `show_if {field, equals}`. **No arbitrary expressions or code in definitions.**
+Field types: `text`, `textarea`, `number`, `date`, `time`, `email`, `phone`, `select`, `multiselect`, `checkbox`, `property_ref` (Portion/Lot reference), `location` (map point + description), `booking_slot` (operations), `equipment_request` (operations), `decision_ref` (documents). Conditional display: `show_if {field, equals}`; `required` applies only while the field is shown, and hidden fields are dropped from submitted answers (client and server). **No arbitrary expressions or code in definitions.**
+
+Canonical answer values (identical in renderer, validator and hooks):
+
+| type | JSON value |
+|---|---|
+| `text`/`textarea`/`email`/`phone`/`property_ref` | string (`property_ref` e.g. `"Portion 44h, Taylors Road"`) |
+| `number` | number; `checkbox` boolean; `select` string; `multiselect` string[] |
+| `date` | `"YYYY-MM-DD"` (Norfolk local); `time` `"HH:MM"` |
+| `booking_slot` | `{ "unit_code": "rawson-main", "start_at": "<RFC3339 UTC>", "end_at": "<RFC3339 UTC>", "attendees": 80 }` |
+| `equipment_request` | `{ "description": "...", "requested_hours": 4, "preferred_date": "YYYY-MM-DD", "site_text": "..." }` |
+| `location` | `{ "lat": -29.04, "lng": 167.95, "description": "..." }` |
+| `decision_ref` | `{ "decision_id": 12 }` |
 
 Workflow step kinds and their guards (checked by the workflow engine when staff press *Advance*):
 
 | kind | guard to leave the step |
 |---|---|
 | `review` | staff with the step role decides (advance / request info / refuse) |
-| `payment` | `finance::api::case_settled(tx, case_id)` — every issued invoice line fully allocated with confirmed money |
-| `decision` | `documents::api::issued_decisions(tx, case_id)` contains every `decision_types` entry required by the step (`step.decision_type`); a refusal routes the case to `refused` |
-| `task` | all tasks created for this step are `done` (task created on entry via `operations::api::create_step_task`) |
-| `module` | `hooks::step_guard(module, step_key)` returns no blocking reason |
+| `payment` | `finance::api::case_settled(tx, case_id)` (see Settlement in §3) |
+| `decision` | `documents::api::issued_decisions(tx, case_id)` contains an issued decision for **every** type in the step's `decision_types: string[]`; any refusal among them routes the case to `refused` |
+| `task` | all tasks of the current `workflow_step_runs` row are `done` (created on entry via `operations::api::create_step_task`) |
+| `module` | `hooks::step_guard` dispatches on the step's required `handler` (registry below) — never on the step key |
 | `complete` | terminal; case → `completed` |
 
 Entering a step calls `hooks::on_step_entered` (e.g. finance issues the invoice on entering `payment` using `hooks::pricing_lines`).
+
+Module step handlers (validated at publish time; unknown handler = invalid definition):
+
+| handler | owner | passes when |
+|---|---|---|
+| `operations.booking_confirmed` | operations | the case's booking is `confirmed` |
+| `operations.equipment_scheduled` | operations | equipment, operator and time assigned |
+| `operations.usage_invoiced` | operations | actual usage approved and final invoice issued |
+| `finance.deposits_settled` | finance | `finance::api::deposits_settled` |
+| `documents.exhibition_closed` | documents | the case's exhibition is closed |
+| `documents.letter_issued:road_response` / `documents.letter_issued:complaint_response` | documents | `letter_issued(case, type)` |
+
+Deadline arithmetic (persisted in `deadlines.policy_json`): the trigger's local date is day 0 (start day excluded); day N is the Nth business day (or calendar day) after it; due at **17:00 Pacific/Norfolk** on day N; a due date falling on a non-business day under a business basis cannot happen by construction; a calendar-basis due date on a weekend/holiday rolls forward to the next business day. Pauses: `max_pause_days` counts **calendar** days cumulatively; on resume the due date moves forward by the number of business days (business basis) or calendar days (calendar basis) between the pause start date (exclusive) and the resume date (inclusive).
 
 Every submitted case stores the full definition snapshot (`submissions.definition_snapshot_json`); later edits to the service never change existing cases.
 
@@ -194,37 +231,54 @@ cases::core::reindex_search(tx, case_id) -> AppResult<()>
 audit::record(tx, actor: Option<i64>, action, entity_type, entity_id, details: Value) -> AppResult<()>
 notify::send(tx, Notice { user_id, email, phone, case_id, subject, body, link }) -> AppResult<()>
 jobs::enqueue(tx, kind, payload: Value, idempotency_key: Option<String>, run_after) -> AppResult<()>
-storage::put(state, bytes, original_name, actor) -> AppResult<BlobRow>   // validates
+storage::stage(state, bytes, original_name, allow: AllowList) -> AppResult<Staged>   // validate + write file; no DB
+storage::register(tx, Staged, actor) -> AppResult<BlobRow>                       // inside caller's write tx
+storage::put(state, bytes, original_name, allow, actor) -> AppResult<BlobRow>    // stage + register, own tx
 storage::read(state, blob_id) -> AppResult<(BlobRow, Vec<u8>)>
+storage::gc(state) -> AppResult<u64>                                           // delete unreferenced blob files
 calendar::add_business_days(tx, start_local_date, n) -> AppResult<NaiveDate>
 pdf::simple_document(title, meta: &[(&str, String)], sections: &[(&str, String)]) -> Vec<u8>
 
 // services (cases workflow)
 cases::workflow::advance(tx, &Actor, case_id, expected_revision, note) -> AppResult<CaseRow>
-cases::workflow::close(tx, &Actor, case_id, outcome, reason) -> AppResult<()>
+cases::workflow::try_auto_advance(tx, case_id) -> AppResult<()>          // system advance if current step guard passes
+cases::workflow::close(tx, &Actor, case_id, outcome, reason) -> AppResult<()>  // calls records::api::on_case_closed
+cases::messages::post_staff_message(tx, &Actor, case_id, body, document_version_id: Option<i64>, requires_response: bool) -> AppResult<i64>
 deadlines::api::pause_for_applicant(tx, case_id, message_id, reason) -> AppResult<()>
 deadlines::api::resume(tx, case_id, why) -> AppResult<()>
+deadlines::api::on_trigger(tx, case_id, trigger: &str) -> AppResult<()>   // "submitted", "step:<key>", "decision_issued", "closed"
 
 // documents
-documents::api::attach_generated(tx, case_id, category, title, visibility, pdf_bytes, actor) -> AppResult<DocumentId>
+documents::api::attach_generated(tx, &AppState, case_id, category, title, visibility, pdf_bytes, actor) -> AppResult<(DocumentId, DocumentVersionId)>
 documents::api::issued_decisions(tx, case_id) -> AppResult<Vec<DecisionSummary>>
+documents::api::issue_letter(tx, &AppState, &Actor, case_id, letter_type /* complaint_response | road_response */, title, body) -> AppResult<DocumentId>
+documents::api::letter_issued(tx, case_id, letter_type) -> AppResult<bool>
 
 // operations
-operations::api::create_step_task(tx, &CaseRow, &StepDef, actor) -> AppResult<i64>
-operations::api::step_tasks_done(tx, case_id, step_key) -> AppResult<bool>
+operations::api::create_step_task(tx, &CaseRow, &StepDef, step_run_id, actor) -> AppResult<i64>
+operations::api::step_tasks_done(tx, case_id, step_run_id) -> AppResult<bool>
 
 // finance
-finance::api::quote(tx, item_code, quantity_milli, pricing_date) -> AppResult<QuoteLine>
-finance::api::issue_invoice(tx, &Actor, case_id, kind, lines: Vec<QuoteLine>, basis_note) -> AppResult<i64>
+finance::api::quote(tx, item_code, quantity_milli, quantity_minutes: Option<i64>, pricing_date) -> AppResult<QuoteLine>
+finance::api::issue_invoice(tx, &AppState, &Actor, case_id, kind, pricing_date, lines: Vec<QuoteLine>, basis_note) -> AppResult<i64>
+finance::api::ensure_invoice_for_step(tx, &AppState, &Actor, &CaseRow) -> AppResult<Option<i64>>  // on entering a payment step; uses hooks::pricing_lines; no-op if an unpaid invoice already exists
+finance::api::definition_pricing_lines(tx, &CaseRow) -> AppResult<Vec<QuoteLine>>      // generic services: definition.pricing
+finance::api::reprice_case(tx, &AppState, &Actor, case_id, pricing_date, new_lines: Vec<QuoteLine>, note) -> AppResult<()>  // reschedule: credit note + new invoice for the difference
 finance::api::case_settled(tx, case_id) -> AppResult<bool>
+finance::api::deposits_settled(tx, case_id) -> AppResult<bool>   // every deposit has a decision and its refund is completed (or fully retained)
 finance::api::case_money_summary(tx, case_id) -> AppResult<MoneySummary>
 
-// hooks.rs dispatch (module = services.module)
+// records
+records::api::on_case_closed(tx, &CaseRow) -> AppResult<()>         // retention_until + outbound record delivery
+records::api::on_decision_issued(tx, case_id, decision_id) -> AppResult<()>
+records::api::on_payment_confirmed(tx, payment_id) -> AppResult<()>
+
+// hooks.rs dispatch — by the case's frozen `cases.module`, and for module steps by `step.handler`
 hooks::validate_field(tx, module, &FieldDef, &Value) -> AppResult<Option<String>>
-hooks::on_submit(tx, &Actor, &CaseRow, answers: &Value) -> AppResult<()>
-hooks::on_step_entered(tx, &Actor, &CaseRow, &StepDef) -> AppResult<()>
-hooks::step_guard(tx, &CaseRow, &StepDef) -> AppResult<Option<String>>   // Some(reason) blocks
-hooks::pricing_lines(tx, &CaseRow) -> AppResult<Vec<QuoteLine>>
+hooks::on_submit(tx, &AppState, &Actor, &CaseRow, answers: &Value) -> AppResult<()>
+hooks::on_step_entered(tx, &AppState, &Actor, &CaseRow, &StepDef, step_run_id) -> AppResult<()>
+hooks::step_guard(tx, &CaseRow, &StepDef) -> AppResult<Option<String>>   // Some(reason) blocks; module steps dispatch on handler
+hooks::pricing_lines(tx, &CaseRow) -> AppResult<(NaiveDate /* pricing_date */, Vec<QuoteLine>)>
 ```
 
 ## 7. Frontend (`web/src/`)
