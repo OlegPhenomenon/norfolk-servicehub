@@ -6,6 +6,7 @@ import type { ServiceModule } from './api/types'
 import type { CaseDetail } from './features/cases/types'
 import { ResidentCasePage, StaffCasePage } from './features/cases/CasePage'
 import { casePanels, panelsFor, publicNav } from './registry'
+import { ToastProvider } from './ui'
 
 // Leaflet requires a browser at import time; maps are outside this panel mounting audit.
 vi.mock('./features/operations/IslandMap', () => ({ IslandMap: () => null }))
@@ -39,12 +40,14 @@ describe('cross-feature case workspaces', () => {
         for (const panel of panels) {
           const markup = renderToString(
             <QueryClientProvider client={client}>
-              <MemoryRouter initialEntries={[`/${area}/cases/42?tab=${panel.key}`]}>
-                <Routes><Route path={`/${area}/cases/:id`} element={audience === 'staff' ? <StaffCasePage /> : <ResidentCasePage />} /></Routes>
-              </MemoryRouter>
+              <ToastProvider>
+                <MemoryRouter initialEntries={[`/${area}/cases/42?tab=${panel.key}`]}>
+                  <Routes><Route path={`/${area}/cases/:id`} element={audience === 'staff' ? <StaffCasePage /> : <ResidentCasePage />} /></Routes>
+                </MemoryRouter>
+              </ToastProvider>
             </QueryClientProvider>,
           )
-          expect(markup).toContain(`panel-${panel.key}`)
+          expect(markup.match(/role="tabpanel" id="([^"]+)"/)?.[1]).toContain(`panel-${panel.key}`)
           expect(markup).toContain(panel.label)
         }
         client.clear()

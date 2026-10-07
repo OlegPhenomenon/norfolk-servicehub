@@ -8,32 +8,49 @@ PORT="${SMOKE_PORT:-$(python3 -c 'import socket; s=socket.socket(); s.bind(("127
 export DATA_DIR PORT DEMO_MODE=true COOKIE_SECURE=false DEMO_RESET_HOURS=0
 export WEB_DIST="$ROOT/web/dist" PUBLIC_BASE_URL="http://127.0.0.1:$PORT" INTERNAL_BASE_URL="http://127.0.0.1:$PORT"
 export SEED_DATA_DIR="$ROOT/server/seed-data" RUST_LOG=warn
+export SMOKE_CLOCK_FILE="$DATA_DIR/clock-offset"
+printf '0\n' >"$SMOKE_CLOCK_FILE"
 PID=""
 cleanup() { if [[ -n "$PID" ]]; then kill "$PID" 2>/dev/null || true; wait "$PID" 2>/dev/null || true; fi; if [[ "$KEEP" == false ]]; then rm -rf "$DATA_DIR"; fi; }
 trap cleanup EXIT
 (cd "$ROOT/web" && npm run build) >"$DATA_DIR/web-build.log" 2>&1
 (cd "$ROOT/server" && cargo run --quiet -- seed-demo) >"$DATA_DIR/seed.log" 2>&1 || { cat "$DATA_DIR/seed.log"; exit 1; }
-(cd "$ROOT/server" && exec cargo run --quiet -- serve) >"$DATA_DIR/server.log" 2>&1 &
+seed_counts() {
+  python3 - <<'COUNTS'
+import json, os, sqlite3
+with sqlite3.connect(os.environ['DATA_DIR']+'/servicehub.db') as db:
+    names=[n for (n,) in db.execute("SELECT name FROM pragma_table_list WHERE schema=? AND type IN (?,?) AND name NOT LIKE ?",('main','table','virtual','sqlite_%'))]
+    print(json.dumps({n:db.execute('SELECT COUNT(*) FROM "'+n+'"').fetchone()[0] for n in names},sort_keys=True))
+COUNTS
+}
+# The CLI resets twice; compare all base table counts rather than assuming it is repeatable.
+seed_counts >"$DATA_DIR/seed-counts-first.json"
+(cd "$ROOT/server" && cargo run --quiet -- seed-demo) >>"$DATA_DIR/seed.log" 2>&1 || { cat "$DATA_DIR/seed.log"; exit 1; }
+seed_counts >"$DATA_DIR/seed-counts-second.json"
+cmp "$DATA_DIR/seed-counts-first.json" "$DATA_DIR/seed-counts-second.json"
+(cd "$ROOT/server" && cargo build --quiet --example smoke-server) >"$DATA_DIR/server-build.log" 2>&1 || { cat "$DATA_DIR/server-build.log"; exit 1; }
+(cd "$ROOT/server" && exec target/debug/examples/smoke-server) >"$DATA_DIR/server.log" 2>&1 &
 PID=$!
 for _ in $(seq 1 100); do
   if curl -fsS "$PUBLIC_BASE_URL/api/health" >/dev/null 2>&1; then break; fi
   kill -0 "$PID" 2>/dev/null || { cat "$DATA_DIR/server.log"; exit 1; }
   sleep 0.1
 done
-python3 - <<'PY'
-import json, os, pathlib, subprocess, time, uuid
+python3 -u - <<'PY'
+import collections, concurrent.futures, datetime, html.parser, json, os, pathlib, sqlite3, subprocess, threading, time, uuid
+from zoneinfo import ZoneInfo
 base=os.environ['PUBLIC_BASE_URL']; data=pathlib.Path(os.environ['DATA_DIR'])
 tokens={}; identities={}
 def req(persona, method, path, body=None, status=200, fields=None, idempotency=None, binary=False):
-    jar=str(data/(persona+'.cookies')); out=data/'response'
+    jar=str(data/(persona+'.cookies')); out=data/('response-'+str(uuid.uuid4()))
     cmd=['curl','--silent','--show-error','--max-time','20','-b',jar,'-c',jar,'-X',method,'-o',str(out),'-w','%{http_code}',base+path]
     if method!='GET': cmd+=['-H','X-CSRF-Token: '+tokens.get(persona,'')]
     if idempotency: cmd+=['-H','Idempotency-Key: '+idempotency]
     if fields:
         for k,v in fields: cmd+=['-F',k+'='+str(v)]
     elif method!='GET': cmd+=['-H','Content-Type: application/json','--data',json.dumps(body or {})]
-    actual=int(subprocess.check_output(cmd,text=True)); raw=out.read_bytes()
-    if actual!=status: raise AssertionError(f'{persona}: {method} {path}: expected {status}, got {actual}: {raw.decode(errors="replace")}')
+    actual=int(subprocess.check_output(cmd,text=True)); raw=out.read_bytes(); out.unlink()
+    if actual not in (status if isinstance(status,tuple) else (status,)): raise AssertionError(f'{persona}: {method} {path}: expected {status}, got {actual}: {raw.decode(errors="replace")}')
     if binary: return raw
     return json.loads(raw) if raw else None
 
@@ -58,9 +75,9 @@ for i,obj in enumerate(objects,1): offsets.append(len(pdf)); pdf+=f'{i} 0 obj\n'
 xref=len(pdf); pdf+=b'xref\n0 5\n0000000000 65535 f \n'+b''.join(f'{o:010} 00000 n \n'.encode() for o in offsets[1:])+f'trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n'.encode()
 fixture=data/'drawing.pdf'; fixture.write_bytes(pdf)
 
-def submit(slug, extra=None, org=None):
-    login('alexey')
-    definition=req('alexey','GET','/api/public/services/'+slug)['definition']; answers={}
+def submit(slug, extra=None, org=None, persona='alexey'):
+    login(persona)
+    definition=req(persona,'GET','/api/public/services/'+slug)['definition']; answers={}
     for f in definition['fields']:
         condition=f.get('show_if')
         if condition and answers.get(condition['field'])!=condition['equals']: continue
@@ -73,27 +90,242 @@ def submit(slug, extra=None, org=None):
         elif kind=='location': value={'lat':-29.04,'lng':167.95,'description':'Integration smoke: Taylors Road pothole'}
         elif kind=='date': value='2026-11-20'
         elif kind=='email': value='alexey@example.invalid'
-        else: value={'applicant_name':'Alexey Turner','postal_address':'Fictional 44 Taylors Road','property_ref':'Portion DEMO-44, Taylors Road','complaint':'Feedback about Olga; private integration smoke'}.get(key,'Integration smoke fixture')
+        else: value={'applicant_name':('Ben Carter' if persona=='ben' else 'Alexey Turner'),'postal_address':'Fictional 44 Taylors Road','property_ref':'Portion DEMO-44, Taylors Road','complaint':'Feedback about Olga; private integration smoke'}.get(key,'Integration smoke fixture')
         answers[key]=value
     answers.update(extra or {})
-    c=req('alexey','POST',f'/api/services/{slug}/drafts',{'applicant_org_id':org} if org else {})['id']
-    req('alexey','PUT',f'/api/cases/{c}/draft',{'answers':answers})
+    c=req(persona,'POST',f'/api/services/{slug}/drafts',{'applicant_org_id':org} if org else {})['id']
+    req(persona,'PUT',f'/api/cases/{c}/draft',{'answers':answers})
     uploads={}
     for d in definition['documents']:
         if d.get('required'):
-            uploads[d['key']]=req('alexey','POST',f'/api/cases/{c}/documents',fields=[('file','@'+str(fixture)),('requirement_key',d['key']),('title',d['label'])])
-    key=str(uuid.uuid4()); submitted=req('alexey','POST',f'/api/cases/{c}/submit',idempotency=key)
-    assert req('alexey','POST',f'/api/cases/{c}/submit',idempotency=key)==submitted
+            uploads[d['key']]=req(persona,'POST',f'/api/cases/{c}/documents',fields=[('file','@'+str(fixture)),('requirement_key',d['key']),('title',d['label'])])
+    key=str(uuid.uuid4()); submitted=req(persona,'POST',f'/api/cases/{c}/submit',idempotency=key)
+    assert req(persona,'POST',f'/api/cases/{c}/submit',idempotency=key)==submitted
     return c,uploads
 
+start_day=datetime.datetime.now(ZoneInfo('Pacific/Norfolk')).date()
+def local_day(day): return start_day+datetime.timedelta(days=day)
+def instant(day,clock):
+    value=datetime.datetime.combine(local_day(day),datetime.time.fromisoformat(clock),ZoneInfo('Pacific/Norfolk'))
+    return value.astimezone(datetime.timezone.utc).isoformat().replace('+00:00','Z')
+def hall_slot(unit,day):
+    return {'event_name':'Fictional family celebration','slot':{'unit_code':unit,'start_at':instant(day,'10:00'),'end_at':instant(day,'16:00'),'attendees':40},'alcohol':'no'}
+def money(p,c): return req(p,'GET',f'/api/cases/{c}/money')
+def until(predicate,label,seconds=30):
+    deadline=time.monotonic()+seconds
+    while time.monotonic()<deadline:
+        if predicate(): return
+        time.sleep(.15)
+    raise AssertionError('Timed out waiting for '+label)
+def sql(query,params=()):
+    with sqlite3.connect(f'file:{data}/servicehub.db?mode=ro',uri=True) as db:
+        return db.execute(query,params).fetchall()
+def travel(days):
+    tmp=data/'next-clock'; tmp.write_text(str(days*86400)); tmp.replace(os.environ['SMOKE_CLOCK_FILE'])
+    personas=list(tokens); tokens.clear()
+    for p in personas: login(p)
+class Forms(html.parser.HTMLParser):
+    def __init__(self): super().__init__(); self.actions=[]
+    def handle_starttag(self,tag,attrs):
+        attrs=dict(attrs)
+        if tag=='form' and attrs.get('method','').lower()=='post': self.actions.append(attrs['action'])
+def pay_invoice(p,c,duplicate=False):
+    invoice=next(i for i in money(p,c)['invoices'] if i['kind']=='invoice' and i['outstanding_cents']>0)
+    checkout=req(p,'POST',f'/api/cases/{c}/checkout',{'invoice_id':invoice['id']})['checkout_url']
+    jar=str(data/(p+'.cookies'))
+    page=subprocess.check_output(['curl','-fsSL','--max-time','20','-b',jar,checkout],text=True)
+    forms=Forms(); forms.feed(page)
+    route=next(a for a in forms.actions if a.endswith('/duplicate' if duplicate else '/success'))
+    before=len(money(p,c)['payments'])
+    returned=subprocess.check_output(['curl','-fsSL','--max-time','20','-b',jar,'--data','',base+route],text=True)
+    assert '<html' in returned.lower()
+    assert len(money(p,c)['payments'])==before, 'Redirect must not confirm payment'
+    until(lambda: money(p,c)['summary']['settled'],'payment webhook')
+    assert len(money(p,c)['payments'])==before+1
+    if duplicate:
+        session=checkout.rsplit('/',1)[1]
+        until(lambda: sql("SELECT attempts FROM mock_pay_webhook_attempts WHERE json_extract(payload_json,'$.session_id')=?",(session,))[0][0]>=2,'duplicate webhook delivery')
+        assert len(money(p,c)['payments'])==before+1
+        assert sql('SELECT COUNT(*) FROM payments WHERE external_id=(SELECT payment_id FROM mock_pay_sessions WHERE session_id=?)',(session,))[0][0]==1
+def complete_task(c,kind):
+    task=next(t for t in req('olga','GET',f'/api/cases/{c}/tasks') if t['kind']==kind)
+    tid=task['id']
+    assert task['assigned_to']==identities['jake']
+    def update(kind,body):
+        t=req('jake','GET',f'/api/field/tasks/{tid}')
+        return req('jake','POST',f'/api/field/tasks/{tid}/updates',{'client_command_id':str(uuid.uuid4()),'expected_revision':t['revision'],'kind':kind,'body':body})
+    for item in task['checklist']: update('checklist',json.dumps({'key':item['key'],'done':True}))
+    update('result','Fictional work complete. Extra cleaning recorded at inspection.'); update('status','done')
+def issue_decision(c,kind,outcome='approved'):
+    template=next(t for t in req('priya','GET','/api/decision-templates') if t['decision_type']==kind)
+    did=req('priya','POST',f'/api/cases/{c}/decisions',{'decision_type':kind,'outcome':outcome,'reasons':'Fictional specialist assessment completed.','conditions':'Demo only.','template_id':template['id'],'expected_revision':revision('priya',c)})['id']
+    for command in ['submit','issue']:
+        req('priya','POST',f'/api/cases/{c}/decisions/{did}/{command}',{'expected_revision':revision('priya',c)})
+def trial_balance(c=None):
+    journal=req('tom','GET','/api/finance/ledger'+(f'?case_id={c}' if c else ''))
+    assert journal['entries'] and sum(r['balance_cents'] for r in journal['trial_balance'])==0
+    totals=collections.defaultdict(int)
+    for row in journal['entries']: totals[row['id']]+=row['debit_cents']-row['credit_cents']
+    assert all(value==0 for value in totals.values())
+def closed_delivery(c):
+    until(lambda: any(x['kind']=='record.case_closed' and x['status']=='accepted' for x in req('olga','GET',f'/api/cases/{c}/integrations')),'closed case records delivery')
+
 try:
-    # Planning reaches the finance boundary; the stub's invoice error rolls intake back atomically.
+    print('ok   seed-demo twice: base table counts identical')
+    login('olga'); login('tom'); login('jake'); login('ben')
+    rates={'EQUIP_EXCAVATOR_HOUR':('Bobcat',13500,'EXCAVATOR'),
+           'EQUIP_BACKHOE_HOUR':('Volvo Loader',23000,'BACKHOE'),
+           'EQUIP_TIPPER_HOUR':('Hino Truck',11000,'TIPPER'),
+           'EQUIP_ROLLER_HOUR':('Cat Steel Drum Roller 8T',21100,'ROLLER')}
+    prices=req('tom','GET','/api/admin/prices')['items']
+    for code,(name,rate,_) in rates.items():
+        item=next(x for x in prices if x['code']==code)
+        assert name in item['name'] and item['versions'][0]['amount_cents']==rate
+    print('ok   Tom can manage prices; all four fleet codes/names/rates agree')
+
+    # Build the two awaiting-payment requests named in the unchanged seeded CSV via HTTP.
+    first,_=submit('rawson-hall-hire',hall_slot('rawson-main',10))
+    second,_=submit('rawson-hall-hire',hall_slot('rawson-main',11),persona='ben')
+    assert detail('olga',first)['case']['number']=='NSH-2026-000001'
+    assert detail('olga',second)['case']['number']=='NSH-2026-000002'
+    action('olga',first,'advance'); action('olga',second,'advance')
+    csv=pathlib.Path(os.environ['SEED_DATA_DIR'],'statements/demo-statement.csv').read_text()
+    report=req('tom','POST','/api/finance/statements',{'filename':'demo-statement.csv','csv':csv})
+    assert collections.Counter(r['status'] for r in report['rows'])=={'matched':1,'unmatched':2,'duplicate':1}, report
+    assert detail('alexey',first)['case']['current_step']=='confirm'
+    partial=next(r for r in report['rows'] if r['bank_txn_id']=='DEMO-BANK-002')
+    assert partial['suggested_case_id']==second
+    req('tom','POST',f'/api/finance/statement-rows/{partial["id"]}/match',{'case_id':second,'expected_revision':revision('tom',second)},status=204)
+    assert money('ben',second)['summary']['outstanding_cents']==31500
+    assert detail('ben',second)['case']['current_step']=='payment'
+    req('tom','POST','/api/finance/statements',{'filename':'renamed-same-file.csv','csv':csv},status=409)
+    assert len(req('tom','GET','/api/finance/unmatched')['rows'])==1
+    trial_balance()
+    print('ok   seeded CSV: 1 matched / 2 unmatched / 1 duplicate; partial matched manually; unclear transfer stays in suspense; same file → 409')
+
     cert,_=submit('planning-certificate',{'sections':'Zoning and heritage'})
-    login('olga'); before=revision('olga',cert)
-    action('olga',cert,'advance',status=500)
-    assert revision('olga',cert)==before and detail('alexey',cert)['case']['current_step']=='intake'
-    print('ok   resident planning certificate submitted; intake advance attempted; atomic rollback at invoice stub')
-    print('SKIP (finance pending): planning payment, certificate preparation and issuance')
+    action('olga',cert,'advance')
+    assert detail('alexey',cert)['case']['current_step']=='payment'
+    action('tom',cert,'advance',status=409)
+    pay_invoice('alexey',cert)
+    assert detail('alexey',cert)['case']['current_step']=='preparation'
+    login('priya'); action('priya',cert,'advance')
+    issue_decision(cert,'planning_certificate')
+    issued=req('alexey','GET',f'/api/cases/{cert}/decisions')['items'][0]
+    assert req('alexey','GET',f'/api/document-versions/{issued["output_document_version_id"]}/download',binary=True).startswith(b'%PDF-')
+    assert detail('alexey',cert)['case']['status']=='completed'
+    closed_delivery(cert)
+    until(lambda: {'payment.receipt','document.decision','record.case_closed'}.issubset({x['kind'] for x in req('olga','GET',f'/api/cases/{cert}/integrations') if x['status']=='accepted'}),'certificate/receipt/closure deliveries')
+    print('ok   planning certificate → unpaid advance blocked → DemoPay → specialist → issued certificate PDF → completed → records delivered')
+    refused,_=submit('planning-certificate',{'sections':'Fictional refusal check'})
+    action('olga',refused,'advance'); pay_invoice('alexey',refused); action('priya',refused,'advance')
+    issue_decision(refused,'planning_certificate',outcome='refused')
+    assert detail('alexey',refused)['case']['status']=='refused'
+    print('ok   paid certificate with specialist refusal closes as refused, with issued decision retained')
+
+    hall,_=submit('rawson-hall-hire',hall_slot('rawson-whole',21))
+    notifications=req('alexey','GET','/api/notifications')['items']
+    assert any(n['case_id']==hall and 'Booking not confirmed yet' in n['body'] for n in notifications)
+    assert any('not yet confirmed' in e['summary'] for e in detail('alexey',hall)['timeline'])
+    action('olga',hall,'advance')
+    charges=money('alexey',hall); invoice=next(i for i in charges['invoices'] if i['kind']=='invoice')
+    assert [(l['kind'],l['amount_cents']) for l in invoice['lines']]==[('fee',15500),('deposit',25000)]
+    pay_invoice('alexey',hall,duplicate=True)
+    assert detail('alexey',hall)['case']['current_step']=='confirm'
+    assert len(money('alexey',hall)['payments'])==1
+    booking=req('olga','GET',f'/api/cases/{hall}/booking')['booking']
+    req('olga','POST',f'/api/cases/{hall}/booking/confirm',{'expected_revision':booking['revision']})
+    original=req('alexey','GET',f'/api/cases/{hall}/booking')['booking']
+    old_pdf=req('alexey','GET',f'/api/cases/{hall}/booking/confirmation/{original["confirmation_version_id"]}',binary=True)
+    assert old_pdf.startswith(b'%PDF-') and detail('alexey',hall)['case']['current_step']=='prep'
+    move=hall_slot('rawson-main',22)['slot']
+    move={'unit_code':move['unit_code'],'start':move['start_at'],'end':move['end_at'],
+          'reason':'Family celebration moved to the next day; Main Hall is sufficient.', 'expected_revision':original['revision']}
+    preview=req('olga','POST',f'/api/cases/{hall}/booking/reschedule/preview',move)
+    assert preview['available'] and preview['old_lines'][0]['amount_cents']==15500 and preview['new_lines'][0]['amount_cents']==11500
+    assert req('olga','POST',f'/api/cases/{hall}/booking/reschedule',move)['fees_changed']
+    history=req('alexey','GET',f'/api/cases/{hall}/booking')
+    assert any(h['revision']==original['revision'] and h['start_at']==original['start_at'] for h in history['history'])
+    assert req('alexey','GET',f'/api/cases/{hall}/booking/confirmation/{original["confirmation_version_id"]}',binary=True)==old_pdf
+    assert req('alexey','GET',f'/api/cases/{hall}/booking/confirmation/{history["booking"]["confirmation_version_id"]}',binary=True).startswith(b'%PDF-')
+    charges=money('alexey',hall)
+    assert charges['summary']['settled'] and charges['customer_credit_cents']==4000
+    assert len([l for i in charges['invoices'] if i['kind']=='invoice' for l in i['lines'] if l['kind']=='deposit'])==1
+    assert any(i['kind']=='credit_note' for i in charges['invoices'])
+    complete_task(hall,'venue_prep')
+    assert detail('alexey',hall)['case']['current_step']=='inspect'
+    print('ok   Alexey: unconfirmed submission → fee + separate bond → duplicate DemoPay delivery produces one payment → Olga confirmation PDF → reschedule/history/fee credit → Jake prep')
+
+    whole,_=submit('rawson-hall-hire',hall_slot('rawson-whole',23))
+    main,_=submit('rawson-hall-hire',hall_slot('rawson-main',23),persona='ben')
+    for c,p in [(whole,'alexey'),(main,'ben')]:
+        action('olga',c,'advance'); pay_invoice(p,c)
+    barrier=threading.Barrier(2)
+    def confirm(c):
+        booking=req('olga','GET',f'/api/cases/{c}/booking')['booking']
+        barrier.wait(timeout=10)
+        return req('olga','POST',f'/api/cases/{c}/booking/confirm',{'expected_revision':booking['revision']},status=(200,409))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        results=list(pool.map(confirm,[whole,main]))
+    statuses=[req('olga','GET',f'/api/cases/{c}/booking')['booking']['status'] for c in [whole,main]]
+    assert sorted(statuses)==['confirmed','requested'] and sum('error' in r and r['error']['code']=='conflict' for r in results)==1
+    print('ok   two residents, whole hall/Main Hall overlap, both paid: parallel confirmation → exactly one confirmed, one 409')
+
+    equipment=[]
+    for index,(code,(name,rate,resource)) in enumerate(rates.items()):
+        day=24+index
+        e,_=submit('equipment-hire',{'request':{'description':name,'requested_hours':4,'preferred_date':local_day(day).isoformat(),'site_text':'Fictional depot work site'}})
+        estimate=next(i for i in money('alexey',e)['invoices'] if i['kind']=='estimate')
+        assert estimate['total_cents']==4*rate and money('alexey',e)['summary']['outstanding_cents']==0
+        action('olga',e,'advance')
+        req('olga','POST',f'/api/cases/{e}/equipment/schedule',{'resource_code':resource,'operator_user_id':identities['jake'],'start':instant(day,'07:30'),'end':instant(day,'13:30'),'expected_revision':revision('olga',e)})
+        assert detail('olga',e)['case']['current_step']=='job'
+        equipment.append((e,day,rate))
+
+    # Only the test harness clock moves. No workflow/payment/booking rows are written by the script.
+    travel(29)
+    complete_task(hall,'venue_inspection')
+    assert detail('alexey',hall)['case']['current_step']=='bond'
+    charges=money('alexey',hall); assert charges['deposit_ready']
+    bond=next(l for i in charges['invoices'] if i['kind']=='invoice' for l in i['lines'] if l['kind']=='deposit')
+    decision={'invoice_line_id':bond['id'],'refund_cents':20000,'retain_items':[{'label':'Extra cleaning','cents':5000}],
+              'reason':'Extra cleaning after the family celebration.','expected_revision':revision('tom',hall)}
+    key=str(uuid.uuid4())
+    saved=req('tom','POST',f'/api/cases/{hall}/deposit-decision',decision,idempotency=key)
+    assert req('tom','POST',f'/api/cases/{hall}/deposit-decision',decision,idempotency=key)==saved
+    charges=money('alexey',hall)
+    assert charges['refunds'][0]['status']=='processing' and charges['refunds'][0]['method']=='provider'
+    assert charges['deposit_decisions'][0]['retain_items']==[{'label':'Extra cleaning','cents':5000}]
+    assert detail('alexey',hall)['case']['status']!='completed'
+    action('tom',hall,'advance',status=409)
+    until(lambda: money('alexey',hall)['refunds'][0]['status']=='completed','refund webhook')
+    assert detail('alexey',hall)['case']['status']=='completed'
+    assert money('alexey',hall)['summary']['deposits_held_cents']==0
+    trial_balance(hall)
+    closed_delivery(hall)
+    print('ok   Alexey: Jake inspection → Tom itemises $50 Extra cleaning / $200 refund → processing cannot close → DemoPay refund webhook → completed → records delivered; case ledger zero-sum')
+
+    for e,day,rate in equipment:
+        task=next(t for t in req('olga','GET',f'/api/cases/{e}/tasks') if t['kind']=='equipment_job')
+        usage=req('jake','POST',f'/api/field/tasks/{task["id"]}/usage',{'client_command_id':str(uuid.uuid4()),'started_at':instant(day,'07:30'),'ended_at':instant(day,'13:30'),'downtime_minutes':30,'expenses_cents':1234,'expenses_note':'Agreed transport expenses'})
+        assert usage['billable_minutes']==330
+        complete_task(e,'equipment_job')
+        assert detail('olga',e)['case']['current_step']=='usage'
+        approved=req('tom','POST',f'/api/cases/{e}/equipment/usage/{usage["usage_id"]}/approve')
+        assert req('tom','POST',f'/api/cases/{e}/equipment/usage/{usage["usage_id"]}/approve')['invoice_id']==approved['invoice_id']
+        assert detail('tom',e)['case']['current_step']=='payment'
+        invoices=[i for i in money('alexey',e)['invoices'] if i['kind']=='invoice']
+        assert len(invoices)==1 and invoices[0]['id']==approved['invoice_id']
+        final=invoices[0]
+        assert final['total_cents']==(330*rate+30)//60+1234
+        assert final['lines'][0]['quantity_minutes']==330
+        assert all(text in final['basis_note'] for text in ['Requested 4 h','actual 5 h 30 min','07:30','13:30','30 min downtime'])
+        assert req('alexey','GET',f'/api/document-versions/{final["document_version_id"]}/download',binary=True).startswith(b'%PDF-')
+        pay_invoice('alexey',e)
+        assert detail('alexey',e)['case']['status']=='completed'
+        closed_delivery(e)
+    trial_balance()
+    print('ok   all four plant rates: estimate 4 h → actual 07:30–13:30 / 30 min downtime → one final invoice 330 min × rate / 60 + $12.34 expenses → PDF/basis → paid → completed; global ledger zero-sum')
 
     building,docs=submit('development-application')
     action('olga',building,'advance'); login('priya')
@@ -188,6 +420,7 @@ try:
     duplicate=req('mark','POST','/api/admin/legacy-imports',{'filename':'integration-repeat.csv','csv':csv_text})
     assert duplicate['duplicates']==1
     print('ok   historical legacy import preserves Norfolk dates; replay is idempotent; repeat upload detects exact duplicate; S5 disposal succeeds')
+    trial_balance()
     req('mark','POST',f'/api/admin/users/{identities["alexey"]}/deactivate')
     assert req('alexey','GET','/api/me')['user'] is None
     req('alexey','GET',f'/api/cases/{building}',status=401)

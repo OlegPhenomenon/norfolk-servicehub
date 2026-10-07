@@ -24,7 +24,7 @@ use crate::web::{ClientIp, Json};
 /// Request body limit (uploads are capped at 10 MB by `storage`; multipart overhead fits in 12 MB).
 pub const BODY_LIMIT: usize = 12 * 1024 * 1024;
 
-const CSP: &str = "default-src 'self'; img-src 'self' data: blob: https://*.tile.openstreetmap.org; \
+const CSP: &str = "default-src 'self'; img-src 'self' data: blob: https://tile.openstreetmap.org; \
                    style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'";
 
 /// All module routers merged (no middleware). Useful for tests that need raw routing.

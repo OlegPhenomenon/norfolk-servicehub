@@ -22,6 +22,7 @@ import { DemoMailPage } from './pages/DemoMailPage'
 import { NotFoundPage, RouteErrorPage } from './pages/ErrorPages'
 import { HomePage } from './pages/HomePage'
 import { adminRoutes, publicRoutes, residentRoutes, staffRoutes } from './registry'
+import { LoadingState } from './ui'
 
 /** Area children: the platform overview page unless a feature provides an index route, then a 404 catch-all. */
 function areaChildren(featureRoutes: RouteObject[], Overview: () => React.JSX.Element): RouteObject[] {
@@ -37,6 +38,7 @@ function areaChildren(featureRoutes: RouteObject[], Overview: () => React.JSX.El
 export const routes: RouteObject[] = [
   {
     Component: Root,
+    hydrateFallbackElement: <LoadingState label="Loading page…" />,
     children: [
       {
         path: '/',
