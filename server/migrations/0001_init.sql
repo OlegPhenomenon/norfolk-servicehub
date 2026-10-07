@@ -738,7 +738,7 @@ CREATE TABLE equipment_usage (
 
 CREATE TABLE price_items (
     id              INTEGER PRIMARY KEY,
-    code            TEXT NOT NULL UNIQUE,                   -- 'HALL_MAIN_SESSION', 'HALL_BOND', 'PLANNING_CERT', 'EXCAVATOR_HOUR'
+    code            TEXT NOT NULL UNIQUE,                   -- 'HALL_MAIN_DAY', 'HALL_BOND', 'PLANNING_CERT', 'EXCAVATOR_HOUR'
     name            TEXT NOT NULL,
     unit            TEXT NOT NULL CHECK (unit IN ('each', 'hour', 'session', 'day')),
     kind            TEXT NOT NULL CHECK (kind IN ('fee', 'deposit')),
