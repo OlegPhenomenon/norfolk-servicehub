@@ -9,4 +9,4 @@ export interface Rect { page: number; x: number; y: number; w: number; h: number
 export interface Exhibition { id: number; case_id: number; title: string; summary: string; status: string; opens_at: string; closes_at: string; prepared_by: number; approved_by: number | null }
 export interface Item { id: number; title: string; source_document_version_id: number; redactions_json: string; published_blob_id: number | null }
 export interface ExhibitionDetail { exhibition: Exhibition; items: Item[]; revision: number }
-export interface PublicDetail { exhibition: Exhibition; items: { id: number; title: string; file_url: string }[] }
+export interface PublicDetail { exhibition: Exhibition; items: { id: number; title: string; file_url: string; preview_url: string }[] }

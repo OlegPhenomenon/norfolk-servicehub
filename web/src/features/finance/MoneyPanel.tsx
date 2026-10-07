@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useLocation } from 'react-router'
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
 import { hasRole, useMe } from '@/auth/useMe'
 import { Alert, Button, Card, DateTime, DescriptionList, Dialog, EmptyState, ErrorAlert, Money, QueryView, StatusPill, Table } from '@/ui'
@@ -10,6 +10,7 @@ import { DepositForm } from './DepositForm'
 import { LedgerTable } from './LedgerTable'
 import { CreditForm } from './CreditForm'
 export function MoneyPanel({ caseId }: { caseId: number }) {
+  const client = useQueryClient()
   const location = useLocation()
   const returned = new URLSearchParams(location.search).get('paid') === '1'
   const me = useMe().data
@@ -19,6 +20,12 @@ export function MoneyPanel({ caseId }: { caseId: number }) {
     const open = data?.checkout_sessions.some(s => s.status === 'open')
     return (returned && !data || open || data?.refunds.some(r => r.status === 'processing')) ? Math.min(1000 * 2 ** Math.min(query.state.dataUpdateCount, 5), 30000) : false
   } })
+  // Settlement webhooks can advance or close the case while this panel is polling.
+  // Refresh its status and workflow alongside confirmed money, without a page reload.
+  const settlement = q.data ? JSON.stringify([q.data.payments.map(p => p.id), q.data.refunds.map(r => [r.id, r.status])]) : null
+  useEffect(() => {
+    if (settlement !== null) void client.invalidateQueries({ queryKey: ['cases', 'detail', String(caseId)] })
+  }, [client, caseId, settlement])
   const [counter, setCounter] = useState<Invoice | null>(null)
   const [reverse, setReverse] = useState<Allocation | null>(null)
   const [deposit, setDeposit] = useState<{ lineId: number; paid: number } | null>(null)

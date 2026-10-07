@@ -180,12 +180,21 @@ export async function enqueue(
   changed()
 }
 let syncing: Promise<void> | null = null
+let syncAgain = false
 export function sync(user: number, simulateOffline: boolean): Promise<void> {
   if (simulateOffline || !navigator.onLine) return Promise.resolve()
-  if (syncing) return syncing
+  if (syncing) {
+    syncAgain = true
+    return syncing
+  }
   syncing = runSync(user).finally(() => {
     syncing = null
     changed()
+    // A save arriving during the current batch must not wait for another online event.
+    if (syncAgain) {
+      syncAgain = false
+      return sync(user, simulateOffline)
+    }
   })
   return syncing
 }

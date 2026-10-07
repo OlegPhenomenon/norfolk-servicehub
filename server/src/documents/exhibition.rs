@@ -94,6 +94,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/public/exhibitions", get(public_list))
         .route("/api/public/exhibitions/{id}", get(public_detail))
         .route("/api/public/exhibitions/{id}/items/{item}/file", get(public_file))
+        .route("/api/public/exhibitions/{id}/items/{item}/pages/{page}", get(public_preview))
         .route("/api/public/exhibitions/{id}/submissions", post(submit))
 }
 async fn load(tx: &mut SqliteConnection, id: i64) -> AppResult<Exhibition> {
@@ -547,7 +548,10 @@ pub async fn preview(
     let i = items(&mut c, id).await?.into_iter().find(|i| i.id == item).ok_or_else(AppError::not_found)?;
     let (_, _, _, blob, _) = super::uploads::version_access(&mut c, &actor, i.source_document_version_id).await?;
     drop(c);
-    let (row, bytes) = storage::read(&state, blob).await?;
+    render_preview(&state, blob, page).await
+}
+async fn render_preview(state: &AppState, blob: i64, page: u32) -> AppResult<Response> {
+    let (row, bytes) = storage::read(state, blob).await?;
     let _permit = RENDERS.acquire().await.map_err(|_| AppError::internal("Rendering stopped"))?;
     let png = if row.mime == "application/pdf" {
         let dir = WorkDir::new()?;
@@ -671,11 +675,23 @@ pub async fn public_detail(State(state): State<AppState>, Path(id): Path<i64>) -
     if !public(&e, state.now()) {
         return Err(AppError::not_found());
     }
-    let out=items(&mut c,id).await?.iter().filter(|i|i.published_blob_id.is_some()).map(|i|json!({"id":i.id,"title":i.title,"file_url":format!("/api/public/exhibitions/{id}/items/{}/file",i.id)})).collect::<Vec<_>>();
+    let out=items(&mut c,id).await?.iter().filter(|i|i.published_blob_id.is_some()).map(|i|json!({"id":i.id,"title":i.title,"file_url":format!("/api/public/exhibitions/{id}/items/{}/file",i.id),"preview_url":format!("/api/public/exhibitions/{id}/items/{}/pages/1.png",i.id)})).collect::<Vec<_>>();
     Ok(Json(json!({"exhibition":public_projection(&e),"items":out})))
 }
 pub async fn public_file(State(state): State<AppState>, Path((id, item)): Path<(i64, i64)>) -> AppResult<Response> {
-    close_read(&state).await?;
+    let blob = public_blob(&state, id, item).await?;
+    super::uploads::blob_response(&state, blob, false).await
+}
+pub async fn public_preview(
+    State(state): State<AppState>,
+    Path((id, item, page)): Path<(i64, i64, String)>,
+) -> AppResult<Response> {
+    let page: u32 = page.strip_suffix(".png").and_then(|s| s.parse().ok()).ok_or_else(AppError::not_found)?;
+    let blob = public_blob(&state, id, item).await?;
+    render_preview(&state, blob, page).await
+}
+async fn public_blob(state: &AppState, id: i64, item: i64) -> AppResult<i64> {
+    close_read(state).await?;
     let mut c = state.db.acquire().await?;
     let e = load(&mut c, id).await?;
     if !public(&e, state.now()) {
@@ -689,7 +705,7 @@ pub async fn public_file(State(state): State<AppState>, Path((id, item)): Path<(
             .await?
             .flatten();
     drop(c);
-    super::uploads::blob_response(&state, blob.ok_or_else(AppError::not_found)?, false).await
+    blob.ok_or_else(AppError::not_found)
 }
 fn valid_email(email: &str) -> bool {
     let Some((local, domain)) = email.split_once('@') else {

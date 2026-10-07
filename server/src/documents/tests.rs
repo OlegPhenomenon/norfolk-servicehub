@@ -673,6 +673,14 @@ async fn publishing_uses_new_blob_with_burned_pixels_and_independent_staff_appro
     assert!(render.status.success());
     let image = printpdf::image_crate::open(dir.path().join("published-page.png")).unwrap().to_rgb8();
     assert_eq!(image.get_pixel(image.width() / 2, image.height() / 3).0, [0, 0, 0], "redaction is burned into pixels");
+    // The public preview must rasterise the published copy, never its private source.
+    let response = exhibition::public_preview(State(state.clone()), Path((eid, item, "1.png".into()))).await.unwrap();
+    assert_eq!(response.headers()["content-type"], "image/png");
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let preview = printpdf::image_crate::load_from_memory(&bytes).unwrap().to_rgb8();
+    assert_eq!(preview.get_pixel(preview.width() / 2, preview.height() / 3).0, [0, 0, 0]);
+    assert!(exhibition::public_preview(State(state.clone()), Path((eid, item, "0.png".into()))).await.is_err());
+    assert!(exhibition::public_preview(State(state.clone()), Path((eid, item + 999, "1.png".into()))).await.is_err());
     let response = exhibition::public_file(State(state), Path((eid, item))).await.unwrap();
     assert_eq!(response.headers()["content-type"], "application/pdf");
 }

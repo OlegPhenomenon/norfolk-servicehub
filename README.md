@@ -143,9 +143,14 @@ A production compose file, nginx and Caddy configs and the full runbook for the 
 ```sh
 make test                      # cargo test + npm test (Rust invariants & HTTP tests, React tests)
 make lint                      # cargo clippy -D warnings + eslint --max-warnings 0
+make e2e                       # Playwright browser stories + axe serious/critical checks
 make smoke                     # scripts/smoke-platform.sh — auth, TOTP, CSRF over real HTTP
 scripts/smoke-integration.sh   # full business journeys: bookings, payments, refunds, redaction, complaints
 ```
+
+The browser suite lives in `e2e/` with its own dependencies. Run `cd e2e && npm ci && npx playwright test` (or `make e2e`). It seeds a temporary demo database, uses a free port, and stops the server and removes the database afterward. Setup reuses `server/target/debug/servicehub` and `web/dist`, building either only when missing; rebuild them after app edits. Chromium must be installed (`cd e2e && npx playwright install chromium`); macOS uses `~/Library/Caches/ms-playwright`. Exhibition checks and seeding need Poppler, as the app does. Failure traces, axe results and the server log are under `e2e/test-results/`; the HTML report is under `e2e/playwright-report/`.
+
+Run `cd e2e && npm run screenshots` to regenerate the ten seeded README images in `docs/screenshots/` (1440×900, field view 390×844). Screenshot generation uses a separate fresh demo database and is separate from the acceptance suite.
 
 Backup verification is part of the product, not just CI: `servicehub backup <dir>` writes a manifest-based snapshot (database + blobs + hashes) and `servicehub restore-check <dir>` verifies it without touching the live data.
 

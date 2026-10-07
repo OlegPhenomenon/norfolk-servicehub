@@ -1,4 +1,4 @@
-.PHONY: dev dev-server dev-web build test lint seed smoke docker
+.PHONY: dev dev-server dev-web build test lint seed smoke e2e docker
 
 # Local demo settings for `make dev` / `make seed`.
 DEV_ENV = DEMO_MODE=true COOKIE_SECURE=false DATA_DIR=./data
@@ -32,6 +32,10 @@ seed:
 # Platform smoke test against a temporary data directory.
 smoke:
 	scripts/smoke-platform.sh
+
+# Browser journeys and accessibility checks against a disposable seeded server.
+e2e:
+	cd e2e && npm ci && npx playwright test
 
 docker:
 	docker compose up --build

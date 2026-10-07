@@ -12,6 +12,8 @@ export function useOutbox() {
     queryKey: ['operations', 'outbox', user],
     queryFn: () => commands(user),
     enabled: !!user,
+    // This query reads IndexedDB; losing the network must not pause device-save feedback.
+    networkMode: 'always',
   })
   const send = useCallback(() => {
     void sync(user, offline)
