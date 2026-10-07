@@ -342,7 +342,7 @@ async fn import(
                 chrono::NaiveTime::from_hms_opt(17, 0, 0).unwrap(),
             )))
         };
-        super::contracts::set_import_dates(&mut tx, case.id, &submitted, closed.as_deref()).await?;
+        crate::cases::core::set_import_dates(&mut tx, case.id, &submitted, closed.as_deref()).await?;
         core::append_event(
             &mut tx,
             case.id,

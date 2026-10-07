@@ -20,14 +20,8 @@ pub const HANDLERS: &[&str] = &[
     "documents.letter_issued:road_response",
     "documents.letter_issued:complaint_response",
 ];
-pub const DECISIONS: &[&str] = &[
-    "development_approval",
-    "building_approval",
-    "modification_approval",
-    "planning_certificate",
-    "complaint_response",
-    "road_response",
-];
+pub const DECISIONS: &[&str] =
+    &["development_approval", "building_approval", "modification_approval", "planning_certificate"];
 pub const TASKS: &[&str] = &[
     "venue_prep",
     "venue_inspection",
@@ -151,7 +145,7 @@ pub async fn validate_for_module(
         "road_issue" => &["triage", "inspection", "repair", "response", "done"],
         "complaint" => &["triage", "investigation", "response", "done"],
         "building"
-            if def.field("building_approval").is_some()
+            if def.field("project_reference").is_some()
                 && (def.field("commencement_date").is_some() || def.field("completion").is_some()) =>
         {
             &["intake", "site", "done"]

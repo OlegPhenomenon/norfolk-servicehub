@@ -206,6 +206,29 @@ pub async fn assign_number(conn: &mut SqliteConnection, case_id: i64) -> AppResu
     Ok(number)
 }
 
+/// Preserve historical import dates without changing immutable submission evidence.
+pub async fn set_import_dates(
+    conn: &mut SqliteConnection,
+    case_id: i64,
+    submitted_at: &str,
+    closed_at: Option<&str>,
+) -> AppResult<()> {
+    time::parse(submitted_at)?;
+    if let Some(closed) = closed_at {
+        time::parse(closed)?;
+    }
+    load_case(conn, case_id).await?;
+    sqlx::query("UPDATE cases SET created_at=?,submitted_at=?,closed_at=?,updated_at=? WHERE id=?")
+        .bind(submitted_at)
+        .bind(submitted_at)
+        .bind(closed_at)
+        .bind(closed_at.unwrap_or(submitted_at))
+        .bind(case_id)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 /// Collects string leaves of a JSON value (answers) for the search body.
 fn collect_text(v: &Value, out: &mut Vec<String>) {
     match v {

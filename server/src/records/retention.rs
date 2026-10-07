@@ -203,7 +203,7 @@ async fn dispose(
         return Err(AppError::conflict("The case has not reached its disposal date."));
     }
     common::check_revision(&case, body.expected_revision)?;
-    let paths = super::contracts::dispose_documents(&mut tx, id).await?;
+    crate::documents::api::dispose_case_files(&mut tx, id).await?;
     sqlx::query("INSERT INTO disposal_events(case_id,actor_user_id,reason,at) VALUES(?,?,?,?)")
         .bind(id)
         .bind(actor.user_id)
@@ -221,13 +221,6 @@ async fn dispose(
     )
     .await?;
     tx.commit().await?;
-    for hash in paths {
-        let path = crate::storage::blob_path(&state.cfg.blobs_dir(), &hash);
-        if let Err(err) = std::fs::remove_file(path)
-            && err.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(error=%err,"disposed blob cleanup deferred");
-        }
-    }
+    crate::storage::gc(&state).await?;
     Ok(Json(json!({"ok":true})))
 }

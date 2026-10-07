@@ -140,13 +140,19 @@ pub async fn applicant_reply(
     validate_document(tx, id, document_version_id).await?;
     let mid:i64=sqlx::query_scalar("INSERT INTO case_messages(case_id,author_user_id,from_staff,body,document_version_id,created_at) VALUES (?,?,0,?,?,?) RETURNING id").bind(id).bind(actor.db_id()).bind(body.trim()).bind(document_version_id).bind(time::fmt(state.now())).fetch_one(&mut *tx).await?;
     sqlx::query(
-        "UPDATE case_messages SET resolved_at=? WHERE case_id=? AND requires_response=1 AND resolved_at IS NULL",
+        "UPDATE case_messages SET resolved_at=? WHERE case_id=? AND requires_response=1 AND resolved_at IS NULL AND NOT EXISTS(SELECT 1 FROM document_comments c WHERE c.message_id=case_messages.id AND c.request_new_version=1 AND c.resolved_at IS NULL)",
     )
     .bind(time::fmt(state.now()))
     .bind(id)
     .execute(&mut *tx)
     .await?;
-    if case.status == "waiting_on_applicant" {
+    let outstanding: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM case_messages WHERE case_id=? AND requires_response=1 AND resolved_at IS NULL)",
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if case.status == "waiting_on_applicant" && !outstanding {
         sqlx::query("UPDATE cases SET status='in_progress' WHERE id=?").bind(id).execute(&mut *tx).await?;
         deadlines::api::resume_at(tx, id, "applicant_responded", state.now()).await?;
     }
@@ -184,6 +190,26 @@ pub async fn applicant_reply(
     }
     Ok(mid)
 }
+/// Resolve only messages whose replacement comments have all been satisfied.
+pub async fn resolve_document_requests(tx: &mut SqliteConnection, state: &AppState, case_id: i64) -> AppResult<()> {
+    let changed = sqlx::query("UPDATE case_messages SET resolved_at=? WHERE case_id=? AND requires_response=1 AND resolved_at IS NULL AND EXISTS(SELECT 1 FROM document_comments c WHERE c.message_id=case_messages.id AND c.request_new_version=1) AND NOT EXISTS(SELECT 1 FROM document_comments c WHERE c.message_id=case_messages.id AND c.request_new_version=1 AND c.resolved_at IS NULL)")
+        .bind(time::fmt(state.now())).bind(case_id).execute(&mut *tx).await?.rows_affected();
+    let outstanding: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM case_messages WHERE case_id=? AND requires_response=1 AND resolved_at IS NULL)",
+    )
+    .bind(case_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if changed > 0 && !outstanding {
+        sqlx::query("UPDATE cases SET status='in_progress' WHERE id=? AND status='waiting_on_applicant'")
+            .bind(case_id)
+            .execute(&mut *tx)
+            .await?;
+        deadlines::api::resume_at(tx, case_id, "applicant_responded", state.now()).await?;
+    }
+    Ok(())
+}
+
 async fn post_message(
     State(state): State<AppState>,
     actor: Actor,

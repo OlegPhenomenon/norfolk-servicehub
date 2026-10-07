@@ -45,7 +45,7 @@ pub async fn history(tx: &mut SqliteConnection, id: i64) -> AppResult<Value> {
     let rows:Vec<AssignmentHistoryRow>=sqlx::query_as("SELECT a.id,a.user_id,u.display_name,a.role,a.reason,a.assigned_at,a.ended_at,a.ended_reason,by.display_name FROM case_assignments a JOIN users u ON u.id=a.user_id LEFT JOIN users by ON by.id=a.assigned_by WHERE case_id=? ORDER BY a.id").bind(id).fetch_all(&mut *tx).await?;
     Ok(json!(rows.into_iter().map(|(id,user_id,name,role,reason,assigned_at,ended_at,ended_reason,assigned_by)|json!({"id":id,"user_id":user_id,"name":name,"role":role,"reason":reason,"assigned_at":assigned_at,"ended_at":ended_at,"ended_reason":ended_reason,"assigned_by":assigned_by})).collect::<Vec<_>>()))
 }
-async fn add(
+pub(crate) async fn add(
     tx: &mut SqliteConnection,
     actor: &Actor,
     id: i64,
@@ -54,10 +54,6 @@ async fn add(
     reason: &str,
     replace: bool,
 ) -> AppResult<()> {
-    let (_, access) = authz::require_staff_case(tx, actor, id).await?;
-    if !access.can_manage() {
-        return Err(AppError::forbidden());
-    }
     if reason.trim().is_empty() {
         return Err(AppError::field("reason", "Record the reason for the assignment."));
     }
@@ -135,6 +131,10 @@ async fn assign(
     Json(input): Json<Assign>,
 ) -> AppResult<Json<Value>> {
     let mut tx = db::write_tx(&state.db).await?;
+    let (_, access) = authz::require_staff_case(&mut tx, &actor, id).await?;
+    if !access.can_manage() {
+        return Err(AppError::forbidden());
+    }
     add(&mut tx, &actor, id, input.user_id, &input.role, &input.reason, input.replace_owner).await?;
     core::bump_revision(&mut tx, id, Some(input.expected_revision)).await?;
     let result = history(&mut tx, id).await?;

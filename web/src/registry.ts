@@ -49,6 +49,8 @@ export const staffRoutes: RouteObject[] = ROUTES.flatMap((m) => m.staffRoutes)
 /** Children of AdminLayout (`/admin`). */
 export const adminRoutes: RouteObject[] = ROUTES.flatMap((m) => m.adminRoutes)
 
+export const publicNav: NavItem[] = [servicesNav, documentsNav, operationsNav].flatMap((m) => m.publicNav)
+
 export const staffNav: NavItem[] = NAVS.flatMap((m) => m.staffNav)
 export const adminNav: NavItem[] = NAVS.flatMap((m) => m.adminNav)
 export const residentNav: NavItem[] = NAVS.flatMap((m) => m.residentNav)

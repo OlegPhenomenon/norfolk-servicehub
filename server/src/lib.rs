@@ -37,3 +37,6 @@ pub mod services;
 
 pub use error::{AppError, AppResult};
 pub use state::AppState;
+
+#[cfg(test)]
+mod integration_tests;

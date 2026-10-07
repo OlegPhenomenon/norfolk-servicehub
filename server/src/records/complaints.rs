@@ -135,7 +135,7 @@ pub async fn subjects(
         let replacement = select_handler(&mut tx, id, owner)
             .await?
             .ok_or_else(|| AppError::conflict("No independent handler is available."))?;
-        super::contracts::assign_owner(
+        crate::cases::api::assign_owner(
             &mut tx,
             &actor,
             id,
@@ -180,7 +180,7 @@ async fn request_review(
     if existing {
         return Err(AppError::conflict("A review of this feedback is already open."));
     }
-    let review = super::contracts::create_review(&mut tx, &actor, &case, &reason).await?;
+    let review = crate::cases::api::create_review(&mut tx, &actor, &case, &reason).await?;
     sqlx::query("UPDATE cases SET confidential=1 WHERE id=?").bind(review.id).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO complaint_subjects(case_id,staff_user_id) SELECT ?,staff_user_id FROM complaint_subjects WHERE case_id=?").bind(review.id).bind(id).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO case_access_denials(case_id,user_id,reason,created_by,created_at) SELECT ?,user_id,reason,?,? FROM case_access_denials WHERE case_id=?").bind(review.id).bind(actor.user_id).bind(time::fmt(state.now())).bind(id).execute(&mut *tx).await?;
@@ -193,7 +193,7 @@ async fn request_review(
     let handler = select_handler(&mut tx, review.id, original)
         .await?
         .ok_or_else(|| AppError::conflict("No independent reviewer is available."))?;
-    super::contracts::assign_owner(&mut tx, &actor, review.id, handler, "Independent review of completed feedback.")
+    crate::cases::api::assign_owner(&mut tx, &actor, review.id, handler, "Independent review of completed feedback.")
         .await?;
     common::changed(
         &mut tx,

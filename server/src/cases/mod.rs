@@ -1,5 +1,6 @@
 //! Cases. `core.rs` is platform-owned (primitives); the other files belong to the services slice.
 
+pub mod api;
 pub mod assignment;
 pub mod core;
 pub mod drafts;

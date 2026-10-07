@@ -37,10 +37,10 @@ export function PineGlyph({ size = 32, className }: { size?: number; className?:
 export function Wordmark({ to = '/', subtitle, inverted, className }: { to?: string; subtitle?: string; inverted?: boolean; className?: string }) {
   return (
     <Link to={to} className={cn('group inline-flex min-w-0 items-center gap-2.5 rounded-md py-1', className)}>
-      <PineGlyph size={30} className={inverted ? 'text-pine-300' : 'text-pine'} />
-      <span className="flex flex-col leading-none">
-        <span className={cn('text-[1.2rem] tracking-[-0.01em]', inverted ? 'text-white' : 'text-ink')}>
-          <span className="font-serif font-semibold">Norfolk</span> <span className={cn('font-semibold', inverted ? 'text-primary-100' : 'text-primary')}>ServiceHub</span>
+      <PineGlyph size={30} className={cn('shrink-0', inverted ? 'text-pine-300' : 'text-pine')} />
+      <span className="flex min-w-0 flex-col leading-none">
+        <span className={cn('text-base sm:text-[1.2rem] tracking-[-0.01em]', inverted ? 'text-white' : 'text-ink')}>
+          <span className="font-serif font-semibold">Norfolk</span> <span className={cn('block sm:inline font-semibold', inverted ? 'text-primary-100' : 'text-primary')}>ServiceHub</span>
         </span>
         {subtitle ? <span className={cn('mt-1 text-xs font-medium tracking-wide uppercase', inverted ? 'text-white/70' : 'text-muted')}>{subtitle}</span> : null}
       </span>

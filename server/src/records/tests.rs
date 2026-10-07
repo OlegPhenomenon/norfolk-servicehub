@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     auth::{Actor, RoleGrant, UserKind},
     authz::{self, Role},
-    cases::core::{self, NewCase},
+    cases::core::{self, NewCase, Visibility},
     db::write_tx,
 };
 const NOW: &str = "2026-10-07T00:00:00.000Z";
@@ -277,6 +277,7 @@ async fn request(
 ) -> (u16, Value) {
     use tower::ServiceExt;
     let app = routes()
+        .merge(crate::documents::routes())
         .layer(axum::middleware::from_fn_with_state(state.clone(), crate::auth::extract::session_middleware))
         .with_state(state.clone());
     let req = axum::http::Request::builder()
@@ -308,6 +309,18 @@ async fn invitations_bind_email_and_revocation_removes_organisation_case_access(
         .execute(&mut *tx)
         .await
         .unwrap();
+    let (_, version) = crate::documents::api::attach_generated(
+        &mut tx,
+        &state,
+        case.id,
+        "application",
+        "Organisation evidence",
+        Visibility::Applicant,
+        crate::pdf::simple_document("Organisation evidence", &[], &[]),
+        Some(1),
+    )
+    .await
+    .unwrap();
     tx.commit().await.unwrap();
     let owner = session(&state, 1).await;
     let member = session(&state, 5).await;
@@ -326,11 +339,15 @@ async fn invitations_bind_email_and_revocation_removes_organisation_case_access(
     let mut conn = state.db.acquire().await.unwrap();
     assert_eq!(authz::case_access(&mut conn, &actor(5, &[]), case.id).await.unwrap(), authz::CaseAccess::Applicant);
     drop(conn);
+    let download = format!("/api/document-versions/{version}/download");
+    assert_eq!(request(&state, &member, "GET", &download, json!({})).await.0, 200);
     let mid = invitation["id"].as_i64().unwrap();
     assert_eq!(
         request(&state, &owner, "POST", &format!("/api/my/organisations/1/members/{mid}/revoke"), json!({})).await.0,
         200
     );
+    assert_eq!(request(&state, &member, "GET", &download, json!({})).await.0, 404);
+    assert_eq!(request(&state, &owner, "GET", &download, json!({})).await.0, 200);
     let mut conn = state.db.acquire().await.unwrap();
     assert_eq!(
         authz::require_case(&mut conn, &actor(5, &[]), case.id).await.unwrap_err().code,
@@ -447,4 +464,107 @@ async fn legacy_preview_reports_bad_rows_and_both_duplicate_kinds() {
         request(&state, &admin, "GET", &format!("/api/admin/legacy-imports/{batch}"), Value::Null).await;
     assert_eq!(status, 200);
     assert_eq!(again, report);
+}
+
+#[tokio::test]
+async fn disposal_endpoint_preserves_decision_evidence_and_shared_blob_until_last_consumer() {
+    let (state, _dir) = fixture().await;
+    let mut tx = write_tx(&state.db).await.unwrap();
+    crate::auth::users::grant_role(&mut tx, 4, Role::Manager, None, None).await.unwrap();
+    let a = new_case(&mut tx, "generic", "completed").await;
+    let b = new_case(&mut tx, "generic", "completed").await;
+    let bytes = crate::pdf::simple_document("Retention endpoint test", &[], &[]);
+    let mut versions = Vec::new();
+    for c in [&a, &b] {
+        crate::cases::core::set_import_dates(&mut tx, c.id, "2000-01-01T00:00:00Z", Some("2001-01-01T00:00:00Z"))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE cases SET retention_until='2008-01-01' WHERE id=?")
+            .bind(c.id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        versions.push(
+            crate::documents::api::attach_generated(
+                &mut tx,
+                &state,
+                c.id,
+                "application",
+                "Retained drawing",
+                Visibility::Applicant,
+                bytes.clone(),
+                Some(1),
+            )
+            .await
+            .unwrap()
+            .1,
+        );
+    }
+    let decision: i64 = sqlx::query_scalar("INSERT INTO decisions(case_id,decision_type,outcome,reasons,status,prepared_by,created_at) VALUES(?,'building_approval','approved','Fictional evidence','draft',4,?) RETURNING id")
+        .bind(a.id).bind(NOW).fetch_one(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO decision_evidence(decision_id,document_version_id) VALUES(?,?)")
+        .bind(decision)
+        .bind(versions[0])
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE decisions SET status='issued' WHERE id=?").bind(decision).execute(&mut *tx).await.unwrap();
+    let (blob, hash): (i64, String) =
+        sqlx::query_as("SELECT b.id,b.sha256 FROM blobs b JOIN document_versions v ON v.blob_id=b.id WHERE v.id=?")
+            .bind(versions[0])
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    tx.commit().await.unwrap();
+    // Age the fixture beyond the staging grace so endpoint-triggered GC actually deletes bytes.
+    std::fs::File::open(crate::storage::blob_path(&state.cfg.blobs_dir(), &hash))
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
+        .unwrap();
+    let manager = session(&state, 4).await;
+    for (index, c) in [&a, &b].into_iter().enumerate() {
+        let path = format!("/api/records/cases/{}/dispose", c.id);
+        let (status, body) = request(
+            &state,
+            &manager,
+            "POST",
+            &path,
+            json!({"reason":"Retention elapsed", "expected_revision":c.revision}),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            request(
+                &state,
+                &manager,
+                "GET",
+                &format!("/api/document-versions/{}/download", versions[index]),
+                json!({})
+            )
+            .await
+            .0,
+            404
+        );
+        if index == 0 {
+            assert_eq!(crate::storage::read(&state, blob).await.unwrap().1, bytes);
+        }
+    }
+    assert_eq!(crate::storage::read(&state, blob).await.unwrap_err().code, crate::error::ErrorCode::NotFound);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT document_version_id FROM decision_evidence WHERE decision_id=?")
+            .bind(decision)
+            .fetch_one(&state.db)
+            .await
+            .unwrap(),
+        versions[0]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM document_versions WHERE id IN (?,?)")
+            .bind(versions[0])
+            .bind(versions[1])
+            .fetch_one(&state.db)
+            .await
+            .unwrap(),
+        2
+    );
 }

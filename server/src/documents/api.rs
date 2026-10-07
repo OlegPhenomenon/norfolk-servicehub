@@ -112,3 +112,17 @@ pub async fn letter_issued(tx: &mut SqliteConnection, case_id: i64, letter_type:
         .fetch_one(tx)
         .await?)
 }
+
+/// Mark files disposed while retaining exact document/version/evidence IDs and blob metadata.
+pub async fn dispose_case_files(tx: &mut SqliteConnection, case_id: i64) -> AppResult<Vec<String>> {
+    crate::cases::core::load_case(tx, case_id).await?;
+    sqlx::query("UPDATE documents SET disposed_at=? WHERE case_id=? AND disposed_at IS NULL")
+        .bind(time::now_str())
+        .bind(case_id)
+        .execute(&mut *tx)
+        .await?;
+    let eligible = storage::disposed_orphan_hashes(tx).await?;
+    let hashes: Vec<String> = sqlx::query_scalar("SELECT DISTINCT b.sha256 FROM document_versions v JOIN documents d ON d.id=v.document_id JOIN blobs b ON b.id=v.blob_id WHERE d.case_id=?")
+        .bind(case_id).fetch_all(tx).await?;
+    Ok(hashes.into_iter().filter(|hash| eligible.contains(hash)).collect())
+}

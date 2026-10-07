@@ -267,6 +267,7 @@ pub async fn version(
             ));
         }
     }
+    crate::cases::messages::resolve_document_requests(&mut tx, &state, case.id).await?;
     let visibility: String =
         sqlx::query_scalar("SELECT visibility FROM documents WHERE id=?").bind(id).fetch_one(&mut *tx).await?;
     let visibility = if visibility == "staff" { Visibility::Staff } else { Visibility::Applicant };
@@ -370,13 +371,14 @@ pub async fn comment(
     crate::cases::core::bump_revision(&mut tx, case.id, Some(input.expected_revision)).await?;
     let message = if input.request_new_version {
         Some(
-            crate::cases::messages::post_staff_message(
+            crate::cases::messages::post_staff_message_at(
                 &mut tx,
                 &actor,
                 case.id,
                 &format!("Replace {title}: {}", input.body),
                 Some(vid),
                 true,
+                state.now(),
             )
             .await?,
         )

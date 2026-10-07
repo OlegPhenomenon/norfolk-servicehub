@@ -4,7 +4,6 @@ pub mod api;
 pub mod backup;
 mod common;
 mod complaints;
-mod contracts;
 mod export;
 pub mod hooks;
 pub mod integrations;

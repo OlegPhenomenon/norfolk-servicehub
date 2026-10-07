@@ -30,7 +30,7 @@ pub async fn on_submit(
     let Some(owner) = owner else {
         return Err(AppError::conflict("No eligible complaints officer or manager is available."));
     };
-    super::contracts::assign_owner(
+    crate::cases::api::assign_owner(
         tx,
         actor,
         case.id,

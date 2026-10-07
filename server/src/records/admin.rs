@@ -90,7 +90,7 @@ async fn deactivate(State(state): State<AppState>, actor: Actor, Path(id): Path<
         return Err(AppError::conflict("You cannot deactivate the account you are using."));
     }
     let mut tx = write_tx(&state.db).await?;
-    super::contracts::deactivate_user(&mut tx, id).await?;
+    crate::auth::users::deactivate_user(&mut tx, id).await?;
     common::admin_audit(&mut tx, &actor, "user.deactivate", "user", Some(id), json!({})).await?;
     tx.commit().await?;
     Ok(Json(json!({"ok":true})))

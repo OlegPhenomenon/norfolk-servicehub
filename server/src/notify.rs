@@ -27,7 +27,19 @@ pub struct Notice {
 }
 
 /// Inserts the in-app row (if `user_id`) and queues `email` / `sms` rows with a `notify.deliver` job each.
-pub async fn send(conn: &mut SqliteConnection, notice: Notice) -> AppResult<()> {
+pub async fn send(conn: &mut SqliteConnection, mut notice: Notice) -> AppResult<()> {
+    if let Some(case_id) = notice.case_id {
+        let confidential: Option<Option<String>> =
+            sqlx::query_scalar("SELECT number FROM cases WHERE id=? AND confidential=1")
+                .bind(case_id)
+                .fetch_optional(&mut *conn)
+                .await?;
+        if let Some(number) = confidential {
+            let reference = number.as_deref().unwrap_or("request");
+            notice.subject = format!("Update on your feedback {reference}");
+            notice.body = format!("There is an update on your feedback {reference} — sign in to read it");
+        }
+    }
     let now = time::now_str();
     if let Some(uid) = notice.user_id {
         insert(conn, Some(uid), "in_app", None, &notice, "sent", &now).await?;

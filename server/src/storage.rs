@@ -6,7 +6,7 @@
 //! * [`stage`] validates and writes the file (no database access) — call it **before** opening the tx;
 //! * [`register`] inserts/reuses the `blobs` row inside the caller's transaction;
 //! * [`put`] = stage + register in its own transaction (plain upload endpoints);
-//! * [`gc`] deletes files no `blobs` row references (never deletes rows).
+//! * [`gc`] deletes unregistered or disposed-only files (never deletes metadata rows).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -15,12 +15,15 @@ use std::time::{Duration, SystemTime};
 use rand::RngCore;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use sqlx::SqliteConnection;
+use sqlx::{Row, SqliteConnection};
 
 use crate::db::write_tx;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use crate::time;
+
+// Serialize staging with GC so a reused hash refreshes its grace period before cleanup.
+static FILE_WRITES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Maximum accepted file size (10 MB).
 pub const MAX_BYTES: usize = 10 * 1024 * 1024;
@@ -43,6 +46,8 @@ pub struct Staged {
     pub size_bytes: i64,
     pub mime: String,
     pub original_name: String,
+    path: PathBuf,
+    bytes: std::sync::Arc<Vec<u8>>,
 }
 
 /// A row of the `blobs` table.
@@ -127,12 +132,14 @@ pub fn blob_path(blobs_dir: &Path, sha256: &str) -> PathBuf {
 /// Validates and writes the file (atomic temp file + rename). No database access.
 pub async fn stage(state: &AppState, bytes: &[u8], original_name: &str, allow: AllowList) -> AppResult<Staged> {
     let mime = validate(bytes, original_name, allow)?;
+    let _files = FILE_WRITES.lock().await;
     let sha256 = hex::encode(Sha256::digest(bytes));
     let dir = state.cfg.blobs_dir();
     let path = blob_path(&dir, &sha256);
-    let data = bytes.to_vec();
+    let data = std::sync::Arc::new(bytes.to_vec());
+    let written = data.clone();
     let target = path.clone();
-    tokio::task::spawn_blocking(move || write_atomic(&target, &data))
+    tokio::task::spawn_blocking(move || write_atomic(&target, &written))
         .await
         .map_err(|e| AppError::internal(format!("blob write task: {e}")))??;
     let name: String = original_name.chars().filter(|c| !c.is_control()).take(200).collect();
@@ -141,13 +148,12 @@ pub async fn stage(state: &AppState, bytes: &[u8], original_name: &str, allow: A
         size_bytes: bytes.len() as i64,
         mime,
         original_name: if name.trim().is_empty() { "file".into() } else { name },
+        path,
+        bytes: data,
     })
 }
 
 fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    if path.exists() {
-        return Ok(()); // content-addressed: identical bytes already stored
-    }
     let dir = path.parent().expect("blob path has a parent");
     std::fs::create_dir_all(dir)?;
     let mut suffix = [0u8; 8];
@@ -165,6 +171,16 @@ fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
 /// Records a staged file in `blobs` (dedupe by sha256) inside the caller's transaction.
 /// `actor` = `users.id` of the uploader, `None` for system-generated files.
 pub async fn register(conn: &mut SqliteConnection, staged: Staged, actor: Option<i64>) -> AppResult<BlobRow> {
+    // The caller already holds the DB writer lock. Even if staging waited longer than GC's
+    // grace (or GC ran in another process), restore bytes before publishing a new reference.
+    let _files = FILE_WRITES.lock().await;
+    if !staged.path.exists() {
+        let path = staged.path.clone();
+        let bytes = staged.bytes.clone();
+        tokio::task::spawn_blocking(move || write_atomic(&path, &bytes))
+            .await
+            .map_err(|e| AppError::internal(format!("blob restore task: {e}")))??;
+    }
     sqlx::query(
         "INSERT INTO blobs (sha256, size_bytes, mime, original_name, scan_status, created_by, created_at) \
          VALUES (?, ?, ?, ?, 'clean', ?, ?) ON CONFLICT(sha256) DO NOTHING",
@@ -212,7 +228,39 @@ pub async fn read(state: &AppState, blob_id: i64) -> AppResult<(BlobRow, Vec<u8>
     Ok((row, bytes))
 }
 
-/// Deletes blob files without a `blobs` row. Files younger than 10 minutes are kept (they may be
+/// Blobs with disposed document references and no other live consumer. Metadata stays intact.
+/// Discover blob foreign keys so new slices' consumers are protected automatically.
+pub async fn disposed_orphan_hashes(conn: &mut SqliteConnection) -> AppResult<Vec<String>> {
+    let tables: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+            .fetch_all(&mut *conn)
+            .await?;
+    let mut live = vec![
+        "EXISTS(SELECT 1 FROM document_versions v JOIN documents d ON d.id=v.document_id WHERE v.blob_id=b.id AND d.disposed_at IS NULL)".to_string(),
+        // Frozen evidence can also be consumed by a different, undisposed case (e.g. review).
+        "EXISTS(SELECT 1 FROM document_versions v JOIN submission_documents sd ON sd.document_version_id=v.id JOIN submissions s ON s.id=sd.submission_id JOIN documents source ON source.id=v.document_id WHERE v.blob_id=b.id AND s.case_id<>source.case_id AND NOT EXISTS(SELECT 1 FROM disposal_events e WHERE e.case_id=s.case_id))".to_string(),
+        "EXISTS(SELECT 1 FROM document_versions v JOIN decision_evidence e ON e.document_version_id=v.id JOIN decisions d ON d.id=e.decision_id JOIN documents source ON source.id=v.document_id WHERE v.blob_id=b.id AND d.case_id<>source.case_id AND NOT EXISTS(SELECT 1 FROM disposal_events x WHERE x.case_id=d.case_id))".to_string(),
+    ];
+    for table in tables {
+        if table == "document_versions" {
+            continue;
+        }
+        let quoted = table.replace('"', "\"\"");
+        for fk in sqlx::query(&format!("PRAGMA foreign_key_list(\"{quoted}\")")).fetch_all(&mut *conn).await? {
+            if fk.get::<String, _>("table") == "blobs" {
+                let column = fk.get::<String, _>("from").replace('"', "\"\"");
+                live.push(format!("EXISTS(SELECT 1 FROM \"{quoted}\" r WHERE r.\"{column}\"=b.id)"));
+            }
+        }
+    }
+    let query = format!(
+        "SELECT b.sha256 FROM blobs b WHERE EXISTS(SELECT 1 FROM document_versions v JOIN documents d ON d.id=v.document_id WHERE v.blob_id=b.id AND d.disposed_at IS NOT NULL) AND NOT ({})",
+        live.join(" OR ")
+    );
+    Ok(sqlx::query_scalar(&query).fetch_all(conn).await?)
+}
+
+/// Deletes unregistered files and disposed-only document bytes. Files younger than 10 minutes are kept (they may be
 /// staged for a transaction that has not committed yet). Returns the number of files removed.
 pub async fn gc(state: &AppState) -> AppResult<u64> {
     gc_older_than(state, Duration::from_secs(600)).await
@@ -220,10 +268,18 @@ pub async fn gc(state: &AppState) -> AppResult<u64> {
 
 /// [`gc`] with an explicit grace period (`Duration::ZERO` after a full wipe).
 pub async fn gc_older_than(state: &AppState, grace: Duration) -> AppResult<u64> {
-    let known: std::collections::HashSet<String> =
-        sqlx::query_scalar::<_, String>("SELECT sha256 FROM blobs").fetch_all(&state.db).await?.into_iter().collect();
+    // Hold the writer lock through deletion, preventing any new committed reference.
+    let mut tx = write_tx(&state.db).await?;
+    let _files = FILE_WRITES.lock().await;
+    let disposable: std::collections::HashSet<String> = disposed_orphan_hashes(&mut tx).await?.into_iter().collect();
+    let known: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>("SELECT sha256 FROM blobs")
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .filter(|hash| !disposable.contains(hash))
+        .collect();
     let dir = state.cfg.blobs_dir();
-    tokio::task::spawn_blocking(move || -> std::io::Result<u64> {
+    let removed = tokio::task::spawn_blocking(move || -> std::io::Result<u64> {
         let mut removed = 0;
         let Ok(top) = std::fs::read_dir(&dir) else { return Ok(0) };
         let now = SystemTime::now();
@@ -247,7 +303,9 @@ pub async fn gc_older_than(state: &AppState, grace: Duration) -> AppResult<u64> 
     })
     .await
     .map_err(|e| AppError::internal(format!("gc task: {e}")))?
-    .map_err(AppError::from)
+    .map_err(AppError::from)?;
+    tx.commit().await?;
+    Ok(removed)
 }
 
 #[cfg(test)]

@@ -44,7 +44,11 @@ async fn blob_inventory(conn: &mut SqliteConnection) -> AppResult<Vec<String>> {
         sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
             .fetch_all(&mut *conn)
             .await?;
-    let mut references = Vec::new();
+    let mut references = vec![
+        // Reviews and other cases can retain source versions even after the source case is disposed.
+        "EXISTS(SELECT 1 FROM document_versions v JOIN submission_documents sd ON sd.document_version_id=v.id JOIN submissions s ON s.id=sd.submission_id JOIN documents source ON source.id=v.document_id WHERE v.blob_id=b.id AND s.case_id<>source.case_id AND NOT EXISTS(SELECT 1 FROM disposal_events e WHERE e.case_id=s.case_id))".to_string(),
+        "EXISTS(SELECT 1 FROM document_versions v JOIN decision_evidence e ON e.document_version_id=v.id JOIN decisions d ON d.id=e.decision_id JOIN documents source ON source.id=v.document_id WHERE v.blob_id=b.id AND d.case_id<>source.case_id AND NOT EXISTS(SELECT 1 FROM disposal_events x WHERE x.case_id=d.case_id))".to_string(),
+    ];
     for table in tables {
         let quoted = table.replace('"', "\"\"");
         let foreign_keys = super::common::rows(conn, &format!("PRAGMA foreign_key_list(\"{quoted}\")"), &[]).await?;

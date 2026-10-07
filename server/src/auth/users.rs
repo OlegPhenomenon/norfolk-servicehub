@@ -78,6 +78,17 @@ pub async fn create_user(conn: &mut SqliteConnection, u: NewUser) -> AppResult<i
     Ok(id)
 }
 
+/// Deactivation and session revocation share the caller's transaction.
+pub async fn deactivate_user(conn: &mut SqliteConnection, user_id: i64) -> AppResult<()> {
+    let count =
+        sqlx::query("UPDATE users SET is_active=0 WHERE id=?").bind(user_id).execute(&mut *conn).await?.rows_affected();
+    if count == 0 {
+        return Err(AppError::not_found());
+    }
+    sqlx::query("DELETE FROM sessions WHERE user_id=?").bind(user_id).execute(conn).await?;
+    Ok(())
+}
+
 /// Grants a role (optionally scoped to one service). Only staff users may hold roles.
 pub async fn grant_role(
     conn: &mut SqliteConnection,

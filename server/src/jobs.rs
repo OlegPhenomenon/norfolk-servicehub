@@ -190,6 +190,7 @@ pub async fn schedule_tick(state: &AppState) -> AppResult<()> {
         enqueue(&mut tx, "demo.reset", serde_json::json!({}), Some(format!("demo.reset:{}", time::fmt(next))), now)
             .await?;
     }
+    crate::records::schedule_daily(&mut tx, state).await?;
     tx.commit().await?;
     Ok(())
 }
