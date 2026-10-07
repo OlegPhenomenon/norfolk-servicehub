@@ -1,5 +1,26 @@
 # Deploying the demo to norfolk.shelfcompass.com
 
+## How the live demo is actually deployed (Kamal)
+
+The public demo runs on the shelfcompass.com host (arm64, Ubuntu) next to other
+apps behind a shared `kamal-proxy`, which terminates TLS (Let's Encrypt) and
+routes `norfolk.shelfcompass.com` to the container. Config: `config/deploy.yml`.
+
+```bash
+cp .kamal/secrets.example .kamal/secrets          # once; holds only $VAR references
+export KAMAL_REGISTRY_PASSWORD=$(gh auth token)   # token needs write:packages (ghcr.io)
+export WEBHOOK_SECRET=... MOCK_API_KEY=...        # keep stable between deploys (openssl rand -hex 32)
+kamal deploy                                       # local arm64 build → ghcr.io → zero-downtime switch
+kamal app logs -f                                  # logs
+kamal app exec 'servicehub reset-demo'             # reset demo data now
+```
+
+Health check: `/api/health`. Data lives in the `norfolk_data` Docker volume
+(`/data`). The demo switches itself to a "demonstration has ended" page at
+`DEMO_ENDS_AT`; `kamal app stop` / `kamal remove` takes it down completely.
+
+## Alternative: plain Docker Compose behind nginx or Caddy (e.g. a council's own server)
+
 One Docker container (`servicehub`, Rust binary + React SPA + SQLite on a named
 volume) behind the host's existing reverse proxy. The app listens on
 `127.0.0.1:8087` — pick a different host port if 8087 is taken (edit the first

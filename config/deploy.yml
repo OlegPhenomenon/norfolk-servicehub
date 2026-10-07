@@ -1,0 +1,39 @@
+service: norfolk
+image: olegphenomenon/norfolk-servicehub
+servers:
+  web:
+    - 188.34.152.24
+proxy:
+  ssl: true
+  host: norfolk.shelfcompass.com
+  app_port: 8080
+  healthcheck:
+    path: /api/health
+    interval: 3
+    timeout: 5
+registry:
+  server: ghcr.io
+  username: olegphenomenon
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+builder:
+  arch: arm64
+  # Build on the operator's arm64 Mac; the small arm64 server should not do a Rust release build.
+  local: true
+  dockerfile: Dockerfile
+volumes:
+  - norfolk_data:/data
+env:
+  clear:
+    DEMO_MODE: "true"
+    PUBLIC_BASE_URL: https://norfolk.shelfcompass.com
+    COOKIE_SECURE: "true"
+    TRUST_PROXY: "true"
+    DEMO_RESET_HOURS: "6"
+    DEMO_ENDS_AT: "2026-11-08T00:00:00Z"
+    AI_ENABLED: "true"
+    REPO_URL: https://github.com/OlegPhenomenon/norfolk-servicehub
+    RUST_LOG: info
+  secret:
+    - WEBHOOK_SECRET
+    - MOCK_API_KEY

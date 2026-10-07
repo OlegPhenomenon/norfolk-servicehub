@@ -15,3 +15,5 @@ deploy/servicehub.env
 # Playwright generated reports and traces (README screenshots are tracked).
 e2e/test-results/
 e2e/playwright-report/
+.kamal/secrets
+.kamal/env.local
