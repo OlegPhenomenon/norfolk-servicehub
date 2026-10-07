@@ -1,0 +1,73 @@
+# Production deployment for the Norfolk ServiceHub demo.
+#
+# Run from the repository root:
+#   docker compose -f deploy/docker-compose.prod.yml up -d --build
+#
+# Relative paths below (`build.context`, `env_file`) resolve against THIS
+# file's directory (deploy/), so the same command works from any CWD.
+#
+# Env file: copy deploy/servicehub.env.example to deploy/servicehub.env first —
+# the service refuses to start without it (compose errors on a missing env file).
+
+name: servicehub
+
+services:
+  servicehub:
+    build:
+      context: ..              # repository root (Dockerfile lives there)
+      dockerfile: Dockerfile
+    image: norfolk-servicehub:latest
+    container_name: servicehub
+    restart: unless-stopped
+
+    env_file:
+      - path: servicehub.env   # = deploy/servicehub.env
+    environment:
+      DATA_DIR: /data          # SQLite DB + blobs + backups on the named volume
+
+    ports:
+      # Loopback only — the host's reverse proxy (nginx/Caddy) terminates TLS
+      # and forwards to 127.0.0.1:8087. Port 8087 is arbitrary and chosen to
+      # avoid clashing with other apps on this host; to change it, edit the
+      # FIRST number ("127.0.0.1:NEWPORT:8080") and update the proxy config.
+      - "127.0.0.1:8087:8080"
+
+    volumes:
+      - servicehub-data:/data
+
+    # The image is debian:bookworm-slim and ships no curl/wget, so the
+    # healthcheck speaks HTTP via bash's /dev/tcp and checks the status line.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080
+          && printf "GET /api/health HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n" >&3
+          && IFS= read -r status <&3
+          && [[ "$$status" == HTTP/*\ 200\ * ]]'
+      interval: 30s
+      timeout: 10s
+      start_period: 15s        # first start runs embedded migrations
+      retries: 3
+
+    read_only: true            # all writes go to /data (volume) and /tmp (tmpfs)
+    tmpfs:
+      - /tmp                   # scratch space for poppler-utils etc.
+    init: true                 # reap poppler subprocesses (PID 1 is the app)
+
+    security_opt:
+      - no-new-privileges:true
+
+    mem_limit: 512m
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  servicehub-data:
+    # Pinned name (unprefixed) so docs and `docker volume` commands always
+    # refer to the same volume regardless of the compose project name.
+    name: servicehub-data

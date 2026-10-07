@@ -1,0 +1,41 @@
+# Norfolk ServiceHub demo — norfolk.shelfcompass.com
+#
+# Append this site block to the host Caddyfile (e.g. /etc/caddy/Caddyfile),
+# then:  caddy fmt --overwrite /etc/caddy/Caddyfile && systemctl reload caddy
+# Caddy obtains and renews the Let's Encrypt certificate automatically —
+# just make sure DNS already points at this host before reloading.
+#
+# Upstream: the compose file publishes the app on 127.0.0.1:8087 — if you
+# changed that port there, change it in the reverse_proxy line below.
+
+norfolk.shelfcompass.com {
+	# Upload cap — matches the app's 12 MiB request body limit
+	# (server/src/app.rs BODY_LIMIT).
+	request_body {
+		max_size 12MB
+	}
+
+	reverse_proxy 127.0.0.1:8087 {
+		# Caddy automatically sets X-Forwarded-Proto and X-Forwarded-Host and
+		# passes the client's Host header through.
+		# X-Forwarded-For is overridden explicitly: the app reads the FIRST XFF
+		# hop as the client IP (rate limits, audit), while Caddy would append to
+		# any client-supplied chain — letting clients spoof their IP. If another
+		# trusted proxy is ever placed in front, drop this header_up line.
+		header_up X-Forwarded-For {remote_host}
+		transport http {
+			dial_timeout 10s
+			# Webhook handling and the built-in mock services can take 10–20 s.
+			response_header_timeout 60s
+		}
+	}
+
+	# HTTPS-only demo.
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+	# Never cache API responses (the app also sends its own Cache-Control).
+	@api path /api/*
+	header @api Cache-Control "no-store"
+
+	# No `encode` block on purpose: the app gzip-compresses responses itself.
+}
