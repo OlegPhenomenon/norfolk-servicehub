@@ -1,23 +1,13 @@
-// OWNER: services
 import type { RouteObject } from 'react-router'
-
-/*
- * Routes of the "services" feature. Paths are RELATIVE to the area they are mounted in (no leading slash).
- * Prefer lazy routes so each feature is its own chunk:
- *
- *   { path: 'bookings/:id', lazy: async () => ({ Component: (await import('./pages/BookingPage')).BookingPage }) }
- *
- * An `index: true` route in residentRoutes/staffRoutes/adminRoutes replaces the platform's placeholder overview page.
- */
-
-/** Children of the public layout at `/`, e.g. `services`, `services/:slug`, `notices`. */
-export const publicRoutes: RouteObject[] = []
-
-/** Children of `/my` (signed-in residents and businesses). */
+export const publicRoutes: RouteObject[] = [
+  { path: 'services', lazy: async () => ({ Component: (await import('./CataloguePage')).CataloguePage }) },
+  { path: 'services/:slug', lazy: async () => ({ Component: (await import('./CataloguePage')).ServicePage }) },
+]
 export const residentRoutes: RouteObject[] = []
-
-/** Children of `/staff` (staff who passed 2FA). */
 export const staffRoutes: RouteObject[] = []
-
-/** Children of `/admin` (sysadmin / manager). */
-export const adminRoutes: RouteObject[] = []
+export const adminRoutes: RouteObject[] = [
+  { path: 'services', lazy: async () => ({ Component: (await import('./BuilderPage')).ServiceAdminPage }) },
+  { path: 'services/new', lazy: async () => ({ Component: (await import('./BuilderPage')).NewServicePage }) },
+  { path: 'services/:id', lazy: async () => ({ Component: (await import('./BuilderPage')).ServiceEditorPage }) },
+  { path: 'service-imports', lazy: async () => ({ Component: (await import('./ImportsPage')).ImportsPage }) },
+]

@@ -1,16 +1,4 @@
-// OWNER: services
 import type { NavItem } from '@/featureTypes'
-
-/*
- * Navigation entries of the "cases" feature. `to` is absolute; `roles` limits visibility.
- *   { to: '/staff/bookings', label: 'Bookings', icon: 'calendar', roles: ['intake', 'manager'] }
- */
-
-/** Sidebar of the staff workspace. */
-export const staffNav: NavItem[] = []
-
-/** Sidebar of the admin area. */
+export const staffNav: NavItem[] = [{ to: '/staff', label: 'Home', icon: 'home', end: true }, { to: '/staff/cases', label: 'Cases', icon: 'folder' }, { to: '/staff/intake', label: 'Assisted intake', icon: 'phone', roles: ['intake'] }]
 export const adminNav: NavItem[] = []
-
-/** Menu of the resident area (`/my`); `roles` is ignored there. */
-export const residentNav: NavItem[] = []
+export const residentNav: NavItem[] = [{ to: '/my', label: 'My requests', icon: 'folder', end: true }]

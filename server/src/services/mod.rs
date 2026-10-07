@@ -1,21 +1,18 @@
-// OWNER: services
-#![allow(dead_code, unused_variables)]
-//! Service catalog, definitions, validation, builder, bulk import, mock-AI suggestion.
-
+//! Service catalogue, builder, bulk imports and optional mock AI draft suggestions.
+pub mod admin;
+pub mod ai_suggest;
+pub mod catalog;
 pub mod definition;
-
-use axum::Router;
-use sqlx::SqliteConnection;
-
-use crate::error::AppResult;
+pub mod imports;
+mod seed;
+pub mod validation;
 use crate::state::AppState;
-
-/// `/api/services/**`, `/api/admin/services/**`, … (catalog and builder).
+use axum::Router;
+pub use seed::seed;
 pub fn routes() -> Router<AppState> {
-    Router::new()
+    Router::new().merge(catalog::routes()).merge(admin::routes()).merge(imports::routes()).merge(ai_suggest::routes())
 }
 
-/// Seeds the demo service catalog (inside the demo seed transaction; called after platform seed data).
-pub async fn seed(tx: &mut SqliteConnection, state: &AppState) -> AppResult<()> {
-    Ok(())
-}
+#[cfg(test)]
+mod tests;
+pub mod upload;
