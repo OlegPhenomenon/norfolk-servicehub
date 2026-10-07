@@ -1,0 +1,152 @@
+[
+  {
+    "slug": "customer-feedback",
+    "name": "Feedback Form \u2014 Customer Service Charter",
+    "category": "Customer Care",
+    "module": "generic",
+    "department": "Customer Care",
+    "source_url": "https://www.nirc.gov.au/files/assets/public/v/2/customer-service/documents/feedback_form-customer_service_charter.pdf",
+    "definition": {
+      "module": "generic",
+      "summary": "Draft demo service; rules must be checked against the original form.",
+      "outcome": "A Council response after review.",
+      "who_can_apply": "Residents and authorised representatives.",
+      "price_note": "No price configured.",
+      "keywords": [],
+      "fields": [
+        {
+          "key": "applicant_name",
+          "type": "text",
+          "label": "Name of applicant",
+          "required": true
+        },
+        {
+          "key": "details",
+          "type": "textarea",
+          "label": "Request details",
+          "required": true
+        }
+      ],
+      "documents": [],
+      "workflow": {
+        "steps": [
+          {
+            "key": "intake",
+            "kind": "review",
+            "role": "intake",
+            "label": "Check request",
+            "applicant_label": "We are checking your request."
+          },
+          {
+            "key": "done",
+            "kind": "complete",
+            "label": "Complete",
+            "applicant_label": "Complete."
+          }
+        ]
+      },
+      "deadlines": [],
+      "pricing": []
+    }
+  },
+  {
+    "slug": "account-authority",
+    "name": "Authority To Release and Provide Private Account Information",
+    "category": "Customer Care",
+    "module": "generic",
+    "department": "Customer Care",
+    "source_url": "https://www.nirc.gov.au/files/assets/public/v/2/customer-service/documents/authority_to_release_and_provide_private_account_information.pdf",
+    "definition": {
+      "module": "generic",
+      "summary": "Draft demo service; rules must be checked against the original form.",
+      "outcome": "A Council response after review.",
+      "who_can_apply": "Residents and authorised representatives.",
+      "price_note": "No price configured.",
+      "keywords": [],
+      "fields": [
+        {
+          "key": "applicant_name",
+          "type": "text",
+          "label": "Name of applicant",
+          "required": true
+        },
+        {
+          "key": "details",
+          "type": "textarea",
+          "label": "Request details",
+          "required": true
+        }
+      ],
+      "documents": [],
+      "workflow": {
+        "steps": [
+          {
+            "key": "intake",
+            "kind": "review",
+            "role": "intake",
+            "label": "Check request",
+            "applicant_label": "We are checking your request."
+          },
+          {
+            "key": "done",
+            "kind": "complete",
+            "label": "Complete",
+            "applicant_label": "Complete."
+          }
+        ]
+      },
+      "deadlines": [],
+      "pricing": []
+    }
+  },
+  {
+    "slug": "library-resident-membership",
+    "name": "Library Resident Membership Application 2022\u20132023",
+    "category": "Customer Care",
+    "module": "generic",
+    "department": "Customer Care",
+    "source_url": "https://www.nirc.gov.au/files/assets/public/v/1/customer-service/documents/library_resident_membership_application_2022___2023.pdf",
+    "definition": {
+      "module": "generic",
+      "summary": "Draft demo service; rules must be checked against the original form.",
+      "outcome": "A Council response after review.",
+      "who_can_apply": "Residents and authorised representatives.",
+      "price_note": "No price configured.",
+      "keywords": [],
+      "fields": [
+        {
+          "key": "applicant_name",
+          "type": "text",
+          "label": "Name of applicant",
+          "required": true
+        },
+        {
+          "key": "applicant_name",
+          "type": "textarea",
+          "label": "Request details",
+          "required": true
+        }
+      ],
+      "documents": [],
+      "workflow": {
+        "steps": [
+          {
+            "key": "intake",
+            "kind": "review",
+            "role": "intake",
+            "label": "Check request",
+            "applicant_label": "We are checking your request."
+          },
+          {
+            "key": "done",
+            "kind": "complete",
+            "label": "Complete",
+            "applicant_label": "Complete."
+          }
+        ]
+      },
+      "deadlines": [],
+      "pricing": []
+    }
+  }
+]

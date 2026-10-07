@@ -13,6 +13,8 @@ use crate::error::{AppError, AppResult};
 /// A whole service definition.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServiceDefinition {
+    #[serde(default = "default_module")]
+    pub module: String,
     pub summary: String,
     pub outcome: String,
     #[serde(default)]
@@ -295,3 +297,9 @@ mod tests {
         assert!(ServiceDefinition::parse(&json.replace("\"type\": \"text\"", "\"type\": \"script\"")).is_err());
     }
 }
+
+fn default_module() -> String {
+    "generic".into()
+}
+
+pub use super::validation::{ValidationIssue, validate_definition};
