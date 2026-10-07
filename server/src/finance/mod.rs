@@ -1,28 +1,38 @@
-// OWNER: finance
-#![allow(dead_code, unused_variables)]
-//! Price lists, invoices, DemoPay checkout & webhooks, bank statements, allocations, deposits, refunds, ledger.
-
+//! Prices, receipts, allocations, deposits and a balanced integer ledger.
 pub mod api;
+mod deposits;
 pub mod hooks;
-
-use axum::Router;
+pub(crate) mod ledger;
+mod payments;
+mod prices;
+mod routes;
+mod statements;
+#[cfg(test)]
+mod tests;
+mod views;
+mod webhooks;
+use crate::{
+    error::{AppError, AppResult},
+    state::AppState,
+};
 use serde_json::Value;
 use sqlx::SqliteConnection;
-
-use crate::error::AppResult;
-use crate::state::AppState;
-
-/// Includes `/api/webhooks/**` (exempt from CSRF; verify the HMAC signature with `cfg.webhook_secret`).
-pub fn routes() -> Router<AppState> {
-    Router::new()
+pub fn routes() -> axum::Router<AppState> {
+    routes::routes()
 }
-
-/// Jobs with kind prefix `finance.`.
-pub async fn handle_job(state: &AppState, kind: &str, payload: &Value) -> AppResult<()> {
-    Ok(())
-}
-
-/// Seeds price items and price versions (inside the demo seed transaction).
 pub async fn seed(tx: &mut SqliteConnection, state: &AppState) -> AppResult<()> {
-    Ok(())
+    prices::seed(tx, state).await
+}
+pub async fn handle_job(state: &AppState, kind: &str, payload: &Value) -> AppResult<()> {
+    match kind {
+        "finance.request_refund" => {
+            deposits::request_job(
+                state,
+                payload["refund_id"].as_i64().ok_or_else(|| AppError::internal("Missing refund id"))?,
+            )
+            .await
+        }
+        "finance.mock_refund" | "finance.mock_webhook" => crate::mock::pay::handle_job(state, kind, payload).await,
+        _ => Err(AppError::internal(format!("Unknown finance job {kind}"))),
+    }
 }

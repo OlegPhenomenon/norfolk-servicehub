@@ -1,0 +1,5 @@
+date,amount,description,reference,bank_txn_id,payer
+2026-10-07,365.00,Fictional Rawson Hall fee and refundable bond,NSH-2026-000001,DEMO-BANK-001,Alexey Turner (fictional)
+2026-10-07,50.00,Fictional partial payment,NSH-2026-000002,DEMO-BANK-002,Ben Carter (fictional)
+2026-10-07,90.00,Fictional transfer with unclear reference,Thank you,DEMO-BANK-003,Fictional island resident
+2026-10-07,365.00,Fictional duplicate of prior transaction,NSH-2026-000001,DEMO-BANK-001,Alexey Turner (fictional)
