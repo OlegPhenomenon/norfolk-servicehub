@@ -1,23 +1,25 @@
-// OWNER: records
 import type { RouteObject } from 'react-router'
-
-/*
- * Routes of the "records" feature. Paths are RELATIVE to the area they are mounted in (no leading slash).
- * Prefer lazy routes so each feature is its own chunk:
- *
- *   { path: 'bookings/:id', lazy: async () => ({ Component: (await import('./pages/BookingPage')).BookingPage }) }
- *
- * An `index: true` route in residentRoutes/staffRoutes/adminRoutes replaces the platform's placeholder overview page.
- */
-
-/** Children of the public layout at `/`, e.g. `services`, `services/:slug`, `notices`. */
+import { RequireStaff } from '@/auth/RequireStaff'
+import { AuthorityPage, BackupsPage, DeliveriesPage, RetentionPage, SettingsPage, UsersPage } from './AdminPages'
+import { DashboardPage, MetricPage } from './DashboardPage'
+import { IntegrationsPage } from './IntegrationsPage'
+import { LegacyImportPage } from './LegacyImportPage'
+import { InvitePage, OrganisationPage } from './OrganisationPage'
+import { RecordsPage } from './RecordsPage'
 export const publicRoutes: RouteObject[] = []
-
-/** Children of `/my` (signed-in residents and businesses). */
-export const residentRoutes: RouteObject[] = []
-
-/** Children of `/staff` (staff who passed 2FA). */
-export const staffRoutes: RouteObject[] = []
-
-/** Children of `/admin` (sysadmin / manager). */
-export const adminRoutes: RouteObject[] = []
+export const residentRoutes: RouteObject[] = [{ path: 'organisation', Component: OrganisationPage }, { path: 'invites/:token', Component: InvitePage }]
+export const staffRoutes: RouteObject[] = [
+  { path: 'dashboard', element: <RequireStaff roles={['manager']}><DashboardPage /></RequireStaff> },
+  { path: 'dashboard/metrics/:metric', element: <RequireStaff roles={['manager']}><MetricPage /></RequireStaff> },
+  { path: 'records', element: <RequireStaff roles={['manager']}><RecordsPage /></RequireStaff> },
+  { path: 'authority', element: <RequireStaff roles={['manager']}><AuthorityPage /></RequireStaff> },
+]
+export const adminRoutes: RouteObject[] = [
+  { path: 'users', element: <RequireStaff roles={['sysadmin']}><UsersPage /></RequireStaff> },
+  { path: 'settings', element: <RequireStaff roles={['sysadmin']}><SettingsPage /></RequireStaff> },
+  { path: 'deliveries', element: <RequireStaff roles={['sysadmin']}><DeliveriesPage /></RequireStaff> },
+  { path: 'integrations', element: <RequireStaff roles={['sysadmin']}><IntegrationsPage /></RequireStaff> },
+  { path: 'legacy-import', element: <RequireStaff roles={['sysadmin']}><LegacyImportPage /></RequireStaff> },
+  { path: 'backups', element: <RequireStaff roles={['sysadmin']}><BackupsPage /></RequireStaff> },
+  { path: 'retention', element: <RequireStaff roles={['sysadmin']}><RetentionPage /></RequireStaff> },
+]

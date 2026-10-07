@@ -1,0 +1,10 @@
+export interface RecordCase { id: number; number: string | null; title: string; status: string; applicant_name?: string; property_ref?: string; retention_until?: string; legal_hold?: number; closed_at?: string }
+export interface Delivery { id: number; system_code: string; operation_id: string; kind: string; status: string; attempts: number; external_ref: string | null; last_error: string | null; updated_at: string; next_attempt_at: string | null; case_id?: number | null }
+export interface ExternalSystem { code: string; name: string; outage: number; drop_responses: number; enabled: number }
+export interface StaffUser { id: number; display_name: string; email: string; kind: string; is_active: number; totp_enabled: number }
+export interface Dashboard { metrics: Record<string, number>; services: { service_id: number; service_name: string; metrics: Record<string, number>; median_days: number | null }[]; workload: { user_id: number; name: string; open: number; overdue: number }[] }
+export interface RecordPanel { revision: number; legal_hold: boolean; retention_until: string | null; holds: { reason: string; placed_at: string; released_at: string | null }[]; disposed: { reason: string; at: string }[] }
+export interface ComplaintPanelData { case: { id: number; status: string; revision: number }; hidden_from?: { id: number; display_name: string }[]; staff?: { id: number; display_name: string }[]; subjects?: number[]; links: { id: number; number: string; title: string; kind: string }[]; can_triage: boolean; can_request_review: boolean }
+export interface Organisation { id: number; name: string; role: string; members: { id: number; user_id: number | null; invite_email: string; display_name: string | null; role: string; status: string }[] }
+export interface ImportRow { row: number; source_system: string; source_id: string; title: string; errors: string[]; duplicate: boolean; possible_duplicate: boolean; case_id?: number | null }
+export interface ImportReport { id: number; status: string; rows: ImportRow[]; valid: number; errors: number; duplicates: number; possible_duplicates: number }
