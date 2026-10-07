@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '@/api/client'
-import { Alert, Button, ButtonLink, Card, Checkbox, DateTime, EmptyState, ErrorAlert, Field, PageHeader, QueryView, Select, StatusPill, Table } from '@/ui'
+import { Alert, Button, ButtonLink, Card, Checkbox, DateTime, EmptyState, ErrorAlert, Field, PageHeader, QueryView, Select, StatusPill, Table, TextInput } from '@/ui'
 import type { Delivery, ExternalSystem } from './types'
 import { useCommand } from './useCommand'
 export function DeliveryTable({ deliveries, admin = false }: { deliveries: Delivery[]; admin?: boolean }) {
@@ -20,9 +20,10 @@ function RetryDelivery({ id }: { id: number }) {
 }
 function SystemControls({ system }: { system: ExternalSystem }) {
   const update = useCommand(`/api/admin/integrations/systems/${system.code}`, 'Mock system updated')
+  const [endpoint,setEndpoint]=useState(system.base_url)
   const [showRemote, setShowRemote] = useState(false)
   const remote = useQuery({ queryKey: ['records', 'remote', system.code], queryFn: () => api.get<{ id: number; operation_id: string; external_ref: string; received_at: string; payload_json: string | null }[]>(`/api/admin/mock-records/${system.code}`), enabled: showRemote })
-  return <Card title={system.name}><ErrorAlert error={update.error} /><div className="flex flex-wrap gap-5"><Checkbox label="Simulate outage" checked={system.outage === 1} disabled={update.isPending} onChange={e => update.mutate({ outage: e.target.checked, drop_responses: system.drop_responses === 1 })} /><Checkbox label="Accept record but lose the first response" checked={system.drop_responses === 1} disabled={update.isPending} onChange={e => update.mutate({ outage: system.outage === 1, drop_responses: e.target.checked })} /><Button variant="secondary" onClick={() => setShowRemote(!showRemote)}>{showRemote ? 'Hide' : 'View'} remote system contents</Button></div>
+  return <Card title={system.name}><ErrorAlert error={update.error} /><form className="space-y-3 mb-4" onSubmit={e=>{e.preventDefault();update.mutate({base_url:endpoint,outage:system.outage===1,drop_responses:system.drop_responses===1})}}><Field label="Integration endpoint"><TextInput value={endpoint} onChange={e=>setEndpoint(e.target.value)}/></Field><Button type="submit" loading={update.isPending}>Save endpoint</Button></form><div className="flex flex-wrap gap-5"><Checkbox label="Simulate outage" checked={system.outage === 1} disabled={update.isPending} onChange={e => update.mutate({ outage: e.target.checked, drop_responses: system.drop_responses === 1 })} /><Checkbox label="Accept record but lose the first response" checked={system.drop_responses === 1} disabled={update.isPending} onChange={e => update.mutate({ outage: system.outage === 1, drop_responses: e.target.checked })} /><Button variant="secondary" onClick={() => setShowRemote(!showRemote)}>{showRemote ? 'Hide' : 'View'} remote system contents</Button></div>
     {showRemote && <QueryView query={remote}>{d => <Table caption="Records held by the mock remote system" rows={d} rowKey={r => r.id} empty={<EmptyState title="The remote system has no records" />} columns={[{ key: 'operation', header: 'Operation ID', cell: r => r.operation_id }, { key: 'reference', header: 'Reference', cell: r => r.external_ref }, { key: 'at', header: 'Received', cell: r => <DateTime value={r.received_at} /> }, { key: 'payload', header: 'Content', cell: r => r.payload_json ? <details><summary>View accessible content</summary><pre className="max-w-md whitespace-pre-wrap break-all text-xs">{r.payload_json}</pre></details> : 'Requires case access' }]} />}</QueryView>}
   </Card>
 }

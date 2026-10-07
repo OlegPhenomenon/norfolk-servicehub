@@ -11,7 +11,8 @@ use crate::{
 use axum::extract::State;
 use serde::{Deserialize, Serialize};
 use sqlx::SqliteConnection;
-const TYPES: &[&str] = &["development_approval", "building_approval", "modification_approval", "planning_certificate"];
+const TYPES: &[&str] =
+    &["development_approval", "building_approval", "modification_approval", "planning_certificate", "service_response"];
 pub fn label(t: &str) -> String {
     t.replace('_', " ")
 }
@@ -118,18 +119,14 @@ pub async fn list(
         .await?;
     let definition: serde_json::Value = serde_json::from_str(&requirements)?;
     Ok(Json(
-        serde_json::json!({"editable":editable,"can_upload":editable && super::uploads::writable(a).is_ok(),"can_comment":editable && can_comment,"can_prepare":can_prepare,"document_requirements":definition.get("documents").cloned().unwrap_or_else(||serde_json::json!([])),"items":rows,"authorities":authorities,"staff":a.is_staff(),"revision":case.revision,"building_project_id":case.building_project_id}),
+        serde_json::json!({"editable":editable,"can_upload":editable && super::uploads::writable(a).is_ok(),"can_comment":editable && can_comment,"can_prepare":can_prepare,"document_requirements":definition.get("documents").cloned().unwrap_or_else(||serde_json::json!([])),"items":rows,"authorities":authorities,"staff":a.is_staff(),"revision":case.revision,"building_project_id":case.building_project_id,"allowed_decision_types":crate::services::validation::decision_types(&case.module)}),
     ))
 }
 async fn validate(tx: &mut SqliteConnection, case: &CaseRow, input: &Input) -> AppResult<Vec<i64>> {
     if !TYPES.contains(&input.decision_type.as_str()) {
         return Err(AppError::field("decision_type", "Choose an approval or planning certificate."));
     }
-    let permitted = match case.module.as_str() {
-        "planning_certificate" => input.decision_type == "planning_certificate",
-        "building" => input.decision_type != "planning_certificate",
-        _ => false,
-    };
+    let permitted = crate::services::validation::decision_types(&case.module).contains(&input.decision_type.as_str());
     if !permitted {
         return Err(AppError::field("decision_type", "This decision type does not match the service."));
     }
@@ -396,6 +393,9 @@ pub(crate) async fn issue_document(
     if !crate::cases::workflow::is_open(&current) || d.status != "pending_approval" {
         return Err(AppError::conflict("An open request and pending approval are required for issuance."));
     }
+    if actor.user_id == d.prepared_by {
+        return Err(AppError::forbidden_msg("The approver must be different from the preparer."));
+    }
     if !authority(tx, actor, case, &d.decision_type).await? {
         return Err(AppError::forbidden_msg("An active authority for this decision type is required."));
     }
@@ -466,7 +466,12 @@ pub(crate) async fn issue_document(
         tx,
         case,
         &format!("Your {title} has been issued — download it"),
-        "The document includes the outcome, reasons, conditions and evidence versions.",
+        &format!(
+            "{title}\nOutcome: {}\n{}\nConditions: {}",
+            d.outcome,
+            d.reasons,
+            d.conditions.as_deref().unwrap_or("")
+        ),
     )
     .await?;
     Ok(())

@@ -31,6 +31,7 @@ export function RequireStaff({ roles, children }: { roles?: readonly Role[]; chi
   }
   if (me.mfa_required && !me.user.totp_enabled) return <Navigate to={withNext('/staff/settings/2fa', here)} replace />
   if (me.mfa_required) return <Navigate to={withNext('/login/totp', here)} replace />
+  if (me.password_change_required) return <Navigate to="/login/change-password" replace />
   if (roles && !hasAnyRole(me, roles)) {
     return (
       <PageContainer narrow>

@@ -15,6 +15,8 @@ export function MoneyPanel({ caseId }: { caseId: number }) {
   const returned = new URLSearchParams(location.search).get('paid') === '1'
   const me = useMe().data
   const finance = hasRole(me, 'finance')
+  const manager = hasRole(me, 'manager')
+  const [refundOpen, setRefundOpen] = useState(false), [unmatchId,setUnmatchId] = useState<number|null>(null), [waiverOpen,setWaiverOpen] = useState(false)
   const q = useQuery({ queryKey: ['finance', 'money', caseId], queryFn: () => api.get<MoneyData>(`/api/cases/${caseId}/money`), refetchInterval: query => {
     const data = query.state.data
     const open = data?.checkout_sessions.some(s => s.status === 'open')
@@ -42,10 +44,15 @@ export function MoneyPanel({ caseId }: { caseId: number }) {
       { label: 'Refundable bond held', value: <Money cents={data.summary.deposits_held_cents} /> },
       { label: 'Refunds completed', value: <Money cents={data.summary.refunded_cents} /> },
     ]} /></Card>
+    {finance && data.staff && data.customer_credit_cents > 0 && <Button onClick={()=>setRefundOpen(true)}>Refund customer credit</Button>}
+    {manager && data.staff && !data.invoices.some(i=>i.kind==='invoice') && <Button variant="secondary" onClick={()=>setWaiverOpen(true)}>Approve price exemption</Button>}
+    <Dialog title="Refund customer credit" open={refundOpen} onClose={()=>setRefundOpen(false)}><ActionForm url={`/api/cases/${caseId}/refund-credit`} label="Request refund" body={{expected_revision:data.revision}} inputs={[{key:'amount_cents',label:'Refund amount (AUD)',money:true},{key:'reason',label:'Reason'}]} onDone={()=>setRefundOpen(false)} /></Dialog>
+    <Dialog title="Return bank transfer to suspense" open={unmatchId !== null} onClose={()=>setUnmatchId(null)}><ActionForm url={`/api/finance/payments/${unmatchId}/unmatch`} label="Unmatch payment" body={{expected_revision:data.revision}} inputs={[{key:'reason',label:'Reason for correction'}]} onDone={()=>setUnmatchId(null)} /></Dialog>
+    <Dialog title="Approve price exemption before invoicing" open={waiverOpen} onClose={()=>setWaiverOpen(false)}><ActionForm url={`/api/cases/${caseId}/price-waivers`} label="Approve exemption" body={{expected_revision:data.revision}} inputs={[{key:'item_code',label:'Fee to waive',options:(data.waiver_quotes??[]).map(l=>({value:l.item_code,label:l.description}))},{key:'amount_cents',label:'Amount waived (AUD)',money:true},{key:'reason',label:'Exemption reason'}]} onDone={()=>setWaiverOpen(false)} /></Dialog>
     {pay.error ? <ErrorAlert error={pay.error} /> : null}
-    {data.invoices.length === 0 ? <EmptyState title="No charges yet" description="An invoice will appear here when payment is required." /> : data.invoices.map(invoice => <Card key={invoice.id} title={invoice.number} description={`${invoice.kind.replaceAll('_', ' ')} • priced for`} actions={<div className="flex gap-2 flex-wrap"><DateTime value={invoice.pricing_date} format="date" />{invoice.kind === 'invoice' && invoice.outstanding_cents > 0 ? <><Button loading={pay.isPending} onClick={() => pay.mutate(invoice.id)}>Pay <Money cents={invoice.outstanding_cents} /></Button>{finance && data.staff ? <Button variant="secondary" onClick={() => setCounter(invoice)}>Record counter payment</Button> : null}</> : <StatusPill status={invoice.kind === 'invoice' ? 'paid' : invoice.kind} label={invoice.kind === 'invoice' ? 'Settled' : undefined} />}</div>}>
+    {data.invoices.length === 0 ? <EmptyState title="No charges yet" description="An invoice will appear here when payment is required." /> : data.invoices.map(invoice => <Card key={invoice.id} title={invoice.number} description={`${invoice.kind.replaceAll('_', ' ')} • priced for`} actions={<div className="flex gap-2 flex-wrap"><DateTime value={invoice.pricing_date} format="date" />{invoice.kind === 'invoice' && invoice.outstanding_cents > 0 ? <>{data.online_payment_enabled && <Button loading={pay.isPending} onClick={() => pay.mutate(invoice.id)}>Pay <Money cents={invoice.outstanding_cents} /></Button>}{finance && data.staff ? <Button variant="secondary" onClick={() => setCounter(invoice)}>Record counter payment</Button> : null}</> : <StatusPill status={invoice.kind === 'invoice' ? 'paid' : invoice.kind} label={invoice.kind === 'invoice' ? 'Settled' : undefined} />}</div>}>
       <Table caption={`${invoice.number} charges`} rows={invoice.lines} rowKey={l => l.id} columns={[
-        { key: 'description', header: 'Charge', cell: l => <><p>{l.kind === 'deposit' ? 'Refundable bond' : l.description}</p>{l.kind === 'deposit' ? <p className="text-sm text-muted">Held until inspection and a bond decision</p> : null}<p className="text-sm text-muted">{l.quantity_minutes != null ? `${l.quantity_minutes} actual minutes` : `${l.quantity_milli / 1000} units`} at <Money cents={l.unit_amount_cents} /></p></> },
+        { key: 'description', header: 'Charge', cell: l => <><p>{l.kind === 'deposit' ? 'Refundable bond' : l.description}</p>{l.kind === 'deposit' ? <p className="text-sm text-muted">Held until inspection and a bond decision</p> : null}<p className="text-sm text-muted">{l.quantity_minutes != null ? `${l.quantity_minutes} ${invoice.kind === 'estimate' ? 'estimated' : 'actual'} minutes` : `${l.quantity_milli / 1000} units`} at <Money cents={l.unit_amount_cents} /></p></> },
         { key: 'amount', header: 'Amount', cell: l => <Money cents={l.amount_cents} /> },
         { key: 'paid', header: 'Received', cell: l => <Money cents={l.paid_cents} /> },
         { key: 'credit', header: 'Credited', cell: l => <Money cents={l.credited_cents} /> },
@@ -57,7 +64,7 @@ export function MoneyPanel({ caseId }: { caseId: number }) {
     </Card>)}
     <Card title="Payments received"><Table caption="Confirmed payments" rows={data.payments} rowKey={p => p.id} columns={[
       { key: 'date', header: 'Received', cell: p => <DateTime value={p.received_at} /> },
-      { key: 'source', header: 'Source', cell: p => p.source === 'provider' ? 'DemoPay' : p.source === 'counter' ? 'Customer Care counter' : 'Bank transfer' },
+      { key: 'source', header: 'Source', cell: p => <>{p.source === 'provider' ? 'DemoPay' : p.source === 'counter' ? 'Customer Care counter' : 'Bank transfer'}{p.source === 'bank_transfer' && finance && data.staff && <Button variant="secondary" onClick={()=>setUnmatchId(p.id)}>Unmatch to suspense</Button>}</> },
       { key: 'amount', header: 'Amount', cell: p => <Money cents={p.amount_cents} /> },
       { key: 'credit', header: 'Available credit', cell: p => <><Money cents={p.credit_cents} />{finance && data.staff && p.credit_cents > 0 ? <Button variant="secondary" onClick={() => setCreditPayment(p.id)}>Apply credit</Button> : null}</> },
     ]} empty={<EmptyState title="No confirmed payments" description="Uploaded receipts are evidence only and do not count as money received." />} /></Card>

@@ -8,6 +8,7 @@
  */
 import { createBrowserRouter, type RouteObject } from 'react-router'
 import { DemoPage } from './auth/DemoPage'
+import { ChangePasswordPage } from './auth/ChangePasswordPage'
 import { LoginPage } from './auth/LoginPage'
 import { RegisterPage } from './auth/RegisterPage'
 import { TotpEnrolPage } from './auth/TotpEnrolPage'
@@ -50,6 +51,7 @@ export const routes: RouteObject[] = [
               { index: true, Component: HomePage },
               { path: 'login', Component: LoginPage },
               { path: 'login/totp', Component: TotpPage },
+              { path: 'login/change-password', Component: ChangePasswordPage },
               { path: 'register', Component: RegisterPage },
               { path: 'demo', Component: DemoPage },
               { path: 'mock/mail', Component: DemoMailPage },

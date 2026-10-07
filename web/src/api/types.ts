@@ -60,6 +60,7 @@ export interface Me {
   csrf_token: string
   /** Staff session that has not passed TOTP yet. */
   mfa_required: boolean
+  password_change_required: boolean
   demo_mode: boolean
   /** Demo mode: when the data will next be reset. */
   next_reset_at: Timestamp | null

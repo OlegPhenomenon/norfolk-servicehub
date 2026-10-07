@@ -11,5 +11,6 @@ export function RequireAuth({ children }: { children: ReactNode }) {
   if (isPending) return <LoadingState label="Checking your session…" className="min-h-[50vh]" />
   if (error || !me) return <div className="mx-auto max-w-xl p-6"><ErrorAlert error={error} onRetry={() => void refetch()} /></div>
   if (!me.user) return <Navigate to={withNext('/login', location.pathname + location.search)} replace />
+  if (!me.mfa_required && me.password_change_required) return <Navigate to="/login/change-password" replace />
   return <>{children}</>
 }

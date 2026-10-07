@@ -235,8 +235,11 @@ async fn systems(State(state): State<AppState>, actor: Actor) -> AppResult<Json<
 }
 #[derive(Deserialize)]
 struct Switches {
+    #[serde(default)]
     outage: bool,
+    #[serde(default)]
     drop_responses: bool,
+    base_url: Option<String>,
 }
 async fn toggle(
     State(state): State<AppState>,
@@ -246,6 +249,20 @@ async fn toggle(
 ) -> AppResult<Json<Value>> {
     require_role(&actor, Role::Sysadmin)?;
     let mut tx = write_tx(&state.db).await?;
+    if let Some(url) = &body.base_url {
+        if !(url.starts_with("https://")
+            || url.starts_with("http://")
+            || (state.cfg.demo_mode && url.starts_with("/mock/")))
+            || url.len() > 2000
+        {
+            return Err(AppError::field("base_url", "Use an HTTP or HTTPS integration endpoint."));
+        }
+        sqlx::query("UPDATE external_systems SET base_url=? WHERE code=?")
+            .bind(url)
+            .bind(&code)
+            .execute(&mut *tx)
+            .await?;
+    }
     let changed = sqlx::query("UPDATE mock_system_state SET outage=?,drop_responses=? WHERE system_code=?")
         .bind(body.outage)
         .bind(body.drop_responses)

@@ -68,6 +68,7 @@ export interface QuoteLine {
   kind: string
 }
 export interface Preview {
+  credit_delta_cents: number
   available: boolean
   conflicts: Busy[]
   old_lines: QuoteLine[]

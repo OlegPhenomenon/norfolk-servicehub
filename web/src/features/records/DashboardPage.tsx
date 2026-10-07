@@ -5,7 +5,7 @@ import { api, isApiError } from '@/api/client'
 import { Card, Field, TextInput, PageHeader, QueryView, Table, humanize, norfolkToday } from '@/ui'
 import type { Dashboard, RecordCase } from './types'
 import { CasesTable } from './CasesTable'
-const LABELS: Record<string, string> = { received: 'Received in period', open: 'Open requests', waiting_on_applicant: 'Waiting on applicant', completed: 'Completed', refused: 'Refused', withdrawn: 'Withdrawn', cancelled: 'Cancelled', reopened: 'Reopened', unassigned: 'Unassigned', overdue: 'Overdue', due_soon: 'Due in next 3 business days' }
+const LABELS: Record<string, string> = { received: 'Received in period', open: 'Open requests', waiting_on_applicant: 'Waiting on applicant', completed: 'Completed', refused: 'Refused', withdrawn: 'Withdrawn', cancelled: 'Cancelled', closed_duplicate: 'Closed as duplicate', reopened: 'Reopened', unassigned: 'Unassigned', overdue: 'Overdue', due_soon: 'Due in next 3 business days' }
 function metricLink(metric: string, period: string, extra?: Record<string, string>) {
   const search = new URLSearchParams(period)
   for (const [key, value] of Object.entries(extra ?? {})) search.set(key, value)

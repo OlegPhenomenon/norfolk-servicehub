@@ -75,6 +75,22 @@ pub async fn seed(tx: &mut SqliteConnection, state: &AppState) -> AppResult<()> 
     ] {
         sqlx::query("INSERT INTO retention_rules(record_class,retain_years,trigger_event,description) VALUES(?,?,'case_closed',?) ON CONFLICT DO NOTHING").bind(class).bind(years).bind(description).execute(&mut *tx).await?;
     }
+    for category in [
+        "application",
+        "plans",
+        "evidence",
+        "photo",
+        "supporting",
+        "receipt",
+        "decision",
+        "letter",
+        "invoice",
+        "credit_note",
+        "certificate",
+        "legacy",
+    ] {
+        sqlx::query("INSERT INTO retention_rules(record_class,retain_years,trigger_event,description) VALUES(?,7,'case_closed','Illustrative document class policy; confirm with Council') ON CONFLICT DO NOTHING").bind(format!("document:{category}")).execute(&mut *tx).await?;
+    }
     for (key, email) in [
         ("notify.customer_care_email", "customer-care@example.invalid"),
         ("notify.finance_email", "finance@example.invalid"),

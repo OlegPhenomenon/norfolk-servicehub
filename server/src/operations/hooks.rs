@@ -202,7 +202,7 @@ pub async fn pricing_lines(
         let b = model::booking(tx, case.id).await?;
         let u: model::Unit =
             sqlx::query_as("SELECT * FROM bookable_units WHERE id=?").bind(b.unit_id).fetch_one(&mut *tx).await?;
-        return Ok(Some(venue_lines(tx, &u, &b.start_at, &b.end_at).await?));
+        return Ok(Some(venue_case_lines(tx, case.id, &u, &b.start_at, &b.end_at).await?));
     }
     if case.module == "equipment_hire" {
         // Approval issues the final invoice. Generic payment entry must not re-estimate usage.
@@ -231,6 +231,13 @@ pub async fn on_case_cancelled(
     .await?
     {
         super::bookings::record_cancellation(tx, &b, state.now(), actor.db_id(), reason).await?;
+        let unused: bool = sqlx::query_scalar("SELECT unused FROM booking_cancellations WHERE booking_id=?")
+            .bind(b.id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if unused {
+            finance::api::credit_unused_fees(tx, state, actor, case_id, reason).await?;
+        }
         b.status = "cancelled".into();
         b.revision += 1;
         sqlx::query("UPDATE bookings SET status='cancelled',revision=?,updated_at=? WHERE id=?")
@@ -264,4 +271,15 @@ pub async fn on_case_cancelled(
     )
     .await?;
     model::role_notice(tx, case_id, "finance", "Cancelled request: review settlement", reason).await
+}
+
+pub async fn venue_case_lines(
+    tx: &mut SqliteConnection,
+    case: i64,
+    u: &model::Unit,
+    start: &str,
+    end: &str,
+) -> AppResult<(NaiveDate, Vec<QuoteLine>)> {
+    let (date, lines) = venue_lines(tx, u, start, end).await?;
+    Ok((date, finance::api::apply_waivers(tx, case, lines).await?))
 }

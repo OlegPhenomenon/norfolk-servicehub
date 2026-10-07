@@ -37,7 +37,9 @@ pub async fn send(conn: &mut SqliteConnection, mut notice: Notice) -> AppResult<
                 .bind(case_id)
                 .fetch_optional(&mut *conn)
                 .await?;
-        if let Some(number) = confidential {
+        if let Some(number) = confidential
+            && notice.user_id.is_some()
+        {
             let reference = number.as_deref().unwrap_or("request");
             notice.subject = format!("Update on your feedback {reference}");
             notice.body = format!("There is an update on your feedback {reference} — sign in to read it");
@@ -58,6 +60,36 @@ pub async fn send(conn: &mut SqliteConnection, mut notice: Notice) -> AppResult<
             crate::clock::now(),
         )
         .await?;
+    }
+    if let (Some(cid), Some(uid)) = (notice.case_id, notice.user_id) {
+        let confidential: bool =
+            sqlx::query_scalar("SELECT confidential FROM cases WHERE id=?").bind(cid).fetch_one(&mut *conn).await?;
+        if !confidential
+            && let Some(actor) = crate::auth::Actor::load_recipient(conn, uid).await?
+            && actor.is_staff()
+        {
+            let key = if actor.has_role(crate::authz::Role::Finance) {
+                "notify.finance_email"
+            } else if actor.has_role(crate::authz::Role::FieldWorker) {
+                "notify.works_depot_email"
+            } else {
+                "notify.customer_care_email"
+            };
+            if let Some(address) = crate::settings::get::<String>(conn, key).await?
+                && notice.email.as_deref() != Some(address.as_str())
+                && !address.trim().is_empty()
+            {
+                let id = insert(conn, Some(uid), "email", Some(&address), &notice, "queued", &now).await?;
+                jobs::enqueue(
+                    conn,
+                    "notify.deliver",
+                    json!({"notification_id":id}),
+                    Some(format!("notify.deliver:{id}")),
+                    crate::clock::now(),
+                )
+                .await?;
+            }
+        }
     }
     Ok(())
 }

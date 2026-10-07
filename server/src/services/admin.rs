@@ -22,10 +22,12 @@ use serde_json::{Value, json};
 use sqlx::SqliteConnection;
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route("/api/admin/services/capabilities/{module}", get(capabilities))
         .route("/api/admin/services", get(list).post(create))
         .route("/api/admin/services/{id}", get(detail).put(update_details))
         .route("/api/admin/services/{id}/versions", post(new_version))
         .route("/api/admin/services/{id}/versions/{v}", put(save))
+        .route("/api/admin/services/{id}/versions/{v}/source", get(source))
         .route("/api/admin/services/{id}/versions/{v}/source-file", post(source_file))
         .route("/api/admin/services/{id}/versions/{v}/{action}", post(action))
 }
@@ -255,7 +257,7 @@ async fn action(
             let blob = input["source_blob_id"]
                 .as_i64()
                 .ok_or_else(|| AppError::field("source_blob_id", "Choose an uploaded PDF."))?;
-            let valid:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM blobs WHERE id=? AND mime='application/pdf' AND scan_status='clean' AND created_by=?)").bind(blob).bind(actor.user_id).fetch_one(&mut *tx).await?;
+            let valid:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM blobs WHERE id=? AND mime='application/pdf' AND scan_status IN ('clean','not_scanned') AND created_by=?)").bind(blob).bind(actor.user_id).fetch_one(&mut *tx).await?;
             if !valid {
                 return Err(AppError::field("source_blob_id", "Choose your uploaded council PDF."));
             }
@@ -300,3 +302,37 @@ async fn source_file(
 }
 
 type VersionProjectionRow = (i64, i64, String, String, Option<i64>, Option<String>, String, Option<String>);
+
+async fn capabilities(actor: Actor, Path(module): Path<String>) -> AppResult<Json<Value>> {
+    require_admin(&actor)?;
+    if !validation::MODULES.contains(&module.as_str()) {
+        return Err(AppError::not_found());
+    }
+    Ok(Json(validation::capabilities(&module)))
+}
+
+async fn source(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path((id, v)): Path<(i64, i64)>,
+) -> AppResult<axum::response::Response> {
+    use axum::response::IntoResponse;
+    require_admin(&actor)?;
+    let blob: Option<i64> =
+        sqlx::query_scalar("SELECT source_blob_id FROM service_versions WHERE id=? AND service_id=?")
+            .bind(v)
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?
+            .flatten();
+    let (row, bytes) = crate::storage::read(&state, blob.ok_or_else(AppError::not_found)?).await?;
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, row.mime),
+            (axum::http::header::CACHE_CONTROL, "private, no-store".into()),
+            (axum::http::header::CONTENT_DISPOSITION, "inline; filename=original-form.pdf".into()),
+        ],
+        bytes,
+    )
+        .into_response())
+}

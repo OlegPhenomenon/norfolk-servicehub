@@ -112,6 +112,13 @@ impl FromRequestParts<AppState> for Actor {
         if !s.actor.mfa_passed {
             return Err(AppError::mfa_required());
         }
+        let required: bool = sqlx::query_scalar("SELECT must_change_password FROM users WHERE id=?")
+            .bind(s.actor.user_id)
+            .fetch_one(&state.db)
+            .await?;
+        if required {
+            return Err(AppError::forbidden_msg("Change your one-time password before continuing."));
+        }
         Ok(s.actor.clone())
     }
 }
@@ -137,14 +144,11 @@ impl FromRequestParts<AppState> for StaffActor {
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
-        let s = current_session(parts, state).await?.ok_or_else(AppError::unauthorized)?;
-        if !s.actor.is_staff() {
+        let actor = Actor::from_request_parts(parts, state).await?;
+        if !actor.is_staff() {
             return Err(AppError::forbidden());
         }
-        if !s.actor.mfa_passed {
-            return Err(AppError::mfa_required());
-        }
-        Ok(StaffActor(s.actor.clone()))
+        Ok(StaffActor(actor))
     }
 }
 

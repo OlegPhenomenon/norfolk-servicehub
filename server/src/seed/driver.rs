@@ -385,9 +385,10 @@ impl Driver {
         let revision = self.revision("priya", case).await?;
         let id = self.req("priya","POST",&format!("/api/cases/{case}/decisions"),json!({"decision_type":kind,"outcome":"approved","reasons":"Fictional specialist assessment completed.","conditions":"Follow approved drawing A-101 v2.","template_id":template["id"],"evidence_version_ids":evidence,"expected_revision":revision})).await?["id"].as_i64().unwrap();
         for action in ["submit", "issue"] {
-            let revision = self.revision("priya", case).await?;
+            let person = if action == "issue" { "helen" } else { "priya" };
+            let revision = self.revision(person, case).await?;
             self.req(
-                "priya",
+                person,
                 "POST",
                 &format!("/api/cases/{case}/decisions/{id}/{action}"),
                 json!({"expected_revision":revision}),

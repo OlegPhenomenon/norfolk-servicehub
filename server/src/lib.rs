@@ -5,6 +5,7 @@ pub mod app;
 pub mod audit;
 pub mod auth;
 pub mod authz;
+pub mod bootstrap;
 pub mod calendar;
 pub mod clock;
 pub mod config;

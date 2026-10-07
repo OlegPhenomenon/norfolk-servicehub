@@ -27,7 +27,23 @@ pub async fn on_case_closed(tx: &mut SqliteConnection, case: &CaseRow) -> AppRes
     let years: i32 = sqlx::query_scalar("SELECT retain_years FROM retention_rules WHERE record_class IN (?, 'default') AND trigger_event = 'case_closed' ORDER BY record_class = ? DESC LIMIT 1")
         .bind(record_class(&case.module)).bind(record_class(&case.module)).fetch_optional(&mut *tx).await?.unwrap_or(7);
     let closed = case.closed_at.as_deref().ok_or_else(|| AppError::conflict("The case is still open."))?;
-    let until = time::fmt_date(anniversary(time::local_date(time::parse(closed)?), years)?);
+    let closed_date = time::local_date(time::parse(closed)?);
+    let mut until = time::fmt_date(anniversary(closed_date, years)?);
+    let documents: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id,category FROM documents WHERE case_id=? AND disposed_at IS NULL")
+            .bind(case.id)
+            .fetch_all(&mut *tx)
+            .await?;
+    for (id, category) in documents {
+        let document_years: i32 = sqlx::query_scalar("SELECT retain_years FROM retention_rules WHERE record_class=?")
+            .bind(format!("document:{category}"))
+            .fetch_optional(&mut *tx)
+            .await?
+            .unwrap_or(years);
+        let document_until = time::fmt_date(anniversary(closed_date, document_years)?);
+        sqlx::query("UPDATE documents SET retention_until=CASE WHEN retention_until>? THEN retention_until ELSE ? END WHERE id=?").bind(&document_until).bind(&document_until).bind(id).execute(&mut *tx).await?;
+        until = until.max(document_until);
+    }
     let changed = sqlx::query(
         "UPDATE cases SET retention_until = ? WHERE id = ? AND (retention_until IS NULL OR retention_until < ?)",
     )

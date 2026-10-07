@@ -224,7 +224,7 @@ async fn planning_certificate_requires_payment_and_specialist_assessment() {
     d.action("priya", c, "advance").await.unwrap();
     let revision = d.revision("priya", c).await.unwrap();
     d.req(
-        "priya",
+        "helen",
         "POST",
         &format!("/api/cases/{c}/decisions/{decision}/issue"),
         json!({"expected_revision":revision}),
@@ -555,7 +555,7 @@ async fn assisted_intake_response_and_confidential_complaint_isolation() {
 
     // Grant Olga a manager role through the admin API to exercise actual drill-down authorization,
     // while the explicit complaint-subject exclusion must still win.
-    d.req("mark", "POST", &format!("/api/admin/users/{olga}/roles"), json!({"role":"manager"})).await.unwrap();
+    d.req("helen", "POST", &format!("/api/admin/users/{olga}/roles"), json!({"role":"manager"})).await.unwrap();
     let records = d.req("olga", "GET", &format!("/api/records/search?number={number}"), json!({})).await.unwrap();
     assert!(records.as_array().unwrap().is_empty());
     for metric in servicehub::records::metrics::METRICS {

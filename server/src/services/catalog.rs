@@ -25,29 +25,45 @@ pub fn routes() -> Router<AppState> {
         .route("/api/public/services", get(list))
         .route("/api/public/services/{slug}", get(detail))
         .route("/api/admin/services/price-items", get(price_picker))
+        .route("/api/admin/services/synonyms", get(synonyms).post(save_synonym))
 }
 /// FTS syntax is built from alphanumeric tokens, never interpolated from raw user input.
 pub fn prefix_query(input: &str, synonyms: bool) -> String {
-    let lower = input.to_lowercase();
-    let mapped = if synonyms {
-        match lower.trim() {
-            "party" | "wedding" | "venue" => "hall",
-            "digger" | "excavator" => "equipment",
-            "pothole" => "road",
-            "building permit" | "da" => "development",
-            "certificate" => "planning certificate",
-            _ => lower.as_str(),
-        }
+    let mappings = if synonyms {
+        vec![
+            ("party".into(), "hall".into()),
+            ("birthday".into(), "hall".into()),
+            ("wedding".into(), "hall".into()),
+            ("venue".into(), "hall".into()),
+            ("digger".into(), "equipment".into()),
+            ("excavator".into(), "equipment".into()),
+            ("hole".into(), "road".into()),
+            ("pothole".into(), "road".into()),
+            ("da".into(), "development".into()),
+            ("permit".into(), "development".into()),
+        ]
     } else {
-        lower.as_str()
+        vec![]
     };
-    mapped
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|s| !s.is_empty())
-        .take(20)
-        .map(|s| format!("\"{s}\"*"))
-        .collect::<Vec<_>>()
-        .join(" AND ")
+    let query = token_query(input, &mappings);
+    if synonyms { query } else { query.replace(" OR ", " AND ") }
+}
+fn token_query(input: &str, mappings: &[(String, String)]) -> String {
+    let lower = input.to_lowercase();
+    let mut tokens = std::collections::BTreeSet::new();
+    for word in lower.split(|c: char| !c.is_alphanumeric()).filter(|s| !s.is_empty()).take(20) {
+        if ["a", "an", "the", "in", "on", "of", "for", "and", "to", "my", "i", "need", "with", "please", "is", "at"]
+            .contains(&word)
+        {
+            continue;
+        }
+        tokens.insert(word.to_owned());
+        for (_, replacement) in mappings.iter().filter(|(token, _)| token == word) {
+            tokens
+                .extend(replacement.split(|c: char| !c.is_alphanumeric()).filter(|s| !s.is_empty()).map(str::to_owned));
+        }
+    }
+    tokens.into_iter().map(|s| format!("\"{s}\"*")).collect::<Vec<_>>().join(" OR ")
 }
 #[derive(Default, Deserialize)]
 struct Filter {
@@ -55,8 +71,10 @@ struct Filter {
     category: Option<String>,
 }
 async fn list(State(state): State<AppState>, Query(filter): Query<Filter>) -> AppResult<Json<Value>> {
-    let query = prefix_query(filter.q.as_deref().unwrap_or(""), true);
-    let rows:Vec<(i64,String,String,String,String,String,String)>=sqlx::query_as("SELECT s.id,s.slug,s.name,s.category,s.module,s.department,v.definition_json FROM services s JOIN service_versions v ON v.service_id=s.id AND v.status='published' WHERE s.is_active=1 AND (? IS NULL OR s.category=?) AND (?='' OR s.id IN (SELECT service_id FROM service_search WHERE service_search MATCH ?)) ORDER BY s.name").bind(&filter.category).bind(&filter.category).bind(&query).bind(&query).fetch_all(&state.db).await?;
+    let mappings: Vec<(String, String)> =
+        sqlx::query_as("SELECT token,replacement FROM service_synonyms").fetch_all(&state.db).await?;
+    let query = token_query(filter.q.as_deref().unwrap_or(""), &mappings);
+    let rows:Vec<(i64,String,String,String,String,String,String)>=sqlx::query_as("SELECT s.id,s.slug,s.name,s.category,s.module,s.department,v.definition_json FROM services s JOIN service_versions v ON v.service_id=s.id AND v.status='published' WHERE s.is_active=1 AND (? IS NULL OR s.category=?) AND (?='' OR s.id IN (SELECT service_id FROM service_search WHERE service_search MATCH ?)) ORDER BY CASE WHEN ?='' THEN 0 ELSE COALESCE((SELECT rank FROM service_search WHERE service_search MATCH ? AND service_id=s.id),0) END,s.name").bind(&filter.category).bind(&filter.category).bind(&query).bind(&query).bind(&query).bind(&query).fetch_all(&state.db).await?;
     let items:Vec<Value>=rows.into_iter().map(|(id,slug,name,category,module,department,def)|{let d:Value=serde_json::from_str(&def).unwrap_or(Value::Null);json!({"id":id,"slug":slug,"name":name,"category":category,"module":module,"department":department,"summary":d["summary"],"outcome":d["outcome"],"price_note":d["price_note"]})}).collect();
     let categories:Vec<String>=sqlx::query_scalar("SELECT DISTINCT category FROM services s WHERE is_active=1 AND EXISTS(SELECT 1 FROM service_versions v WHERE v.service_id=s.id AND v.status='published') ORDER BY category").fetch_all(&state.db).await?;
     Ok(Json(json!({"items":items,"categories":categories})))
@@ -93,6 +111,19 @@ async fn detail(State(state): State<AppState>, Path(slug): Path<String>) -> AppR
     .await?;
     let mut def = ServiceDefinition::parse(&definition)?;
     def.module = service.module.clone();
+    if def.module == "complaint" {
+        let staff: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT id,display_name FROM users WHERE kind='staff' AND is_active=1 ORDER BY display_name",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        if let Some(field) = def.fields.iter_mut().find(|f| f.key == "staff_member_concerned") {
+            field.options = staff
+                .into_iter()
+                .map(|(id, label)| super::definition::SelectOption { value: id.to_string(), label })
+                .collect();
+        }
+    }
     let prices = live_prices(&mut tx, &def, &time::fmt_date(time::local_date(state.now()))).await?;
     Ok(Json(
         json!({"service":service,"version_id":id,"definition":def,"source_note":note,"prices":prices,"price_schedule_note":"FY2026-27 schedule (demo copy — confirm with Council)"}),
@@ -120,4 +151,49 @@ async fn price_picker(State(state): State<AppState>, actor: crate::auth::Actor) 
     Ok(Json(
         json!({"items":rows.into_iter().map(|(code,name,unit)|json!({"code":code,"name":name,"unit":unit})).collect::<Vec<_>>()}),
     ))
+}
+
+async fn synonyms(State(state): State<AppState>, actor: crate::auth::Actor) -> AppResult<Json<Value>> {
+    super::admin::require_admin(&actor)?;
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT token,replacement FROM service_synonyms ORDER BY token").fetch_all(&state.db).await?;
+    Ok(Json(json!(
+        rows.into_iter()
+            .map(|(token, replacement)| json!({"token":token,"replacement":replacement}))
+            .collect::<Vec<_>>()
+    )))
+}
+#[derive(Deserialize)]
+struct Synonym {
+    token: String,
+    replacement: String,
+}
+async fn save_synonym(
+    State(state): State<AppState>,
+    actor: crate::auth::Actor,
+    Json(b): Json<Synonym>,
+) -> AppResult<Json<Value>> {
+    super::admin::require_admin(&actor)?;
+    let token = b.token.trim().to_lowercase();
+    let replacement = b.replacement.trim().to_lowercase();
+    if token.is_empty() || token.len() > 80 || !token.chars().all(char::is_alphanumeric) || replacement.len() > 160 {
+        return Err(AppError::field("token", "Use one word and a replacement of at most 160 characters."));
+    }
+    let mut tx = crate::db::write_tx(&state.db).await?;
+    if replacement.is_empty() {
+        sqlx::query("DELETE FROM service_synonyms WHERE token=?").bind(&token).execute(&mut *tx).await?;
+    } else {
+        sqlx::query("INSERT INTO service_synonyms VALUES(?,?) ON CONFLICT(token) DO UPDATE SET replacement=excluded.replacement").bind(&token).bind(&replacement).execute(&mut *tx).await?;
+    }
+    crate::audit::record(
+        &mut tx,
+        actor.db_id(),
+        "search.synonym_saved",
+        "settings",
+        None,
+        json!({"token":token,"replacement":replacement}),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Json(json!({"ok":true})))
 }

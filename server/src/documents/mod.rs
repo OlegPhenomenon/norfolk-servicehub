@@ -87,7 +87,7 @@ pub(crate) async fn notify_applicant(
         crate::notify::Notice {
             user_id: case.applicant_user_id,
             email: case.applicant_email.clone(),
-            phone: None,
+            phone: case.applicant_user_id.is_none().then(|| case.applicant_phone.clone()).flatten(),
             case_id: Some(case.id),
             subject: subject.into(),
             body: body.into(),

@@ -8,18 +8,18 @@ A script for walking someone through the demo — at https://norfolk.shelfcompas
 - **Two windows help.** A second browser or an incognito window lets you keep a resident and a staff member signed in at once and pass the case between them.
 - **DemoMail** (`/mock/mail`, linked in the demo banner) shows every email/SMS the system "sent". Good for "the resident would have received this".
 - **The banner shows the next data reset.** Everything you create is wiped when it fires — finish paid/refund stories before then.
-- **Nothing is real.** Payments are DemoPay test-mode, people are fictional, prices are a demo copy of the FY2026-27 schedule.
+- **Nothing is real.** Payments use the in-app DemoPay mock (no external payment provider), people are fictional, prices are a demo copy of the FY2026-27 schedule.
 
 | Persona | Role in stories |
 |---|---|
 | **Alexey Turner** | Resident — books the hall, reports a pothole, orders a certificate, complains |
 | **Ben Carter** | Island Builders Pty Ltd — building application, equipment hire, organisation account |
 | **Olga Novak** | Customer Care intake — checks new requests, records phone/walk-in requests, confirms bookings |
-| **Priya Nair** | Planning & Building specialist — assesses, comments, **issues decisions** (holds authority) |
+| **Priya Nair** | Planning & Building specialist — assesses, comments, prepares and submits decisions (holds authority, but cannot issue her own) |
 | **Tom Becker** | Finance — invoices, bank statements, bond decisions, refunds |
 | **Jake Rowe** | Works Depot field worker — tasks on his phone, records actual equipment hours |
-| **Helen Ford** | Manager — dashboard, reassignments, grants decision authority, can publish exhibitions |
-| **Ruth Adams** | Complaints officer — the only staff role that sees confidential complaints by default |
+| **Helen Ford** | Manager — dashboard, reassignments, independent decision issuance, grants authority, publishes/withdraws exhibitions |
+| **Ruth Adams** | Complaints officer — handles confidential complaints; managers also see them unless explicitly denied |
 | **Mark Ellis** | Systems administrator — services, prices, users, integrations, backups; **sees no case content** |
 
 ---
@@ -33,9 +33,10 @@ A script for walking someone through the demo — at https://norfolk.shelfcompas
 3. **Switch to Olga** (`/demo`, TOTP from the authenticator). **Staff workspace → New** queue → open the case. Her view shows the frozen answers, documents, deadline targets, a Messages thread, and staff-only Internal notes. **"Complete this step"** advances to payment — an invoice with separate hire-fee and bond lines is issued automatically.
 4. **Back as Alexey**: My requests → open the case → **Money** tab → **Pay**. The browser lands on the DemoPay checkout (branded *TEST MODE*). Choose **"Pay with test card"** → redirect back → the case now reads *payment received — confirming your booking*. The redirect itself never confirms money; the signed webhook does.
 5. **Olga** opens the case → **Booking** tab → **Confirm booking** (enabled only because it's paid and conflict-free) → advance. A booking confirmation PDF is generated; download it from the Booking tab.
-6. If you have time: **Jake** (`/staff/field`) completes the hall-prep and post-event inspection tasks; **Tom** records the bond decision on the case's Money tab — e.g. retain $50 *Extra cleaning*, refund $200. The refund reads **processing** until the provider's refund webhook lands, then *completed* — only then does the case close.
+6. **Use the separate seeded past booking for the live bond demonstration.** Sign in as **Tom**, find Alexey's past Rawson Hall booking in **Finance → Bonds** (or his case in the staff list), and open Money. It has paid fee/bond, an ended event, completed inspection and no bond decision. Retain **$50 Extra cleaning** and refund **$200**. The refund starts **processing**, then changes to **completed** when DemoPay's signed callback arrives; the case then completes. No time travel is needed. A newly booked future event must end and be inspected before this action unlocks.
+7. For the alternative cancellation path, use the future booking from steps 1–5: **Olga → Booking → Cancel booking (unused)** with a reason. **Tom → Money** refunds the credited unused hire fee via **Refund customer credit**, then records full bond return. Both refunds finish through DemoPay; bank-funded refunds require a bank confirmation.
 
-**Point out:** the same timeline is visible to both sides; a reschedule (Booking → Reschedule) previews the fee difference, keeps the old revision and its PDF, credits the old fee and leaves any surplus as customer credit — never silently absorbed.
+**Point out:** the same timeline is visible to both sides; a reschedule (Booking → Reschedule) previews the fee difference, keeps the old revision and its PDF, credits the old fee and leaves any surplus as customer credit. Residents can open **Preview reschedule** to compare old/new fee lines and the credit change; Tom can pay out the credit on Money.
 
 ## Story 2 — Building approval with a revised drawing (~2 min)
 
@@ -44,22 +45,22 @@ A script for walking someone through the demo — at https://norfolk.shelfcompas
 1. **Ben** → Services → *"Application for Development and/or Building Approval"* → submit with plans attached. It's an **organisation case** — any Island Builders staff member could follow it.
 2. **Olga** checks intake and advances. **Priya** opens the case → **Documents** → comments on the site plan asking for a replacement. The applicant sees a required action; the response deadline pauses.
 3. **Ben** uploads **version 2** on the same document. The comment resolves, the clock resumes — and version 1 stays in history.
-4. **Priya** → **Decisions** tab: prepares the *development approval* and the *building approval* as **two separate decisions**, pinning evidence to version 2, then issues both. The applicant downloads signed PDFs that name the exact evidence versions.
+4. **Priya** → **Decisions** tab: prepares the *development approval* and the *building approval* as **two separate decisions**, pinning evidence to version 2, then submits both. **Helen** signs in separately and issues them. The applicant downloads authorised PDFs that name the exact evidence versions.
 5. Show the **building project** page (`/staff/projects/…`, linked from the case): the application, both approvals, a later **commencement notice** and an in-flight **modification** are linked — nothing merges into one checkbox.
-6. **Exhibition** (if seeded, or create it): Priya → `/staff/exhibitions` → draft a notice, pick the site-plan version, draw redaction rectangles over the private marker — then **Helen** (a second staff member — the preparer can't publish their own) approves and publishes. The public copy at `/notices` is a new PDF rendered from pixels: `pdftotext` finds nothing, there is no black-box-over-text trick.
+6. **Exhibition** (if seeded, or create it): Priya → `/staff/exhibitions` → enter the NSH case number, draft a notice, pick the site-plan version, draw redaction rectangles over the private marker — then **Helen** (a second staff member — the preparer can't publish their own) checks the saved **Redacted public preview**, then publishes. A manager can withdraw a published notice immediately. The public copy at `/notices` is a new PDF rendered from pixels: `pdftotext` finds nothing, there is no black-box-over-text trick.
 
 **Point out:** issuing needs explicit *decision authority* (Helen granted Priya's; Mark the sysadmin can't issue anything). A refusal is issued the same way and recorded with its reasons.
 
 ## Story 3 — A planning certificate (~1 min)
 
-*Personas: Alexey → Olga → Tom/DemoPay → Priya*
+*Personas: Alexey → Olga → Tom/DemoPay → Priya → Helen*
 
 1. **Alexey** → Services → *"Planning Certificate — Section 98 Planning Act 2002"* → enter the Portion reference → submit.
 2. **Olga** advances intake. The payment step auto-issues the **$181.13** invoice (demo-copy price). Try pressing *Complete this step* before paying — the guard blocks it and says why.
 3. **Alexey** pays on the Money tab → the case auto-advances to specialist preparation.
-4. **Priya** prepares the certificate and issues it: Alexey downloads the issued PDF; the case closes with the exact issued version on file.
+4. **Priya** prepares and submits the certificate; **Helen** issues it: Alexey downloads the issued PDF; the case closes with the exact issued version on file.
 
-**Point out:** the fee was invoiced on submission but *acceptance* waited for confirmed money; the certificate is a decision document with recorded evidence, not just a status flag.
+**Point out:** the fee was invoiced when intake advanced to Payment but *acceptance* waited for confirmed money; the certificate is a decision document with recorded evidence, not just a status flag.
 
 ## Story 4 — Equipment hire billed on actual hours (~2 min)
 
@@ -68,7 +69,7 @@ A script for walking someone through the demo — at https://norfolk.shelfcompas
 1. **Ben** → *"Application for Hire of Council Plant / Equipment"* → the equipment widget: what's needed, requested hours (4), preferred date, site. Submit.
 2. **Olga** advances intake → on the **Equipment** tab schedules a real plant item (e.g. the Bobcat at $135/h), operator Jake and the time window.
 3. **Jake** at `/staff/field` sees only the job — not Ben's documents or notes. He records the job card: actual 07:30–13:30 with 30 min downtime and $12.34 agreed expenses, completes the task.
-4. **Tom** (or the intake officer) approves usage → the final invoice is created immediately: **330 minutes × hourly rate + expenses**, with the basis written on the invoice. Compare with the earlier 4-hour *estimate* — estimates never become debt.
+4. **Tom** approves usage → the final invoice is created immediately: **330 minutes × hourly rate + expenses**, with the basis written on the invoice. Compare with the earlier 4-hour *estimate* — estimates never become debt.
 5. **Ben** pays the invoice → done.
 
 **Point out:** the billed amount comes from approved actual minutes (integer arithmetic, `round_half_up`), not from what was requested — the invoice explains the difference itself.
@@ -89,8 +90,8 @@ A script for walking someone through the demo — at https://norfolk.shelfcompas
 
 *Personas: Alexey → Ruth → (Olga for contrast) → Alexey*
 
-1. **Alexey** → *"Make a Complaint"* → describe it, name the staff member concerned → submit.
-2. **Ruth** sees it in her queue. On the **Confidential feedback** panel she adds the subject (e.g. Olga) — the subject is now excluded by an explicit access denial, over and above the case already being confidential by default for complaints.
+1. **Alexey** → *"Make a Complaint"* → describe it, select **Staff member concerned (if known)** (staff names only) → submit.
+2. **Ruth** sees it in her queue. If Olga was selected, she is denied access before assignment. Ruth or an eligible manager can update subjects on the **Confidential feedback** panel. Select Ruth in a second complaint to demonstrate routing to Helen because Ruth is the only complaints officer.
 3. **Contrast:** sign in as **Olga** — the case URL 404s, search finds nothing, and even Mark the sysadmin sees diagnostics only. Outbound mail about it says just *"There is an update on your feedback NSH-…"*.
 4. **Ruth** investigates and issues the complaint response letter → completed.
 5. **Alexey** disagrees → **request review** on the same case → a new linked complaint is created (different officer), keeping the history connected — no fresh email thread.
@@ -99,16 +100,22 @@ A script for walking someone through the demo — at https://norfolk.shelfcompas
 
 ## Story 7 — A new service, built by an administrator (~2 min)
 
-*Personas: Mark → new resident → Mark*
+*Personas: Mark → new resident → Olga → Priya → Helen → Mark*
 
-1. **Mark** → `/admin/services` → **Create service** — name, slug, category, department, module *generic*. In the editor: add fields (text/select/checkbox, conditional *show only when* rules), required documents, workflow steps (review → optional payment → assessment → done), deadline targets, price lines. Or shortcut: **"Suggest from a council form (AI, mock)"** on a real council PDF produces a draft staff must check — AI never invents rules, pricing or deadlines.
+1. **Mark** → `/admin/services` → **Create service** — name, slug, category, department, module *generic*. In the editor: add fields (text/select/checkbox, conditional *show only when* rules), required documents, workflow steps (intake review → optional payment → **Decision: service_response** → done), deadline targets, price lines. Or shortcut: **"Suggest from a council form (AI, mock)"** on a real council PDF produces a draft staff must check — AI never invents rules, pricing or deadlines.
 2. **Preview** tab → type sample answers → *Check sample answers* validates the definition against the same server rules residents hit. Then **publish**.
-3. Register a **new resident** (`/register` — name, email, password) — the new service is already in the catalogue. Submit a request end to end: intake → review → result.
-4. Back as **Mark**: open the service → **New draft from published** → change a field → publish v2. Open the v1 request: it still shows the original fields, answers and confirmation — the frozen snapshot never changes retroactively.
+3. Register a **new resident** (`/register` — name, email, password) — the new service is already in the catalogue. Submit a request. **Olga** advances intake; **Priya** prepares/submits a **Service response** decision and **Helen** issues it. The resident downloads the result PDF. The builder offers only handlers and decision types the selected module supports.
+4. Back as **Mark**: open the service → **New draft from published** → change a field → publish v2. As the resident or an eligible staff member, open the v1 request: it still shows the original fields, answers and confirmation — the frozen snapshot never changes retroactively.
 
 **Point out:** no developer, no code edit, no deploy. And "dog registration" sits in the list as a ready-made draft if you want a safer publish target.
 
 ---
+
+## Assisted intake and offline task scenes
+
+As **Olga**, open **Assisted intake**, choose Road issue and Phone, enter the caller's name, email/phone and request details, review and submit. No resident account is created. Advance intake, complete the inspection/repair as Jake, then issue the **Road response** as Olga. DemoMail shows the written answer in the email and SMS, rather than only a sign-in link.
+
+As **Jake** on a phone-sized screen, open a road task while online. Turn on **Simulate offline** (or disconnect the browser), tick the checklist, save a result and mark done. These changes show **Saved on this device** until connectivity returns, then **Confirmed by server**. Reopen the page to see the recorded result. The queue is IndexedDB; there is no service worker or promise to load an uncached page without a connection.
 
 ## Things to try that should fail safely
 

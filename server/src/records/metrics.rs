@@ -15,7 +15,7 @@ use chrono::NaiveTime;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::SqliteConnection;
-pub const METRICS: [&str; 11] = [
+pub const METRICS: [&str; 12] = [
     "received",
     "open",
     "waiting_on_applicant",
@@ -23,6 +23,7 @@ pub const METRICS: [&str; 11] = [
     "refused",
     "withdrawn",
     "cancelled",
+    "closed_duplicate",
     "reopened",
     "unassigned",
     "overdue",
@@ -73,7 +74,7 @@ fn predicate(metric: &str, p: &Period) -> AppResult<(String, Vec<SqlValue>)> {
         "received" => range("c.submitted_at"),
         "open" => (OPEN.into(), vec![]),
         "waiting_on_applicant" => ("c.status='waiting_on_applicant'".into(), vec![]),
-        "completed" | "refused" | "withdrawn" | "cancelled" => {
+        "completed" | "refused" | "withdrawn" | "cancelled" | "closed_duplicate" => {
             let (r, b) = range("c.closed_at");
             (
                 format!(
@@ -83,7 +84,15 @@ fn predicate(metric: &str, p: &Period) -> AppResult<(String, Vec<SqlValue>)> {
                 b,
             )
         }
-        "reopened" => ("c.reopened_count>0".into(), vec![]),
+        "reopened" => {
+            let (range, binds) = range("e.at");
+            (
+                format!(
+                    "EXISTS(SELECT 1 FROM case_events e WHERE e.case_id=c.id AND e.kind='case.reopened' AND {range})"
+                ),
+                binds,
+            )
+        }
         "unassigned" => (
             format!(
                 "{OPEN} AND NOT EXISTS(SELECT 1 FROM case_assignments a WHERE a.case_id=c.id AND a.role='owner' AND a.ended_at IS NULL)"

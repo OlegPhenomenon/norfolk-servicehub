@@ -53,7 +53,7 @@ curl -fsS http://127.0.0.1:8087/api/health                 # {"ok":true,"demo_mo
 
 The container binds loopback only; nothing is publicly reachable until the
 reverse proxy below is in place. First start runs the embedded DB migrations
-and seeds the demo data.
+and seeds fictional demo data only when `DEMO_MODE=true` and the database has no users or cases. Populated databases are preserved.
 
 ## 5. Reverse proxy — pick the one this host already runs
 
@@ -174,7 +174,14 @@ Same compose file, different `deploy/servicehub.env`:
 - real values for `WEBHOOK_SECRET` / `MOCK_API_KEY`
 - `PUBLIC_BASE_URL=https://their-domain`
 
-Then `servicehub migrate` runs at first `serve` and accounts are created via
-the admin UI instead of the seeded personas. `docs/OPERATIONS.md` covers the
-operational install in detail (access control on the volume, outbound
-transport, restore-to-another-server).
+`serve` runs migrations. Bootstrap the catalogue and first administrator against the same volume:
+
+```sh
+docker compose -f deploy/docker-compose.prod.yml exec servicehub servicehub seed-catalogue
+docker compose -f deploy/docker-compose.prod.yml exec servicehub \
+  servicehub create-admin --email admin@example.org --name "Council administrator"
+```
+
+The catalogue includes services, prices, resources, templates, retention rules and holidays, without personas/cases. The first administrator receives sysadmin and manager roles. The CLI prints a one-time password: sign in at `/login`, enrol TOTP and replace the password before using staff functions. Subsequent accounts can be created in the admin UI. Never run `seed-demo` or `reset-demo` against operational data.
+
+Outside demo mode `/mock/**` and DemoPay checkout are disabled. Online Pay is hidden; counter and bank paths remain. Real payment and mail providers require adapters; integration receiver endpoints can be configured in the UI. `docs/OPERATIONS.md` covers account recovery, provider limitations, access control, upgrades and cross-server restore. `restore-check` migrates a fresh destination `DATA_DIR` before verification.

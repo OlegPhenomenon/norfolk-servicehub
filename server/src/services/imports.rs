@@ -30,6 +30,7 @@ struct Item {
     module: String,
     department: String,
     source_url: Option<String>,
+    source_file: Option<String>,
     definition: Value,
 }
 pub async fn uploaded_file(mut form: Multipart) -> AppResult<(String, Vec<u8>)> {
@@ -44,9 +45,27 @@ pub async fn uploaded_file(mut form: Multipart) -> AppResult<(String, Vec<u8>)> 
     }
     Err(AppError::field("file", "Choose a file to upload."))
 }
-async fn upload(State(state): State<AppState>, actor: Actor, form: Multipart) -> AppResult<Json<Value>> {
+async fn upload(State(state): State<AppState>, actor: Actor, mut form: Multipart) -> AppResult<Json<Value>> {
     admin::require_admin(&actor)?;
-    let (name, bytes) = uploaded_file(form).await?;
+    let mut main = None;
+    let mut sources = std::collections::BTreeMap::new();
+    while let Some(field) = form.next_field().await.map_err(|_| AppError::field("file", "Cannot read upload."))? {
+        let key = field.name().unwrap_or("").to_owned();
+        let name = field.file_name().unwrap_or("import.json").to_owned();
+        let bytes = field.bytes().await.map_err(|_| AppError::field("file", "Cannot read file."))?.to_vec();
+        if key == "file" {
+            main = Some((name, bytes));
+        } else if key == "source" {
+            let staged = storage::stage(&state, &bytes, &name, AllowList::Docs).await?;
+            if staged.mime != "application/pdf" {
+                return Err(AppError::field("source", "Original forms must be PDFs."));
+            }
+            if sources.insert(name, staged).is_some() {
+                return Err(AppError::field("source", "Use unique source filenames."));
+            }
+        }
+    }
+    let (name, bytes) = main.ok_or_else(|| AppError::field("file", "Choose the import JSON."))?;
     let raw: Vec<Value> = serde_json::from_slice(&bytes)
         .map_err(|_| AppError::field("file", "The JSON file must contain an array of service definitions."))?;
     if raw.is_empty() || raw.len() > 100 {
@@ -55,6 +74,10 @@ async fn upload(State(state): State<AppState>, actor: Actor, form: Multipart) ->
     let staged = storage::stage(&state, &bytes, &name, AllowList::Data).await?;
     let mut tx = db::write_tx(&state.db).await?;
     let blob = storage::register(&mut tx, staged, actor.db_id()).await?;
+    let mut source_ids = std::collections::BTreeMap::new();
+    for (name, staged) in sources {
+        source_ids.insert(name, storage::register(&mut tx, staged, actor.db_id()).await?.id);
+    }
     let mut report = vec![];
     let mut slugs = std::collections::HashSet::new();
     for (index, item) in raw.into_iter().enumerate() {
@@ -74,13 +97,28 @@ async fn upload(State(state): State<AppState>, actor: Actor, form: Multipart) ->
                 issues.as_array_mut().expect("array").push(json!({"path":key,"message":"This field is required."}));
             }
         }
+        let source_blob_id = item["source_file"].as_str().and_then(|name| source_ids.get(name)).copied();
+        if item["source_file"].as_str().is_some() && source_blob_id.is_none() {
+            issues
+                .as_array_mut()
+                .expect("issues")
+                .push(json!({"path":"source_file","message":"Attach the original PDF named in source_file."}));
+        }
         report.push(
-            json!({"index":index,"item":item,"valid":issues.as_array().is_some_and(Vec::is_empty),"issues":issues}),
+            json!({"index":index,"item":item,"source_blob_id":source_blob_id,"valid":issues.as_array().is_some_and(Vec::is_empty),"issues":issues}),
         );
     }
     let status = if report.iter().all(|r| r["valid"] == true) { "validated" } else { "has_errors" };
     let report = json!({"items":report});
     let id:i64=sqlx::query_scalar("INSERT INTO service_imports(uploaded_by,filename,blob_id,status,report_json,created_at) VALUES (?,?,?,?,?,?) RETURNING id").bind(actor.user_id).bind(name).bind(blob.id).bind(status).bind(report.to_string()).bind(time::fmt(state.now())).fetch_one(&mut *tx).await?;
+    for (filename, blob_id) in source_ids {
+        sqlx::query("INSERT INTO service_import_sources(import_id,filename,blob_id) VALUES(?,?,?)")
+            .bind(id)
+            .bind(filename)
+            .bind(blob_id)
+            .execute(&mut *tx)
+            .await?;
+    }
     crate::audit::record(
         &mut tx,
         actor.db_id(),
@@ -144,6 +182,15 @@ async fn apply(State(state): State<AppState>, actor: Actor, Path(id): Path<i64>)
             }
         };
         let v = admin::create_version(&mut tx, &actor, service_id, item.definition, item.source_url.as_deref()).await?;
+        if let Some(blob) = row["source_blob_id"].as_i64() {
+            sqlx::query("UPDATE service_versions SET source_blob_id=? WHERE id=?")
+                .bind(blob)
+                .bind(v)
+                .execute(&mut *tx)
+                .await?;
+        } else if item.source_file.is_some() {
+            return Err(AppError::conflict("The original form is missing."));
+        }
         row["service_id"] = json!(service_id);
         row["version_id"] = json!(v);
         row["link"] = json!(format!("/admin/services/{service_id}"));

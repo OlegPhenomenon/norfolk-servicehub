@@ -170,7 +170,7 @@ async fn authority_is_explicit_scoped_and_revocable_and_seeds_idempotent() {
     seed(&mut tx, &state).await.unwrap();
     seed(&mut tx, &state).await.unwrap();
     let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM decision_templates").fetch_one(&mut *tx).await.unwrap();
-    assert_eq!(n, 6);
+    assert_eq!(n, 7);
     let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM documents_seed_files").fetch_one(&mut *tx).await.unwrap();
     assert_eq!(n, 2);
 }
@@ -196,8 +196,7 @@ async fn redaction_has_no_text_layer_and_source_remains_unchanged() {
     if std::process::Command::new("pdftoppm").arg("-v").output().is_err()
         || std::process::Command::new("pdftotext").arg("-v").output().is_err()
     {
-        eprintln!("SKIP: Poppler is not installed; raster redaction proof requires pdftoppm and pdftotext.");
-        return;
+        panic!("Poppler is required for the redaction regression suite.");
     }
     let source = crate::pdf::simple_document(
         "Fictional elevation",
@@ -548,7 +547,8 @@ async fn issued_pdf_pins_evidence_refusals_and_separate_approvals() {
             .unwrap();
         let case = crate::cases::core::load_case(&mut tx, cid).await.unwrap();
         let decision = decisions::load(&mut tx, id, cid).await.unwrap();
-        decisions::issue_document(&mut tx, &state, &specialist, &case, decision).await.unwrap();
+        let approver = independent_approver(&mut tx).await;
+        decisions::issue_document(&mut tx, &state, &approver, &case, decision).await.unwrap();
         let issued = decisions::load(&mut tx, id, cid).await.unwrap();
         assert_eq!(issued.status, "issued");
         assert_eq!(issued.outcome, outcome);
@@ -598,8 +598,7 @@ async fn publishing_uses_new_blob_with_burned_pixels_and_independent_staff_appro
     if std::process::Command::new("pdftoppm").arg("-v").output().is_err()
         || std::process::Command::new("pdftotext").arg("-v").output().is_err()
     {
-        eprintln!("SKIP: Poppler is not installed; publication proof requires pdftoppm and pdftotext.");
-        return;
+        panic!("Poppler is required for the redaction regression suite.");
     }
     let (state, dir, cid, _, specialist, mut manager) = fixture().await;
     manager.roles = vec![RoleGrant { role: Role::Manager, scope_service_id: None }];
@@ -687,7 +686,7 @@ async fn publishing_uses_new_blob_with_burned_pixels_and_independent_staff_appro
 
 #[tokio::test]
 async fn planning_certificate_reissue_retains_old_result_and_requested_sections() {
-    let (state, dir, cid, _, specialist, _) = fixture().await;
+    let (state, dir, cid, _, _specialist, _) = fixture().await;
     let mut tx = crate::db::write_tx(&state.db).await.unwrap();
     seed(&mut tx, &state).await.unwrap();
     sqlx::query("UPDATE services SET module='planning_certificate',slug='planning-certificate' WHERE id=1")
@@ -716,7 +715,8 @@ async fn planning_certificate_reissue_retains_old_result_and_requested_sections(
         let id:i64=sqlx::query_scalar("INSERT INTO decisions(case_id,decision_type,outcome,reasons,status,template_id,prepared_by,created_at) VALUES(?,'planning_certificate','approved',?,'pending_approval',?,2,?) RETURNING id")
             .bind(cid).bind(information).bind(template).bind(crate::time::now_str()).fetch_one(&mut *tx).await.unwrap();
         let decision = decisions::load(&mut tx, id, cid).await.unwrap();
-        decisions::issue_document(&mut tx, &state, &specialist, &case, decision).await.unwrap();
+        let approver = independent_approver(&mut tx).await;
+        decisions::issue_document(&mut tx, &state, &approver, &case, decision).await.unwrap();
         let blob:i64=sqlx::query_scalar("SELECT v.blob_id FROM decisions d JOIN document_versions v ON v.id=d.output_document_version_id WHERE d.id=?").bind(id).fetch_one(&mut *tx).await.unwrap();
         result_blobs.push(blob);
     }
@@ -724,8 +724,7 @@ async fn planning_certificate_reissue_retains_old_result_and_requested_sections(
     tx.commit().await.unwrap();
     assert_ne!(result_blobs[0], result_blobs[1]);
     if std::process::Command::new("pdftotext").arg("-v").output().is_err() {
-        eprintln!("SKIP: Poppler is not installed; certificate content assertion requires pdftotext.");
-        return;
+        panic!("Poppler is required for the redaction regression suite.");
     }
     let path = dir.path().join("certificate.pdf");
     std::fs::write(&path, crate::storage::read(&state, result_blobs[0]).await.unwrap().1).unwrap();
@@ -947,4 +946,11 @@ async fn aggregate_upload_quota_rejects_attachment_without_registering_more_byte
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM document_versions").fetch_one(&state.db).await.unwrap(),
         1
     );
+}
+
+async fn independent_approver(tx: &mut sqlx::SqliteConnection) -> Actor {
+    sqlx::query("INSERT INTO users(id,email,display_name,kind,created_at) VALUES(5,'approver@example.test','Independent approver','staff','2026-10-07') ON CONFLICT DO NOTHING").execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO role_grants(user_id,role,granted_at) SELECT 5,'manager','2026-10-07' WHERE NOT EXISTS(SELECT 1 FROM role_grants WHERE user_id=5 AND role='manager')").execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO decision_authorities(user_id,decision_type,granted_by,granted_at) SELECT 5,decision_type,2,'2026-10-07' FROM decision_authorities WHERE user_id=2 AND revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM decision_authorities a WHERE a.user_id=5 AND a.decision_type=decision_authorities.decision_type)").execute(&mut *tx).await.unwrap();
+    Actor::load(tx, 5, true).await.unwrap()
 }

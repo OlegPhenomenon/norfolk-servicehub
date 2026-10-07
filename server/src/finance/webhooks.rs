@@ -198,6 +198,9 @@ pub async fn process(tx: &mut SqliteConnection, e: &Event, body: &str) -> AppRes
 pub async fn handler(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> AppResult<Response> {
     let header = headers.get("DemoPay-Signature").and_then(|v| v.to_str().ok()).unwrap_or_default();
     let _permit = acquire(&WEBHOOKS)?;
+    if !state.cfg.demo_mode {
+        return Err(AppError::not_found());
+    }
     if body.len() > MAX_WEBHOOK_BYTES {
         return Ok(StatusCode::PAYLOAD_TOO_LARGE.into_response());
     }

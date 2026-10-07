@@ -34,7 +34,7 @@ pub async fn submit_case(tx: &mut SqliteConnection, state: &AppState, actor: &Ac
     let answers = validation::validate_answers(tx, &case.module, &def, &serde_json::from_str::<Value>(&draft)?).await?;
     let mut missing = vec![];
     for d in def.documents.iter().filter(|d| d.required) {
-        let exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM documents d JOIN document_versions v ON v.document_id=d.id JOIN blobs b ON b.id=v.blob_id WHERE d.case_id=? AND d.requirement_key=? AND d.disposed_at IS NULL AND b.scan_status='clean' AND v.version=(SELECT MAX(v2.version) FROM document_versions v2 WHERE v2.document_id=d.id))").bind(id).bind(&d.key).fetch_one(&mut *tx).await?;
+        let exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM documents d JOIN document_versions v ON v.document_id=d.id JOIN blobs b ON b.id=v.blob_id WHERE d.case_id=? AND d.requirement_key=? AND d.disposed_at IS NULL AND b.scan_status IN ('clean','not_scanned') AND v.version=(SELECT MAX(v2.version) FROM document_versions v2 WHERE v2.document_id=d.id))").bind(id).bind(&d.key).fetch_one(&mut *tx).await?;
         if !exists {
             missing.push((format!("documents.{}", d.key), format!("Upload {} before submitting.", d.label)));
         }

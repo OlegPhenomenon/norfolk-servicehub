@@ -54,7 +54,7 @@ pub async fn on_trigger_at(
                 tx,
                 case_id,
                 "deadline.met",
-                "The reply deadline was met.",
+                &format!("{}: completed.", policy.label),
                 json!({"deadline_id":id,"trigger":trigger}),
             )
             .await?;
@@ -79,7 +79,7 @@ pub async fn on_trigger_at(
             tx,
             case_id,
             "deadline.started",
-            &format!("We will reply by {}.", time::display_local(due)),
+            &resident_text(&policy.label, "running", &time::fmt(due), 0, policy.max_pause_days)?,
             json!({"kind":policy.kind,"due_at":time::fmt(due)}),
         )
         .await?;
@@ -227,4 +227,16 @@ async fn record(
 ) -> AppResult<()> {
     core::append_event(tx, id, None, kind, Visibility::Applicant, summary, data.clone()).await?;
     crate::audit::record(tx, None, kind, "case", Some(id), data).await
+}
+
+pub fn resident_text(label: &str, status: &str, due: &str, used: i64, cap: Option<i64>) -> AppResult<String> {
+    Ok(match status {
+        "met" => format!("{label}: completed."),
+        "cancelled" | "stopped" => format!("{label}: no longer active."),
+        "paused" => {
+            format!("{label}: paused while we await your reply ({used} of {} pause days used).", cap.unwrap_or(0))
+        }
+        "breached" => format!("{label}: overdue since {}.", time::display_local(time::parse(due)?)),
+        _ => format!("{label}: due by {}.", time::display_local(time::parse(due)?)),
+    })
 }

@@ -99,7 +99,7 @@ async fn confirmation(
 ) -> AppResult<()> {
     let u: Unit = sqlx::query_as("SELECT * FROM bookable_units WHERE id=?").bind(b.unit_id).fetch_one(&mut *tx).await?;
     let money = finance::api::case_money_summary(tx, c.id).await?;
-    let (_, lines) = hooks::venue_lines(tx, &u, &b.start_at, &b.end_at).await?;
+    let (_, lines) = hooks::venue_case_lines(tx, b.case_id, &u, &b.start_at, &b.end_at).await?;
     let fees = lines
         .iter()
         .map(|l| format!("{}: AUD ${:.2}", l.description, l.amount_cents as f64 / 100.0))
@@ -197,12 +197,15 @@ fn moved_slot(b: &Booking, v: &Move) -> Slot {
 }
 pub async fn preview(
     State(st): State<AppState>,
-    StaffActor(a): StaffActor,
+    a: Actor,
     Path(id): Path<i64>,
     Json(v): Json<Move>,
 ) -> AppResult<Json<Value>> {
     let mut tx = st.db.acquire().await?;
-    model::manage(&mut tx, &a, id, BOOKING_ROLES).await?;
+    let (_, access) = crate::authz::require_case(&mut tx, &a, id).await?;
+    if matches!(access, crate::authz::CaseAccess::None | crate::authz::CaseAccess::TaskOnly) {
+        return Err(AppError::not_found());
+    }
     let b = model::booking(&mut tx, id).await?;
     if b.revision != v.expected_revision {
         return Err(AppError::stale_revision());
@@ -210,12 +213,15 @@ pub async fn preview(
     let u = model::validate_slot(&mut tx, &moved_slot(&b, &v), st.now()).await?;
     let old: Unit =
         sqlx::query_as("SELECT * FROM bookable_units WHERE id=?").bind(b.unit_id).fetch_one(&mut *tx).await?;
-    let (_, old_lines) = hooks::venue_lines(&mut tx, &old, &b.start_at, &b.end_at).await?;
-    let (_, new_lines) = hooks::venue_lines(&mut tx, &u, &v.start, &v.end).await?;
+    let (_, old_lines) = hooks::venue_case_lines(&mut tx, id, &old, &b.start_at, &b.end_at).await?;
+    let (_, new_lines) = hooks::venue_case_lines(&mut tx, id, &u, &v.start, &v.end).await?;
     let conflicts = model::conflicts(&mut tx, u.id, &v.start, &v.end, Some(b.id)).await?;
     let conflicts = model::visible_conflicts(&mut tx, &a, conflicts).await?;
+    let old_total: i64 = old_lines.iter().map(|l| l.amount_cents).sum();
+    let new_total: i64 = new_lines.iter().map(|l| l.amount_cents).sum();
+    let credit_delta = old_total - new_total;
     Ok(Json(
-        json!({"available":conflicts.is_empty(),"conflicts":conflicts,"old_lines":old_lines,"new_lines":new_lines}),
+        json!({"available":conflicts.is_empty(),"conflicts":conflicts,"old_lines":old_lines,"new_lines":new_lines,"credit_delta_cents":credit_delta}),
     ))
 }
 pub(super) async fn move_allocation(
@@ -268,8 +274,8 @@ pub async fn reschedule(
     let u = model::validate_slot(&mut tx, &s, st.now()).await?;
     let old: Unit =
         sqlx::query_as("SELECT * FROM bookable_units WHERE id=?").bind(b.unit_id).fetch_one(&mut *tx).await?;
-    let (_, old_lines) = hooks::venue_lines(&mut tx, &old, &b.start_at, &b.end_at).await?;
-    let (date, new_lines) = hooks::venue_lines(&mut tx, &u, &s.start_at, &s.end_at).await?;
+    let (_, old_lines) = hooks::venue_case_lines(&mut tx, id, &old, &b.start_at, &b.end_at).await?;
+    let (date, new_lines) = hooks::venue_case_lines(&mut tx, id, &u, &s.start_at, &s.end_at).await?;
     let changed = old_lines
         .iter()
         .map(|l| (&l.item_code, l.amount_cents))
@@ -331,6 +337,13 @@ pub async fn cancel(
     }
     sqlx::query("UPDATE occupancies SET active=0 WHERE booking_id=?").bind(b.id).execute(&mut *tx).await?;
     record_cancellation(&mut tx, &b, st.now(), a.db_id(), &v.reason).await?;
+    let unused: bool = sqlx::query_scalar("SELECT unused FROM booking_cancellations WHERE booking_id=?")
+        .bind(b.id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if unused {
+        finance::api::credit_unused_fees(&mut tx, &st, &a, id, &v.reason).await?;
+    }
     b.status = "cancelled".into();
     b.revision += 1;
     persist(&mut tx, &b).await?;
@@ -388,7 +401,7 @@ async fn require_confirmation_money(tx: &mut SqliteConnection, case: &CaseRow, b
     }
     let unit: Unit =
         sqlx::query_as("SELECT * FROM bookable_units WHERE id=?").bind(booking.unit_id).fetch_one(&mut *tx).await?;
-    let (_, required) = hooks::venue_lines(tx, &unit, &booking.start_at, &booking.end_at).await?;
+    let (_, required) = hooks::venue_case_lines(tx, booking.case_id, &unit, &booking.start_at, &booking.end_at).await?;
     for line in required {
         let covered: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(l.amount_cents-l.credited_cents),0) FROM finance_line_balances l JOIN invoices i ON i.id=l.invoice_id WHERE i.case_id=? AND i.kind='invoice' AND i.status='issued' AND l.price_item_id=? AND l.kind=?")
             .bind(case.id).bind(line.price_item_id).bind(&line.kind).fetch_one(&mut *tx).await?;

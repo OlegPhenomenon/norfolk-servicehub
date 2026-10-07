@@ -101,7 +101,7 @@ async fn confidential_submission_review_and_owner_replacement_preserve_frozen_ev
     assert!(notifications.iter().all(|(subject, body)| !subject.contains("Secret")
         && !body.contains("Sensitive")
         && body.contains("sign in to read it")));
-    cases::api::assign_owner(&mut tx, &ruth, original.id, helen.user_id, "Transfer ownership").await.unwrap();
+    cases::api::assign_owner(&state, &mut tx, &ruth, original.id, helen.user_id, "Transfer ownership").await.unwrap();
     let owners: Vec<i64> = sqlx::query_scalar(
         "SELECT user_id FROM case_assignments WHERE case_id=? AND role='owner' AND ended_at IS NULL",
     )
@@ -362,8 +362,14 @@ async fn seeded_module_handlers_and_task_kinds_reach_their_owner_implementations
             }
             for decision in &step.decision_types {
                 assert!(
-                    ["development_approval", "building_approval", "modification_approval", "planning_certificate"]
-                        .contains(&decision.as_str())
+                    [
+                        "development_approval",
+                        "building_approval",
+                        "modification_approval",
+                        "planning_certificate",
+                        "service_response"
+                    ]
+                    .contains(&decision.as_str())
                 );
                 let templates: i64 =
                     sqlx::query_scalar("SELECT COUNT(*) FROM decision_templates WHERE decision_type=? AND active=1")

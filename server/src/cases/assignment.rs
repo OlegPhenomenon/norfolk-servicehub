@@ -45,7 +45,9 @@ pub async fn history(tx: &mut SqliteConnection, id: i64) -> AppResult<Value> {
     let rows:Vec<AssignmentHistoryRow>=sqlx::query_as("SELECT a.id,a.user_id,u.display_name,a.role,a.reason,a.assigned_at,a.ended_at,a.ended_reason,by.display_name FROM case_assignments a JOIN users u ON u.id=a.user_id LEFT JOIN users by ON by.id=a.assigned_by WHERE case_id=? ORDER BY a.id").bind(id).fetch_all(&mut *tx).await?;
     Ok(json!(rows.into_iter().map(|(id,user_id,name,role,reason,assigned_at,ended_at,ended_reason,assigned_by)|json!({"id":id,"user_id":user_id,"name":name,"role":role,"reason":reason,"assigned_at":assigned_at,"ended_at":ended_at,"ended_reason":ended_reason,"assigned_by":assigned_by})).collect::<Vec<_>>()))
 }
+#[allow(clippy::too_many_arguments)] // Transaction, clock, actor and assignment command stay explicit.
 pub(crate) async fn add(
+    state: &AppState,
     tx: &mut SqliteConnection,
     actor: &Actor,
     id: i64,
@@ -67,7 +69,7 @@ pub(crate) async fn add(
         return Err(AppError::field("user_id", "This officer cannot manage this request."));
     }
     if replace && role == "owner" {
-        sqlx::query("UPDATE case_assignments SET ended_at=?,ended_reason=? WHERE case_id=? AND role='owner' AND ended_at IS NULL").bind(time::now_str()).bind(reason).bind(id).execute(&mut *tx).await?;
+        sqlx::query("UPDATE case_assignments SET ended_at=?,ended_reason=? WHERE case_id=? AND role='owner' AND ended_at IS NULL").bind(time::fmt(state.now())).bind(reason).bind(id).execute(&mut *tx).await?;
         record(
             tx,
             actor,
@@ -98,7 +100,7 @@ pub(crate) async fn add(
     .bind(role)
     .bind(actor.db_id())
     .bind(reason)
-    .bind(time::now_str())
+    .bind(time::fmt(state.now()))
     .execute(&mut *tx)
     .await?;
     record(
@@ -135,7 +137,7 @@ async fn assign(
     if !access.can_manage() {
         return Err(AppError::forbidden());
     }
-    add(&mut tx, &actor, id, input.user_id, &input.role, &input.reason, input.replace_owner).await?;
+    add(&state, &mut tx, &actor, id, input.user_id, &input.role, &input.reason, input.replace_owner).await?;
     core::bump_revision(&mut tx, id, Some(input.expected_revision)).await?;
     let result = history(&mut tx, id).await?;
     tx.commit().await?;
@@ -204,7 +206,7 @@ async fn escalate(
         }
     }
     let manager = manager.ok_or_else(|| AppError::conflict("No eligible manager is available."))?;
-    add(&mut tx, &actor, id, manager, "collaborator", &input.reason, false).await?;
+    add(&state, &mut tx, &actor, id, manager, "collaborator", &input.reason, false).await?;
     core::bump_revision(&mut tx, id, Some(input.expected_revision)).await?;
     record(
         &mut tx,

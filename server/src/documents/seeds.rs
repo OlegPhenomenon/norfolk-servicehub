@@ -8,6 +8,7 @@ pub async fn seed(tx: &mut SqliteConnection, state: &AppState) -> AppResult<()> 
         "planning_certificate",
         "complaint_response",
         "road_response",
+        "service_response",
     ] {
         let label = super::decisions::label(t);
         let body = "{{decision_type_label}}\nCase {{case_number}} — {{service_name}}\nApplicant: {{applicant_name}}\nProperty (Portion/Lot): {{property_ref}}\nInformation as recorded on {{decision_date}}\nReasons: {{reasons}}\nConditions: {{conditions}}\nEvidence: {{evidence_list}}\nAuthorised by: {{approver_name}}";

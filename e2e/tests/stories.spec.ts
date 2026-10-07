@@ -129,6 +129,16 @@ test('d: Mark builds and publishes a service, a new resident submits it', async 
     await page.getByRole('checkbox', { name: 'Required while shown' }).check();
     await page.getByRole('tab', { name: 'Workflow steps', exact: true }).click();
     await expect(page.getByLabel('Staff label').first()).toBeVisible();
+    const firstKind = page.getByLabel('Kind', { exact: false }).first();
+    await firstKind.selectOption('module');
+    const handlers = page.getByLabel('Module handler');
+    await expect(handlers.locator('option')).toHaveCount(2); // placeholder and generic service-response handler
+    await expect(handlers.locator('option').last()).toHaveAttribute('value', 'documents.letter_issued:service_response');
+    await firstKind.selectOption('decision');
+    await expect(page.getByLabel('service response', { exact: true })).toBeVisible();
+    await expect(page.getByLabel('building approval', { exact: true })).toHaveCount(0);
+    await firstKind.selectOption('review');
+
     await page.getByRole('tab', { name: 'Preview', exact: true }).click();
     await page.getByLabel('Garden purpose').fill('Grow vegetables with neighbours.');
     await page.getByRole('button', { name: 'Check sample answers' }).click();

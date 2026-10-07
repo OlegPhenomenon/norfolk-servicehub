@@ -46,7 +46,10 @@ pub fn allowed_actions(actor: &Actor, c: &CaseRow, access: CaseAccess, def: &Ser
                 actions.push("skip");
             }
         }
-        actions.extend(["request-info", "refuse"]);
+        actions.push("request-info");
+        if !def.workflow.steps.iter().any(|s| s.kind == StepKind::Decision) {
+            actions.push("refuse");
+        }
     }
     if access.can_manage() {
         if is_open(c) {
@@ -346,6 +349,9 @@ async fn action(
                     close(&mut tx, &state, &actor, id, "closed_duplicate", &input.reason).await?;
                 }
                 "refuse" | "cancel" | "withdraw" => {
+                    if action == "refuse" && def.workflow.steps.iter().any(|s| s.kind == StepKind::Decision) {
+                        return Err(AppError::conflict("Prepare and issue a refused decision for this service."));
+                    }
                     close(
                         &mut tx,
                         &state,
@@ -404,7 +410,7 @@ pub async fn projection(tx: &mut SqliteConnection, state: &AppState, actor: &Act
     let mut ds = vec![];
     for (id, label, due, status, cap) in deadlines {
         let used = deadlines::api::used_pause_days(tx, id, state.now()).await?;
-        ds.push(json!({"id":id,"label":label,"due_at":due,"status":status,"pause_days_used":used,"max_pause_days":cap,"text":if status=="paused" {format!("Your reply pauses the clock: {used} of {} pause days used",cap.unwrap_or(0))}else{format!("We will reply by {}",time::display_local(time::parse(&due)?))}}));
+        ds.push(json!({"id":id,"label":label,"due_at":due,"status":status,"pause_days_used":used,"max_pause_days":cap,"text":deadlines::api::resident_text(&label,&status,&due,used,cap)?}));
     }
     result["deadlines"] = json!(ds);
     Ok(result)

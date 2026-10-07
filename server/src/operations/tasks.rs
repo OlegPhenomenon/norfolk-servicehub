@@ -57,10 +57,12 @@ pub async fn notify_assignee(tx: &mut SqliteConnection, id: i64, user: Option<i6
     let Some(uid) = user else {
         return Ok(());
     };
+    let case_id: i64 = sqlx::query_scalar("SELECT case_id FROM tasks WHERE id=?").bind(id).fetch_one(&mut *tx).await?;
     notify::send(
         tx,
         Notice {
             user_id: Some(uid),
+            case_id: Some(case_id),
             subject: "Field task assigned".into(),
             body: title.into(),
             link: Some(format!("/staff/field/{id}")),

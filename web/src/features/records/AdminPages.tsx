@@ -16,12 +16,14 @@ export function UsersPage() {
     <QueryView query={q}>{users => <div className="space-y-4">{users.map(u => <UserCard key={u.id} user={u} />)}</div>}</QueryView></div>
 }
 function UserCard({ user }: { user: StaffUser }) {
+  const { data: me } = useMe()
   const [role, setRole] = useState<Role>('intake')
   const grants = useQuery({ queryKey: ['records', 'roles', user.id], queryFn: () => api.get<{ id: number; role: Role; revoked_at: string | null }[]>(`/api/admin/users/${user.id}/roles`), enabled: user.kind === 'staff' })
   const grant = useCommand(`/api/admin/users/${user.id}/roles`, 'Role granted')
   const deactivate = useCommand(`/api/admin/users/${user.id}/deactivate`, 'Account deactivated')
   return <Card title={user.display_name} description={`${user.email} · ${user.kind} · ${user.is_active ? 'Active' : 'Inactive'}`}><ErrorAlert error={grant.error ?? deactivate.error} />
-    {user.kind === 'staff' && <><QueryView query={grants}>{roles => <div className="flex flex-wrap gap-3">{roles.filter(g => !g.revoked_at).map(g => <RoleGrant key={g.id} userId={user.id} grant={g} />)}</div>}</QueryView><form className="mt-4 flex flex-wrap items-end gap-4" onSubmit={e => { e.preventDefault(); grant.mutate({ role }) }}><Field label="Staff role" required><Select value={role} onChange={e => setRole(e.target.value as Role)} options={Object.entries(ROLE_LABELS).map(([value, label]) => ({ value, label }))} /></Field><Button type="submit" loading={grant.isPending}>Grant role</Button></form></>}
+    {user.kind === 'staff' && <><QueryView query={grants}>{roles => <div className="flex flex-wrap gap-3">{roles.filter(g => !g.revoked_at).map(g => <RoleGrant key={g.id} userId={user.id} grant={g} />)}</div>}</QueryView>{me?.user?.id !== user.id && <form className="mt-4 flex flex-wrap items-end gap-4" onSubmit={e => { e.preventDefault(); grant.mutate({ role }) }}><Field label="Staff role" required><Select value={role} onChange={e => setRole(e.target.value as Role)} options={Object.entries(ROLE_LABELS).filter(([value]) => me?.roles.includes('manager') || !['manager', 'complaints_officer'].includes(value)).map(([value, label]) => ({ value, label }))} /></Field><Button type="submit" loading={grant.isPending}>Grant role</Button></form>}</>}
+    <RecoveryControls user={user} />
     {user.is_active === 1 && <Button variant="danger-outline" className="mt-4" loading={deactivate.isPending} onClick={() => deactivate.mutate({})}>Deactivate account</Button>}
   </Card>
 }
@@ -70,4 +72,9 @@ export function AuthorityPage() {
   const grant = useCommand('/api/staff/decision-authorities', 'Decision authority granted')
   const fields = isApiError(grant.error) ? grant.error.fields : {}
   return <div className="space-y-6"><PageHeader title="Decision authority" description="A manager grants authority to another active staff member. Systems administration does not confer decision authority." /><QueryView query={q}>{d => <><Card title="Grant authority"><form className="space-y-4" onSubmit={e => { e.preventDefault(); grant.mutate({ user_id: Number(user), decision_type: type }) }}><ErrorAlert error={grant.error} /><Field label="Staff member" required error={fields.user_id}><Select placeholder="Choose a staff member" value={user} onChange={e => setUser(e.target.value)} options={d.staff.filter(u => u.id !== me?.user?.id).map(u => ({ value: String(u.id), label: u.display_name }))} /></Field><Field label="Decision type" required error={fields.decision_type}><Select value={type} onChange={e => setType(e.target.value)} options={['development_approval', 'building_approval', 'modification_approval', 'planning_certificate', 'complaint_response', 'road_response'].map(value => ({ value, label: value.replaceAll('_', ' ') }))} /></Field><Button type="submit" loading={grant.isPending}>Grant authority</Button></form></Card><Table caption="Active authorities" rows={d.authorities} rowKey={r => r.id} empty={<EmptyState title="No decision authorities granted" />} columns={[{ key: 'name', header: 'Staff member', cell: r => r.display_name }, { key: 'type', header: 'Decision', cell: r => r.decision_type.replaceAll('_', ' ') }, { key: 'at', header: 'Granted', cell: r => <DateTime value={r.granted_at} /> }]} /></>}</QueryView></div>
+}
+
+function RecoveryControls({user}:{user:StaffUser}) {
+  const reactivate=useCommand(`/api/admin/users/${user.id}/reactivate`,'Account reactivated'), password=useCommand<unknown,{one_time_password:string}>(`/api/admin/users/${user.id}/reset-password`,'Password reset'), totp=useCommand(`/api/admin/users/${user.id}/reset-totp`,'TOTP enrolment required')
+  return <div className="flex flex-wrap gap-3 mt-4">{!user.is_active && <Button onClick={()=>reactivate.mutate({})}>Reactivate account</Button>}<Button variant="secondary" onClick={()=>password.mutate({})}>Reset password</Button>{user.kind==='staff' && <Button variant="secondary" onClick={()=>totp.mutate({})}>Reset TOTP</Button>}{password.data && <p className="break-all">One-time password: {password.data.one_time_password}</p>}<ErrorAlert error={reactivate.error ?? password.error ?? totp.error}/></div>
 }

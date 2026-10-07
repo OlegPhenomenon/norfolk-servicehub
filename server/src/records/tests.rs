@@ -87,6 +87,15 @@ async fn every_metric_count_matches_drilldown_and_denials() {
         sqlx::query("UPDATE cases SET submitted_at=?,closed_at=CASE WHEN status IN ('completed','refused','withdrawn','cancelled') THEN ? END WHERE id=?").bind(NOW).bind(NOW).bind(case.id).execute(&mut *tx).await.unwrap();
         if status == "in_progress" {
             sqlx::query("UPDATE cases SET reopened_count=1 WHERE id=?").bind(case.id).execute(&mut *tx).await.unwrap();
+            core::append_event(&mut tx, case.id, None, "case.reopened", Visibility::Staff, "Reopened", json!({}))
+                .await
+                .unwrap();
+            sqlx::query("UPDATE case_events SET at=? WHERE case_id=? AND kind='case.reopened'")
+                .bind(NOW)
+                .bind(case.id)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
         }
         if status == "submitted" {
             sqlx::query("INSERT INTO deadlines(case_id,kind,label,basis,duration_days,pausable,started_at,due_at,status,policy_json) VALUES(?,'response','Response','business',3,0,?,'2026-01-01T00:00:00.000Z','breached','{}')").bind(case.id).bind(NOW).execute(&mut *tx).await.unwrap();

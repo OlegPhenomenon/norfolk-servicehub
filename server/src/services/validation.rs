@@ -11,26 +11,30 @@ use std::collections::{BTreeMap, HashSet};
 
 pub const MODULES: &[&str] =
     &["generic", "venue_booking", "equipment_hire", "building", "planning_certificate", "road_issue", "complaint"];
-pub const HANDLERS: &[&str] = &[
-    "operations.booking_confirmed",
-    "operations.equipment_scheduled",
-    "operations.usage_invoiced",
-    "finance.deposits_settled",
-    "documents.exhibition_closed",
-    "documents.letter_issued:road_response",
-    "documents.letter_issued:complaint_response",
-];
-pub const DECISIONS: &[&str] =
-    &["development_approval", "building_approval", "modification_approval", "planning_certificate"];
-pub const TASKS: &[&str] = &[
-    "venue_prep",
-    "venue_inspection",
-    "equipment_job",
-    "site_inspection",
-    "road_inspection",
-    "road_repair",
-    "general",
-];
+pub fn decision_types(module: &str) -> Vec<&'static str> {
+    let mut types = vec!["service_response"];
+    match module {
+        "building" => types.extend(["development_approval", "building_approval", "modification_approval"]),
+        "planning_certificate" => types.push("planning_certificate"),
+        _ => {}
+    }
+    types
+}
+pub fn handlers(module: &str) -> Vec<&'static str> {
+    let mut handlers = vec!["documents.letter_issued:service_response"];
+    match module {
+        "venue_booking" => handlers.extend(["operations.booking_confirmed", "finance.deposits_settled"]),
+        "equipment_hire" => handlers.extend(["operations.equipment_scheduled", "operations.usage_invoiced"]),
+        "building" => handlers.push("documents.exhibition_closed"),
+        "road_issue" => handlers.push("documents.letter_issued:road_response"),
+        "complaint" => handlers.push("documents.letter_issued:complaint_response"),
+        _ => {}
+    }
+    handlers
+}
+pub fn capabilities(module: &str) -> Value {
+    serde_json::json!({"step_kinds":["review","payment","decision","task","module","complete"],"handlers":handlers(module),"decision_types":decision_types(module),"task_kinds":task_kinds(module)})
+}
 #[derive(Debug, Clone, Serialize)]
 pub struct ValidationIssue {
     pub path: String,
@@ -64,7 +68,9 @@ pub async fn validate_for_module(
         if f.label.trim().is_empty() {
             issue(format!("{p}.label"), "Enter a field label.");
         }
-        if matches!(f.field_type, FieldType::Select | FieldType::Multiselect) {
+        if matches!(f.field_type, FieldType::Select | FieldType::Multiselect)
+            && !(module == "complaint" && f.key == "staff_member_concerned")
+        {
             let mut options = HashSet::new();
             if f.options.is_empty() || f.options.iter().any(|o| o.value.is_empty() || !options.insert(&o.value)) {
                 issue(format!("{p}.options"), "Provide unique, non-empty options.");
@@ -103,14 +109,15 @@ pub async fn validate_for_module(
         if s.kind == StepKind::Complete && s.optional {
             issue(format!("{p}.optional"), "The terminal step cannot be optional.");
         }
-        if s.kind == StepKind::Task && !s.task_kind.as_deref().is_some_and(|k| TASKS.contains(&k)) {
+        if s.kind == StepKind::Task && !s.task_kind.as_deref().is_some_and(|k| task_kinds(module).contains(&k)) {
             issue(format!("{p}.task_kind"), "Choose a registered task kind.");
         }
-        if s.kind == StepKind::Module && !s.handler.as_deref().is_some_and(|h| HANDLERS.contains(&h)) {
+        if s.kind == StepKind::Module && !s.handler.as_deref().is_some_and(|h| handlers(module).contains(&h)) {
             issue(format!("{p}.handler"), "Choose a registered module handler.");
         }
         if s.kind == StepKind::Decision
-            && (s.decision_types.is_empty() || s.decision_types.iter().any(|d| !DECISIONS.contains(&d.as_str())))
+            && (s.decision_types.is_empty()
+                || s.decision_types.iter().any(|d| !decision_types(module).contains(&d.as_str())))
         {
             issue(format!("{p}.decision_types"), "Choose registered decision types.");
         }
@@ -241,7 +248,7 @@ pub async fn validate_answers(
         } else if f.required && f.field_type == FieldType::Checkbox && v != &Value::Bool(true) {
             Some("You must agree to this declaration.".into())
         } else {
-            match value_error(f, v) {
+            match if module == "complaint" && f.key == "staff_member_concerned" { None } else { value_error(f, v) } {
                 Some(message) => Some(message),
                 None => hooks::validate_field(tx, module, f, v).await?,
             }
@@ -302,4 +309,16 @@ fn value_error(f: &FieldDef, v: &Value) -> Option<String> {
         _ => v.as_str().is_some_and(|s| f.max_length.is_none_or(|n| s.chars().count() <= n as usize)),
     };
     (!valid).then(|| "Enter a valid value for this field.".into())
+}
+
+pub fn task_kinds(module: &str) -> Vec<&'static str> {
+    let mut kinds = vec!["general"];
+    match module {
+        "venue_booking" => kinds.extend(["venue_prep", "venue_inspection"]),
+        "equipment_hire" => kinds.push("equipment_job"),
+        "building" => kinds.push("site_inspection"),
+        "road_issue" => kinds.extend(["road_inspection", "road_repair"]),
+        _ => {}
+    }
+    kinds
 }

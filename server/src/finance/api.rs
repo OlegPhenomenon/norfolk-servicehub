@@ -302,7 +302,7 @@ pub async fn definition_pricing_lines(tx: &mut SqliteConnection, case: &CaseRow)
             .await?,
         );
     }
-    Ok(lines)
+    apply_waivers(tx, case.id, lines).await
 }
 pub async fn case_settled(tx: &mut SqliteConnection, case_id: i64) -> AppResult<bool> {
     let owing:i64=sqlx::query_scalar("SELECT COUNT(*) FROM finance_line_balances l JOIN invoices i ON i.id=l.invoice_id WHERE i.case_id=? AND i.kind='invoice' AND i.status='issued' AND l.amount_cents-l.credited_cents-l.paid_cents>0").bind(case_id).fetch_one(&mut *tx).await?;
@@ -320,7 +320,7 @@ pub async fn case_money_summary(tx: &mut SqliteConnection, case_id: i64) -> AppR
         credited_cents: credited,
         paid_cents: paid,
         outstanding_cents: outstanding,
-        deposits_held_cents: deposits - retained - refunds,
+        deposits_held_cents: deposits - retained - sqlx::query_scalar::<_,i64>("SELECT COALESCE(SUM(amount_cents),0) FROM refunds WHERE case_id=? AND deposit_decision_id IS NOT NULL AND status='completed'").bind(case_id).fetch_one(&mut *tx).await?,
         refunded_cents: refunds,
         settled: outstanding == 0,
     })
@@ -432,4 +432,105 @@ pub async fn require_unconsumed(tx: &mut SqliteConnection, state: &AppState, cas
         return Err(AppError::conflict("Consumed hire charges and decided bonds cannot be repriced."));
     }
     Ok(())
+}
+
+/// Release unused booking fees to customer credit; bonds keep their separate inspection decision.
+pub async fn credit_unused_fees(
+    tx: &mut SqliteConnection,
+    state: &AppState,
+    actor: &Actor,
+    case: i64,
+    reason: &str,
+) -> AppResult<()> {
+    let invoices: Vec<i64> =
+        sqlx::query_scalar("SELECT id FROM invoices WHERE case_id=? AND kind='invoice' AND status='issued'")
+            .bind(case)
+            .fetch_all(&mut *tx)
+            .await?;
+    for invoice in invoices {
+        let rows = sqlx::query(
+            "SELECT * FROM finance_line_balances WHERE invoice_id=? AND kind='fee' AND amount_cents>credited_cents",
+        )
+        .bind(invoice)
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut credits = vec![];
+        for r in rows {
+            let line: i64 = r.get("id");
+            let ids: Vec<i64> = sqlx::query_scalar(
+                "SELECT id FROM payment_allocations WHERE invoice_line_id=? AND reversed_at IS NULL",
+            )
+            .bind(line)
+            .fetch_all(&mut *tx)
+            .await?;
+            for id in ids {
+                payments::reverse(tx, actor, id, reason).await?;
+            }
+            let cents = r.get::<i64, _>("amount_cents") - r.get::<i64, _>("credited_cents");
+            credits.push(QuoteLine {
+                price_item_id: r.get("price_item_id"),
+                price_version_id: r.get("price_version_id"),
+                item_code: String::new(),
+                kind: "fee".into(),
+                description: r.get("description"),
+                quantity_milli: 1000,
+                quantity_minutes: None,
+                unit_amount_cents: cents,
+                amount_cents: cents,
+                calc: json!({"original_line_id":line}),
+            });
+        }
+        if !credits.is_empty() {
+            let id = persist_invoice(
+                tx,
+                actor,
+                case,
+                "credit_note",
+                time::local_date(state.now()),
+                &credits,
+                Some(reason),
+                Some(invoice),
+            )
+            .await?;
+            attach_pdf(tx, state, actor, id).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Approved exemptions change the charge and add an explicit explanatory waiver line to the invoice.
+pub async fn apply_waivers(
+    tx: &mut SqliteConnection,
+    case: i64,
+    mut lines: Vec<QuoteLine>,
+) -> AppResult<Vec<QuoteLine>> {
+    let waivers: Vec<(String,i64,String,i64,String)> = sqlx::query_as("SELECT w.item_code,w.amount_cents,w.reason,w.approved_by,u.display_name FROM case_price_waivers w JOIN users u ON u.id=w.approved_by WHERE w.case_id=?").bind(case).fetch_all(&mut *tx).await?;
+    for (code, cents, reason, approver, name) in waivers {
+        let Some(line) = lines.iter_mut().find(|l| l.item_code == code && l.kind == "fee") else { continue };
+        if line.calc.get("waiver_id").is_some() {
+            continue;
+        }
+        let original = line.clone();
+        if cents > line.amount_cents {
+            return Err(AppError::conflict("The approved exemption exceeds the quoted fee."));
+        }
+        line.quantity_milli = 1000;
+        line.quantity_minutes = None;
+        line.amount_cents = original.amount_cents - cents;
+        line.unit_amount_cents = line.amount_cents;
+        line.calc = json!({"original_quote":original,"waiver_id":code,"waived_cents":cents,"approved_by":approver});
+        lines.push(QuoteLine {
+            price_item_id: None,
+            price_version_id: None,
+            item_code: String::new(),
+            kind: "fee".into(),
+            description: format!("Waiver of {}: {reason}. Approved by {name}", ledger::money(cents)),
+            quantity_milli: 1000,
+            quantity_minutes: None,
+            unit_amount_cents: 0,
+            amount_cents: 0,
+            calc: json!({"line_type":"waiver","waived_cents":cents,"reason":reason,"approved_by":approver}),
+        });
+    }
+    Ok(lines)
 }

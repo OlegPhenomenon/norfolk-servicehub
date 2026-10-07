@@ -24,8 +24,8 @@ use crate::state::AppState;
 use crate::{storage, time};
 
 /// Decision types Priya may issue (granted by Helen).
-pub const PRIYA_DECISION_TYPES: [&str; 4] =
-    ["development_approval", "building_approval", "planning_certificate", "modification_approval"];
+pub const PRIYA_DECISION_TYPES: [&str; 5] =
+    ["development_approval", "building_approval", "planning_certificate", "modification_approval", "service_response"];
 
 /// Deletes all rows of all tables except `_sqlx_migrations` (FTS tables via `DELETE`, their shadow
 /// tables untouched) in one transaction, then removes every blob file.
@@ -120,9 +120,13 @@ async fn seed_platform(tx: &mut SqliteConnection, state: &AppState) -> AppResult
     // Decision authority: Helen (manager) grants Priya.
     let helen = user_id_by_persona(tx, "helen").await?;
     let priya = user_id_by_persona(tx, "priya").await?;
+    let temporary = users::grant_role(tx, priya, crate::authz::Role::Manager, None, Some(helen)).await?;
     for t in PRIYA_DECISION_TYPES {
         users::grant_decision_authority(tx, priya, t, None, helen).await?;
+        users::grant_decision_authority(tx, helen, t, None, priya).await?;
     }
+
+    users::revoke_role(tx, temporary).await?;
 
     // Organisation with Ben as active owner.
     let ben = user_id_by_persona(tx, "ben").await?;
@@ -281,8 +285,8 @@ mod tests {
 
         let get = |t: &str| second.iter().find(|(n, _)| n == t).unwrap().1;
         assert_eq!(get("users"), 9);
-        assert_eq!(get("role_grants"), 7);
-        assert_eq!(get("decision_authorities"), 4);
+        assert_eq!(get("role_grants"), 8);
+        assert_eq!(get("decision_authorities"), 10);
         assert_eq!(get("memberships"), 1);
         assert_eq!(get("holidays"), 2);
         assert_eq!(get("sessions"), 0);

@@ -1,6 +1,6 @@
 export interface RecordCase { id: number; number: string | null; title: string; status: string; applicant_name?: string; property_ref?: string; retention_until?: string; legal_hold?: number; closed_at?: string }
 export interface Delivery { id: number; system_code: string; operation_id: string; kind: string; status: string; attempts: number; external_ref: string | null; last_error: string | null; updated_at: string; next_attempt_at: string | null; case_id?: number | null }
-export interface ExternalSystem { code: string; name: string; outage: number; drop_responses: number; enabled: number }
+export interface ExternalSystem { code: string; name: string; outage: number; drop_responses: number; enabled: number; base_url: string }
 export interface StaffUser { id: number; display_name: string; email: string; kind: string; is_active: number; totp_enabled: number }
 export interface Dashboard { metrics: Record<string, number>; services: { service_id: number; service_name: string; metrics: Record<string, number>; median_days: number | null }[]; workload: { user_id: number; name: string; open: number; overdue: number }[] }
 export interface RecordPanel { revision: number; legal_hold: boolean; retention_until: string | null; holds: { reason: string; placed_at: string; released_at: string | null }[]; disposed: { reason: string; at: string }[] }

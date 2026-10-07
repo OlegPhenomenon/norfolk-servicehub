@@ -1,6 +1,6 @@
 # Norfolk ServiceHub operations
 
-ServiceHub is one Rust process serving the React application, a SQLite database, and a content-addressed blob directory. All demo people and records are fictional. Email, payments, Content Manager, and Civica Altitude use in-process mock gateways.
+ServiceHub is one Rust process serving the React application, a SQLite database, and a content-addressed blob directory. All demo people and records are fictional. In demo mode email, payments, Content Manager, and Civica Altitude use in-process mock gateways.
 
 ## Install and configure
 
@@ -40,14 +40,29 @@ Set `DATA_DIR` to an absolute writable directory, `WEB_DIST` to the built `web/d
 
 On an explicitly disposable demonstration database, `servicehub seed-demo` creates the personas and module seed data. **Both `seed-demo` and `reset-demo` wipe existing records and files.** Do not use either command on operational data. Set `DEMO_MODE=false` for operational installations. `DEMO_RESET_HOURS=0` disables periodic reset in demo mode; `DEMO_ENDS_AT` only applies to demos.
 
+## First administrator and catalogue
+
+On a fresh self-hosted database, use the same `DATA_DIR` and configuration as `serve`:
+
+```sh
+servicehub seed-catalogue
+servicehub create-admin --email admin@example.org --name "Council administrator"
+```
+
+Both commands migrate first. `seed-catalogue` is repeatable and creates services, prices, resources, templates, retention rules and holidays, without personas or cases. `create-admin` prints a random one-time password. Deliver it privately to the named administrator; do not retain it in deployment logs. The first administrator also receives the manager role so they can grant manager and complaints-officer roles to other staff. Later administrators receive sysadmin only. Interactive grants cannot be made to oneself; manager and complaints-officer grants require a manager.
+
+Sign in at `/login`, enrol an authenticator, confirm TOTP and change the one-time password. Case and staff APIs remain blocked until these steps are complete. Administrators can deactivate/reactivate accounts and reset another user's password or staff TOTP at `/admin/users`; resets revoke sessions and force password replacement or authenticator enrolment respectively.
+
+A fresh `serve` with `DEMO_MODE=true` automatically seeds fictional history once when there are no users or cases. It does not overwrite populated installations. Explicit `seed-demo` and `reset-demo` are destructive reset commands.
+
 ## Demo mode vs self-hosted
 
 `DEMO_MODE` chooses between two operating modes of the same binary:
 
 - **Demo (`DEMO_MODE=true`).** The `/demo` persona-picker page and its sign-in endpoints are enabled, and staff personas get a one-click TOTP via the on-screen demo authenticator. `DEMO_RESET_HOURS` (default `6`, `0` disables) schedules a wipe-and-reseed of all data — everything visitors create is deleted. A banner shows the next reset. With `DEMO_ENDS_AT` set (RFC 3339 timestamp), the site serves a static "demo has ended" page and API requests return `410` once the time passes; `REPO_URL` is linked from that page so visitors can run their own copy.
-- **Self-hosted (`DEMO_MODE=false`, the default).** `/demo`, the persona endpoints and the demo authenticator return `404`. There is no scheduled reset and `DEMO_ENDS_AT` has no effect — the installation has no expiry or phone-home. Accounts are created by an administrator at `/admin/users`; staff enrol their own authenticator at first login. Seed data is optional and `seed-demo`/`reset-demo` must never be run against operational data — both wipe the database and blobs.
+- **Self-hosted (`DEMO_MODE=false`, the default).** `/demo`, the persona endpoints and the demo authenticator return `404`. There is no scheduled reset and `DEMO_ENDS_AT` has no effect — the installation has no expiry or phone-home. Bootstrap the first administrator with `create-admin` as above, then create further accounts at `/admin/users`; staff enrol their own authenticator at first login. Catalogue seeding uses `seed-catalogue`. Fictional seed data is optional and `seed-demo`/`reset-demo` must never be run against operational data — both wipe the database and blobs.
 
-Everything else — the application, migrations, backups, restore tooling — is identical in both modes.
+Migrations, backups and restore tooling are shared. All `/mock/**` routes, including DemoPay checkout, are absent outside demo mode. Online checkout returns "Online payment is not configured" and the Pay button is hidden; counter receipts and bank statement matching remain available. Real online payment and email/SMS delivery require provider adapters; queued notifications do not become delivered through a mock in self-hosted mode. AI is enabled by default but its suggestion endpoint is a demo mock; set `AI_ENABLED=false` to hide it. Integration endpoints are configurable at `/admin/integrations`; the supplied receivers illustrate the exchange contract, without claiming verified Council connectivity.
 
 ## Upgrade with a pre-migration backup
 
@@ -78,7 +93,7 @@ Copy verified snapshots off the application server. Preserve access controls and
 ## Restore to another server
 
 1. Stop the destination service. Install the same application version as the backup and configure its environment. Keep all database connections closed during replacement.
-2. Copy the complete snapshot to the destination. Run `restore-check` with `DATA_DIR` pointing at a writable scratch/application directory; inspect the successful result before proceeding.
+2. Copy the complete snapshot to the destination. Run `restore-check` with `DATA_DIR` pointing at a writable scratch/application directory (it migrates this directory first, so a fresh directory works); inspect the successful result before proceeding.
 3. Create an empty destination `DATA_DIR` owned by the service account. Copy `servicehub.db` and the entire `blobs/` directory into it. Do not copy stale `-wal` or `-shm` files from the former database.
 4. Restore configuration secrets separately. Configure the new public and internal base URLs and reverse proxy. Application secrets are not part of `manifest.json`.
 5. Start the service using the same application version, then verify `/api/health`, case counts, an authorised document download, confidential access restrictions, and the last verified restore record. Upgrade only after this restore is working.
@@ -91,4 +106,6 @@ Compare case counts with the snapshot's manifest. For a more detailed check, com
 
 A systems administrator sees diagnostics, not case content, unless another role grants case access. Complaint subject exclusions override every role. Role changes and membership revocations take effect on the next request; confidential notifications use only the case reference.
 
-Notification retry creates a new outbound attempt through the shared notification API and keeps the original failed row for history. Retention rules are explicitly illustrative demo policies. Changing a rule affects future closure dates; it does not shorten dates already recorded. A legal hold prevents disposal. Disposal integration must preserve metadata, decision text and exact evidence version IDs while removing files only when no other live reference exists.
+Notification team copies use the addresses saved at `/admin/settings` for Customer Care, Finance and Works Depot. Confidential case content is not copied to shared team addresses.
+
+Notification retry creates a new outbound attempt through the shared notification API and keeps the original failed row for history. Retention rules cover case modules and document categories (`document:letter`, `document:receipt`, etc.) and are explicitly illustrative policies. Closure records each document's date; whole-case disposal waits for the longest retained record. Changing a rule affects future closure dates; it does not shorten dates already recorded. A legal hold prevents disposal. Disposal integration must preserve metadata, decision text and exact evidence version IDs while removing files only when no other live reference exists.

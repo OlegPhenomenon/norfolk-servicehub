@@ -9,13 +9,14 @@ use serde_json::json;
 use sqlx::SqliteConnection;
 
 pub async fn assign_owner(
+    state: &crate::AppState,
     tx: &mut SqliteConnection,
     actor: &Actor,
     case_id: i64,
     user_id: i64,
     reason: &str,
 ) -> AppResult<()> {
-    super::assignment::add(tx, actor, case_id, user_id, "owner", reason, true).await
+    super::assignment::add(state, tx, actor, case_id, user_id, "owner", reason, true).await
 }
 
 /// Start a review without submission hooks: records must copy exclusions before assigning anyone.

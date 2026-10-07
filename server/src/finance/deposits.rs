@@ -75,8 +75,8 @@ pub async fn decide(
     for (payment, source, funded, available) in sources {
         let cents = remaining.min(funded).min(available);
         if cents > 0 {
-            let refund:i64=sqlx::query_scalar("INSERT INTO refunds(case_id,payment_id,deposit_decision_id,amount_cents,method,status,reason,requested_by,created_at) VALUES(?,?,?,?,?,'processing',?,?,?) RETURNING id").bind(case).bind(payment).bind(id).bind(cents).bind(if source=="provider"{"provider"}else{"bank_transfer"}).bind(&d.reason).bind(actor.db_id()).bind(time::fmt(state.now())).fetch_one(&mut *tx).await?;
-            if source == "provider" {
+            let refund:i64=sqlx::query_scalar("INSERT INTO refunds(case_id,payment_id,deposit_decision_id,amount_cents,method,status,reason,requested_by,created_at) VALUES(?,?,?,?,?,'processing',?,?,?) RETURNING id").bind(case).bind(payment).bind(id).bind(cents).bind(if source=="provider" && state.cfg.demo_mode {"provider"}else{"bank_transfer"}).bind(&d.reason).bind(actor.db_id()).bind(time::fmt(state.now())).fetch_one(&mut *tx).await?;
+            if source == "provider" && state.cfg.demo_mode {
                 jobs::enqueue(
                     tx,
                     "finance.request_refund",
@@ -174,6 +174,9 @@ pub async fn complete(
     Ok(Some(case))
 }
 pub async fn request_job(state: &AppState, id: i64) -> AppResult<()> {
+    if !state.cfg.demo_mode {
+        return Err(AppError::conflict("Online payment is not configured"));
+    }
     let r = sqlx::query("SELECT r.*,p.external_id FROM refunds r JOIN payments p ON p.id=r.payment_id WHERE r.id=?")
         .bind(id)
         .fetch_one(&state.db)
@@ -195,4 +198,77 @@ pub async fn request_job(state: &AppState, id: i64) -> AppResult<()> {
         .await?;
     tx.commit().await?;
     Ok(())
+}
+
+/// Reserve available credit immediately; confirmation uses the same refund flow as bonds.
+pub async fn refund_credit(
+    tx: &mut SqliteConnection,
+    state: &AppState,
+    actor: &Actor,
+    case: i64,
+    cents: i64,
+    reason: &str,
+) -> AppResult<Vec<i64>> {
+    if cents <= 0 || reason.trim().is_empty() {
+        return Err(AppError::field("amount_cents", "Enter a positive amount and a refund reason."));
+    }
+    let sources: Vec<(i64,String,i64,i64)> = sqlx::query_as("SELECT p.id,p.source,b.credit_cents,p.amount_cents-COALESCE((SELECT SUM(amount_cents) FROM refunds WHERE payment_id=p.id),0) FROM payments p JOIN finance_payment_balances b ON b.payment_id=p.id WHERE p.case_id=? AND p.status='confirmed' AND b.credit_cents>0 ORDER BY p.id").bind(case).fetch_all(&mut *tx).await?;
+    let available: i64 = sources.iter().map(|r| r.2.min(r.3)).sum();
+    if cents > available {
+        return Err(AppError::conflict("The refund exceeds available customer credit."));
+    }
+    let mut remaining = cents;
+    let mut ids = vec![];
+    for (payment, source, credit, available) in sources {
+        let amount = remaining.min(credit).min(available);
+        if amount == 0 {
+            continue;
+        }
+        let provider = source == "provider" && state.cfg.demo_mode;
+        let id: i64 = sqlx::query_scalar("INSERT INTO refunds(case_id,payment_id,amount_cents,method,status,reason,requested_by,created_at) VALUES(?,?,?,?,'processing',?,?,?) RETURNING id").bind(case).bind(payment).bind(amount).bind(if provider {"provider"} else {"bank_transfer"}).bind(reason).bind(actor.db_id()).bind(time::fmt(state.now())).fetch_one(&mut *tx).await?;
+        sqlx::query("UPDATE finance_payment_balances SET credit_cents=credit_cents-? WHERE payment_id=?")
+            .bind(amount)
+            .bind(payment)
+            .execute(&mut *tx)
+            .await?;
+        ledger::post(
+            tx,
+            Some(case),
+            "refund",
+            id,
+            "reserve_credit",
+            reason,
+            &[("customer_credit", amount, 0), ("refunds_payable", 0, amount)],
+        )
+        .await?;
+        if provider {
+            jobs::enqueue(
+                tx,
+                "finance.request_refund",
+                json!({"refund_id":id}),
+                Some(format!("finance.refund:{id}")),
+                state.now(),
+            )
+            .await?;
+        }
+        ids.push(id);
+        remaining -= amount;
+    }
+    ledger::event(
+        tx,
+        actor,
+        case,
+        "finance.credit_refund_requested",
+        reason,
+        json!({"refund_ids":ids,"amount_cents":cents}),
+    )
+    .await?;
+    ledger::tell(
+        tx,
+        case,
+        "Refund processing",
+        &format!("Refund of {} requested: {reason}. Awaiting confirmation.", ledger::money(cents)),
+    )
+    .await?;
+    Ok(ids)
 }

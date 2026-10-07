@@ -104,6 +104,17 @@ pub async fn grant_role(
     scope_service_id: Option<i64>,
     granted_by: Option<i64>,
 ) -> AppResult<i64> {
+    if granted_by == Some(user_id) {
+        return Err(AppError::forbidden_msg("You cannot grant roles to yourself."));
+    }
+    if let Some(granter) = granted_by
+        && matches!(role, Role::Manager | Role::ComplaintsOfficer)
+    {
+        let manager: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM role_grants WHERE user_id=? AND role='manager' AND revoked_at IS NULL AND (scope_service_id IS NULL OR scope_service_id=?))").bind(granter).bind(scope_service_id).fetch_one(&mut *conn).await?;
+        if !manager {
+            return Err(AppError::forbidden_msg("A manager must grant this role."));
+        }
+    }
     let kind: Option<String> =
         sqlx::query_scalar("SELECT kind FROM users WHERE id = ?").bind(user_id).fetch_optional(&mut *conn).await?;
     match kind.as_deref() {

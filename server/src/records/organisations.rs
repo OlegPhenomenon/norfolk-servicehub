@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 use sqlx::SqliteConnection;
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/api/my/organisations", get(list))
+        .route("/api/my/organisations", get(list).post(create))
         .route("/api/my/organisations/{id}/invites", post(invite))
         .route("/api/my/invites/{token}/accept", post(accept))
         .route("/api/my/organisations/{id}/members/{mid}/revoke", post(revoke))
@@ -153,4 +153,34 @@ async fn revoke(
     .await?;
     tx.commit().await?;
     Ok(Json(json!({"ok":true})))
+}
+
+#[derive(Deserialize)]
+struct Create {
+    name: String,
+    abn: Option<String>,
+}
+async fn create(State(state): State<AppState>, actor: Actor, Json(body): Json<Create>) -> AppResult<Json<Value>> {
+    if actor.is_staff() {
+        return Err(AppError::forbidden_msg("Use a resident account to create an organisation."));
+    }
+    let name = common::text(&body.name, "name", 160)?;
+    let abn = body.abn.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
+    if abn.as_ref().is_some_and(|v| v.len() > 40) {
+        return Err(AppError::field("abn", "Use at most 40 characters."));
+    }
+    let now = time::fmt(state.now());
+    let mut tx = write_tx(&state.db).await?;
+    let email: String =
+        sqlx::query_scalar("SELECT email FROM users WHERE id=?").bind(actor.user_id).fetch_one(&mut *tx).await?;
+    let id: i64 = sqlx::query_scalar("INSERT INTO organisations(name,abn,created_at) VALUES(?,?,?) RETURNING id")
+        .bind(name)
+        .bind(abn)
+        .bind(&now)
+        .fetch_one(&mut *tx)
+        .await?;
+    sqlx::query("INSERT INTO memberships(organisation_id,user_id,invite_email,role,status,created_at,accepted_at) VALUES(?,?,?,'owner','active',?,?)").bind(id).bind(actor.user_id).bind(email).bind(&now).bind(&now).execute(&mut *tx).await?;
+    common::admin_audit(&mut tx, &actor, "organisation.created", "organisation", Some(id), json!({})).await?;
+    tx.commit().await?;
+    Ok(Json(json!({"id":id})))
 }

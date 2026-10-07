@@ -43,6 +43,9 @@ pub fn routes() -> Router<AppState> {
         .route("/api/finance/payments/{id}/allocate", post(allocate))
         .route("/api/finance/payments/counter", post(counter))
         .route("/api/finance/deposits", get(deposit_queue))
+        .route("/api/cases/{id}/refund-credit", post(refund_credit))
+        .route("/api/cases/{id}/price-waivers", post(waiver))
+        .route("/api/finance/payments/{id}/unmatch", post(unmatch))
         .route("/api/cases/{id}/deposit-decision", post(deposit_decision))
         .route("/api/finance/refunds", get(refund_queue))
         .route("/api/finance/refunds/{id}/confirm-bank", post(confirm_bank))
@@ -96,7 +99,18 @@ async fn price_version(
 async fn money(State(s): State<AppState>, actor: Actor, Path(id): Path<i64>) -> AppResult<Json<Value>> {
     let mut c = s.db.acquire().await?;
     let staff = readable(&mut c, &actor, id).await?;
-    Ok(Json(views::case_money(&mut c, id, staff, &time::fmt(s.now())).await?))
+    let mut data = views::case_money(&mut c, id, staff, &time::fmt(s.now())).await?;
+    data["online_payment_enabled"] = json!(s.cfg.demo_mode);
+    let case = core::load_case(&mut c, id).await?;
+    if staff
+        && actor.roles_for_service(case.service_id).contains(&Role::Manager)
+        && !data["invoices"].as_array().is_some_and(|items| items.iter().any(|i| i["kind"] == "invoice"))
+        && let Ok((_, lines)) = crate::hooks::pricing_lines(&mut c, &case).await
+    {
+        data["waiver_quotes"] =
+            json!(lines.into_iter().filter(|l| l.kind == "fee" && l.amount_cents > 0).collect::<Vec<_>>());
+    }
+    Ok(Json(data))
 }
 #[derive(Deserialize)]
 struct Checkout {
@@ -108,6 +122,9 @@ async fn checkout(
     Path(id): Path<i64>,
     Json(b): Json<Checkout>,
 ) -> AppResult<Json<Value>> {
+    if !s.cfg.demo_mode {
+        return Err(AppError::conflict("Online payment is not configured"));
+    }
     let (amount, number) = {
         let mut c = s.db.acquire().await?;
         readable(&mut c, &actor, id).await?;
@@ -472,4 +489,88 @@ async fn journal(State(s): State<AppState>, actor: Actor, Query(b): Query<Ledger
     Ok(Json(
         json!({"entries":entries,"trial_balance":balances.into_iter().map(|(account,(debit_cents,credit_cents))|json!({"account":account,"debit_cents":debit_cents,"credit_cents":credit_cents,"balance_cents":debit_cents-credit_cents})).collect::<Vec<_>>()}),
     ))
+}
+
+async fn unmatch(
+    State(s): State<AppState>,
+    actor: Actor,
+    Path(id): Path<i64>,
+    Json(b): Json<Reason>,
+) -> AppResult<StatusCode> {
+    let mut tx = db::write_tx(&s.db).await?;
+    let case: Option<i64> =
+        sqlx::query_scalar("SELECT case_id FROM payments WHERE id=?").bind(id).fetch_one(&mut *tx).await?;
+    let case = case.ok_or_else(|| AppError::conflict("Already unmatched."))?;
+    manageable(&mut tx, &actor, case, b.expected_revision).await?;
+    let cases: Vec<i64> = sqlx::query_scalar("SELECT DISTINCT i.case_id FROM payment_allocations a JOIN invoice_lines l ON l.id=a.invoice_line_id JOIN invoices i ON i.id=l.invoice_id WHERE a.payment_id=? AND a.reversed_at IS NULL").bind(id).fetch_all(&mut *tx).await?;
+    for case in cases {
+        authz::require_staff_case(&mut tx, &actor, case).await?;
+    }
+    payments::unmatch(&mut tx, &actor, id, &b.reason).await?;
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+#[derive(Deserialize)]
+struct CreditRefund {
+    amount_cents: i64,
+    reason: String,
+    expected_revision: Option<i64>,
+}
+async fn refund_credit(
+    State(s): State<AppState>,
+    actor: Actor,
+    Path(id): Path<i64>,
+    Json(b): Json<CreditRefund>,
+) -> AppResult<Json<Value>> {
+    let mut tx = db::write_tx(&s.db).await?;
+    manageable(&mut tx, &actor, id, b.expected_revision).await?;
+    let ids = deposits::refund_credit(&mut tx, &s, &actor, id, b.amount_cents, &b.reason).await?;
+    tx.commit().await?;
+    Ok(Json(json!({"refund_ids":ids})))
+}
+#[derive(Deserialize)]
+struct Waiver {
+    item_code: String,
+    amount_cents: i64,
+    reason: String,
+    expected_revision: i64,
+}
+async fn waiver(
+    State(s): State<AppState>,
+    actor: Actor,
+    Path(id): Path<i64>,
+    Json(b): Json<Waiver>,
+) -> AppResult<StatusCode> {
+    let mut tx = db::write_tx(&s.db).await?;
+    let (case, _) = authz::require_staff_case(&mut tx, &actor, id).await?;
+    if !actor.roles_for_service(case.service_id).contains(&Role::Manager) {
+        return Err(AppError::forbidden_msg("A manager must approve a price exemption."));
+    }
+    if b.amount_cents <= 0 || b.reason.trim().is_empty() {
+        return Err(AppError::field("reason", "Enter a positive waiver amount and its reason."));
+    }
+    let invoices: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM invoices WHERE case_id=? AND kind='invoice')")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if invoices {
+        return Err(AppError::conflict("Approve exemptions before invoicing. Use a credit note for issued charges."));
+    }
+    let (_, lines) = crate::hooks::pricing_lines(&mut tx, &case).await?;
+    if !lines.iter().any(|l| l.item_code == b.item_code && l.kind == "fee" && l.amount_cents >= b.amount_cents) {
+        return Err(AppError::field("item_code", "Choose a quoted fee and an amount within that fee."));
+    }
+    core::bump_revision(&mut tx, id, Some(b.expected_revision)).await?;
+    sqlx::query("INSERT INTO case_price_waivers(case_id,item_code,amount_cents,reason,approved_by,approved_at) VALUES(?,?,?,?,?,?)").bind(id).bind(&b.item_code).bind(b.amount_cents).bind(&b.reason).bind(actor.user_id).bind(time::fmt(s.now())).execute(&mut *tx).await?;
+    ledger::event(
+        &mut tx,
+        &actor,
+        id,
+        "finance.waiver_approved",
+        &b.reason,
+        json!({"item_code":b.item_code,"amount_cents":b.amount_cents,"approved_by":actor.user_id}),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(StatusCode::CREATED)
 }

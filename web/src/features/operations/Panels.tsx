@@ -132,10 +132,11 @@ function BookingContent({
               Reschedule
             </Button>
             <Button variant="danger-outline" onClick={() => setDialog('cancel')}>
-              Cancel booking
+              Cancel booking (unused)
             </Button>
           </div>
         )}
+        {!d.can_manage && active && <Button variant="secondary" onClick={()=>{preview.reset();setDialog('move')}}>Preview a reschedule</Button>}
         {d.can_manage && d.booking.status === 'requested' && !d.settled && (
           <p className="mt-2">
             Confirmation is available when hire fees and bond are received.
@@ -180,7 +181,7 @@ function BookingContent({
           <Button
             loading={op.isPending}
             variant={dialog === 'move' ? 'primary' : 'danger'}
-            disabled={dialog === 'move' ? !preview.data?.available : !reason.trim()}
+            disabled={!d.can_manage || (dialog === 'move' ? !preview.data?.available : !reason.trim())}
             onClick={() =>
               op.mutate(
                 {
@@ -194,7 +195,7 @@ function BookingContent({
               )
             }
           >
-            {dialog === 'move' ? 'Save reschedule' : 'Cancel booking'}
+            {dialog === 'move' ? 'Save reschedule' : 'Cancel booking (unused)'}
           </Button>
         }
       >
@@ -239,6 +240,10 @@ function BookingContent({
                     <p key={i}>{c.label}</p>
                   ))}
                   <p>{priceNote}</p>
+                  {preview.data.old_lines.map((l,i)=><p key={`old-${i}`}>Previous: {l.description} <Money cents={l.amount_cents}/></p>)}
+                  {preview.data.new_lines.map((l,i)=><p key={`new-${i}`}>Proposed: {l.description} <Money cents={l.amount_cents}/></p>)}
+                  <p>Credit change: <Money cents={preview.data.credit_delta_cents}/></p>
+                  {!d.can_manage && <p>Ask Customer Care to arrange this reschedule.</p>}
                   <p>
                     Previous fees and bond:{' '}
                     <Money

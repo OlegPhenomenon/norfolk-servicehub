@@ -57,7 +57,7 @@ async fn panel(State(state): State<AppState>, actor: Actor, Path(id): Path<i64>)
     let mut binds = vec![SqlValue::Int(id), SqlValue::Int(id), SqlValue::Int(id)];
     binds.extend(scope.binds);
     let links=rows(&mut tx,&format!("SELECT c.id,c.number,c.title,l.kind FROM case_links l JOIN cases c ON c.id=CASE WHEN l.from_case_id=? THEN l.to_case_id ELSE l.from_case_id END WHERE (l.from_case_id=? OR l.to_case_id=?) AND {} ORDER BY l.id",scope.sql),&binds).await?;
-    let mut data = json!({"case":{"id":id,"status":case.status,"revision":case.revision},"links":links,"can_triage":staff&&actor.has_role(Role::ComplaintsOfficer),"can_request_review":access==CaseAccess::Applicant&&case.status=="completed"});
+    let mut data = json!({"case":{"id":id,"status":case.status,"revision":case.revision},"links":links,"can_triage":staff&&(actor.has_role(Role::ComplaintsOfficer)||actor.has_role(Role::Manager)),"can_request_review":access==CaseAccess::Applicant&&case.status=="completed"});
     if staff {
         data["hidden_from"]=json!(rows(&mut tx,"SELECT u.id,u.display_name,d.reason FROM case_access_denials d JOIN users u ON u.id=d.user_id WHERE d.case_id=? ORDER BY u.display_name",&[SqlValue::Int(id)]).await?);
         data["staff"] = json!(
@@ -96,7 +96,7 @@ pub async fn subjects(
     if case.module != "complaint" {
         return Err(AppError::not_found());
     }
-    common::require_role(&actor, Role::ComplaintsOfficer)?;
+    actor.require_any_role(&[Role::ComplaintsOfficer, Role::Manager])?;
     if body.staff_user_ids.len() > 100 {
         return Err(AppError::field("staff_user_ids", "Choose at most 100 staff members."));
     }
@@ -136,6 +136,7 @@ pub async fn subjects(
             .await?
             .ok_or_else(|| AppError::conflict("No independent handler is available."))?;
         crate::cases::api::assign_owner(
+            &state,
             &mut tx,
             &actor,
             id,
@@ -193,8 +194,15 @@ async fn request_review(
     let handler = select_handler(&mut tx, review.id, original)
         .await?
         .ok_or_else(|| AppError::conflict("No independent reviewer is available."))?;
-    crate::cases::api::assign_owner(&mut tx, &actor, review.id, handler, "Independent review of completed feedback.")
-        .await?;
+    crate::cases::api::assign_owner(
+        &state,
+        &mut tx,
+        &actor,
+        review.id,
+        handler,
+        "Independent review of completed feedback.",
+    )
+    .await?;
     common::changed(
         &mut tx,
         &actor,

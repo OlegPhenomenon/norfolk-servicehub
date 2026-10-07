@@ -88,6 +88,9 @@ pub fn routes() -> Router<AppState> {
         .route("/api/exhibitions/{id}/items", post(add_item))
         .route("/api/exhibitions/{id}/items/{item}", put(edit_item))
         .route("/api/exhibitions/{id}/items/{item}/pages/{page}", get(preview))
+        .route("/api/exhibitions/{id}/withdraw", post(withdraw))
+        .route("/api/exhibitions/lookup/{number}", get(lookup))
+        .route("/api/exhibitions/{id}/items/{item}/redacted-pages/{page}", get(redacted_preview))
         .route("/api/exhibitions/{id}/publish", post(publish))
         .route("/api/exhibitions/{id}/submissions", get(submissions))
         .route("/api/exhibitions/{id}/submissions/{sid}/consider", post(consider))
@@ -552,8 +555,11 @@ pub async fn preview(
 }
 async fn render_preview(state: &AppState, blob: i64, page: u32) -> AppResult<Response> {
     let (row, bytes) = storage::read(state, blob).await?;
+    render_bytes(&bytes, &row.mime, page).await
+}
+async fn render_bytes(bytes: &[u8], mime: &str, page: u32) -> AppResult<Response> {
     let _permit = RENDERS.acquire().await.map_err(|_| AppError::internal("Rendering stopped"))?;
-    let png = if row.mime == "application/pdf" {
+    let png = if mime == "application/pdf" {
         let dir = WorkDir::new()?;
         let src = dir.0.join("source.pdf");
         tokio::fs::write(&src, bytes).await?;
@@ -563,7 +569,7 @@ async fn render_preview(state: &AppState, blob: i64, page: u32) -> AppResult<Res
         if page != 1 {
             return Err(AppError::not_found());
         }
-        let img = decode(&bytes)?;
+        let img = decode(bytes)?;
         let mut out = std::io::Cursor::new(vec![]);
         image::DynamicImage::ImageRgb8(img)
             .write_to(&mut out, image::ImageOutputFormat::Png)
@@ -811,3 +817,60 @@ pub async fn consider(
 }
 
 static RENDERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+async fn redacted_preview(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path((id, item, page)): Path<(i64, i64, String)>,
+) -> AppResult<Response> {
+    let page = page.strip_suffix(".png").and_then(|s| s.parse::<u32>().ok()).ok_or_else(AppError::not_found)?;
+    let mut c = state.db.acquire().await?;
+    staff(&mut c, &actor, id).await?;
+    let item = items(&mut c, id).await?.into_iter().find(|i| i.id == item).ok_or_else(AppError::not_found)?;
+    let (_, _, _, blob, _) = super::uploads::version_access(&mut c, &actor, item.source_document_version_id).await?;
+    drop(c);
+    let (row, bytes) = storage::read(&state, blob).await?;
+    let rects: Vec<Rect> = serde_json::from_str(&item.redactions_json)?;
+    let (copy, name) = redacted(&bytes, &row.mime, &rects).await?;
+    render_bytes(&copy, if name.ends_with(".pdf") { "application/pdf" } else { "image/png" }, page).await
+}
+async fn withdraw(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path(id): Path<i64>,
+    Json(input): Json<Revision>,
+) -> AppResult<Json<Value>> {
+    let mut tx = write_tx(&state.db).await?;
+    let e = load(&mut tx, id).await?;
+    super::manage(&mut tx, &actor, e.case_id, &[Role::Manager]).await?;
+    crate::cases::core::bump_revision(&mut tx, e.case_id, Some(input.expected_revision)).await?;
+    if !matches!(e.status.as_str(), "open" | "closed") {
+        return Err(AppError::conflict("Only a published exhibition can be withdrawn."));
+    }
+    sqlx::query("UPDATE exhibitions SET status='withdrawn' WHERE id=?").bind(id).execute(&mut *tx).await?;
+    sqlx::query("UPDATE exhibition_items SET published_blob_id=NULL WHERE exhibition_id=?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    super::changed(
+        &mut tx,
+        actor.db_id(),
+        e.case_id,
+        "documents.exhibition_withdrawn",
+        Visibility::Applicant,
+        "A manager withdrew this exhibition and removed every public copy.",
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Json(json!({"ok":true})))
+}
+async fn lookup(State(state): State<AppState>, actor: Actor, Path(number): Path<String>) -> AppResult<Json<Value>> {
+    let mut tx = state.db.acquire().await?;
+    let id: i64 = sqlx::query_scalar("SELECT id FROM cases WHERE number=? AND module='building'")
+        .bind(number.trim().to_uppercase())
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(AppError::not_found)?;
+    let case = super::manage(&mut tx, &actor, id, &[Role::Specialist, Role::Manager]).await?;
+    Ok(Json(json!({"id":id,"number":case.number,"revision":case.revision})))
+}

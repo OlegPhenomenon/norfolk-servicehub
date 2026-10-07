@@ -127,6 +127,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/admin/legacy-imports", get(batches).post(preview))
         .route("/api/admin/legacy-imports/{id}", get(batch))
+        .route("/api/admin/legacy-imports/{id}/documents", post(attach_source))
         .route("/api/admin/legacy-imports/{id}/import", post(import))
 }
 #[derive(Deserialize)]
@@ -355,6 +356,21 @@ async fn import(
         .await?;
         core::reindex_search(&mut tx, case.id).await?;
         sqlx::query("INSERT INTO legacy_import_records(batch_id,source_system,source_id,status,case_id) VALUES(?,?,?,'imported',?)").bind(id).bind(&row.source_system).bind(&row.source_id).bind(case.id).execute(&mut *tx).await?;
+        let sources:Vec<(i64,String,String)>=sqlx::query_as("SELECT b.id,b.sha256,s.title FROM legacy_import_documents s JOIN blobs b ON b.id=s.blob_id WHERE s.batch_id=? AND s.source_system=? AND s.source_id=?").bind(id).bind(&row.source_system).bind(&row.source_id).fetch_all(&mut *tx).await?;
+        for (_, hash, title) in sources {
+            let bytes = std::fs::read(storage::blob_path(&state.cfg.blobs_dir(), &hash))?;
+            crate::documents::api::attach_generated(
+                &mut tx,
+                &state,
+                case.id,
+                "legacy",
+                &title,
+                Visibility::Staff,
+                bytes,
+                actor.db_id(),
+            )
+            .await?;
+        }
         row.case_id = Some(case.id);
         if closed.is_some() {
             let closed_case = core::load_case(&mut tx, case.id).await?;
@@ -379,6 +395,73 @@ async fn import(
     tx.commit().await?;
     Ok(Json(report))
 }
+async fn attach_source(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path(id): Path<i64>,
+    mut form: crate::services::upload::Multipart,
+) -> AppResult<Json<Value>> {
+    require_role(&actor, Role::Sysadmin)?;
+    let mut file = None;
+    let mut fields = BTreeMap::new();
+    while let Some(field) = form.next_field().await.map_err(|_| AppError::field("file", "Cannot read upload."))? {
+        let key = field.name().unwrap_or("").to_owned();
+        if key == "file" {
+            let name = field.file_name().unwrap_or("legacy.pdf").to_owned();
+            let bytes = field.bytes().await.map_err(|_| AppError::field("file", "Cannot read file."))?;
+            file = Some(storage::stage(&state, &bytes, &name, AllowList::Docs).await?);
+        } else {
+            fields.insert(key, field.text().await.map_err(|_| AppError::validation_msg("Cannot read metadata."))?);
+        }
+    }
+    let staged = file.ok_or_else(|| AppError::field("file", "Attach the original PDF."))?;
+    if staged.mime != "application/pdf" {
+        return Err(AppError::field("file", "Use a PDF for the original record."));
+    }
+    let system = common::text(fields.get("source_system").map(String::as_str).unwrap_or(""), "source_system", 160)?;
+    let source = common::text(fields.get("source_id").map(String::as_str).unwrap_or(""), "source_id", 160)?;
+    let title = fields.get("title").cloned().unwrap_or_else(|| staged.original_name.clone());
+    let mut tx = write_tx(&state.db).await?;
+    let (status, raw): (String, String) =
+        sqlx::query_as("SELECT status,report_json FROM legacy_import_batches WHERE id=?")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if status == "imported" {
+        return Err(AppError::conflict("Attach original documents before importing."));
+    }
+    let report: Report = serde_json::from_str(&raw)?;
+    if !report
+        .rows
+        .iter()
+        .any(|r| r.source_system == system && r.source_id == source && r.errors.is_empty() && !r.duplicate)
+    {
+        return Err(AppError::field("source_id", "Choose a valid original row in this batch."));
+    }
+    let blob = storage::register(&mut tx, staged, actor.db_id()).await?;
+    sqlx::query(
+        "INSERT INTO legacy_import_documents(batch_id,source_system,source_id,blob_id,title) VALUES(?,?,?,?,?)",
+    )
+    .bind(id)
+    .bind(system)
+    .bind(source)
+    .bind(blob.id)
+    .bind(title)
+    .execute(&mut *tx)
+    .await?;
+    common::admin_audit(
+        &mut tx,
+        &actor,
+        "legacy.source_attached",
+        "legacy_import",
+        Some(id),
+        json!({"blob_id":blob.id}),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Json(json!({"blob_id":blob.id})))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

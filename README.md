@@ -27,11 +27,11 @@ Open `/demo` and sign in as a persona with one click — walk a story from both 
 
 ## Seven stories to walk through
 
-The demo is built around seven complete stories — the same ones shown on the home page. Each takes a couple of minutes; [docs/DEMO-GUIDE.md](docs/DEMO-GUIDE.md) has a presenter script for each.
+The demo is built around seven complete stories — detailed in the presenter guide. Each takes a couple of minutes; [docs/DEMO-GUIDE.md](docs/DEMO-GUIDE.md) has a presenter script for each.
 
-1. **Alexey hires Rawson Hall** — Alexey picks a date and rooms against live availability, Olga checks the request, Alexey pays the hire fee and refundable bond through the DemoPay checkout, staff confirm, Jake prepares and inspects the hall, and Tom settles the bond — a partial retention shows its reason, and the refund only says "completed" after the payment provider confirms it. A reschedule keeps the old booking, reprices the fee and preserves the paper trail.
+1. **Alexey hires Rawson Hall** — Alexey picks a date and rooms against live availability, Olga checks the request, Alexey pays the hire fee and refundable bond through the DemoPay checkout, staff confirm, Jake prepares and inspects the hall, and Tom settles the bond. A separate past, inspected booking for Alexey makes this step available live — a partial retention shows its reason, and the refund only says "completed" after the payment provider confirms it. A reschedule keeps the old booking, reprices the fee and preserves the paper trail.
 2. **Building approval with a revised drawing** — a builder lodges a development application; the specialist comments on the site plan; the applicant uploads version 2 (version 1 stays on file); separate development and building approvals are issued as PDFs that name the exact evidence version. The same project later collects a commencement notice and a modification application — and a public exhibition publishes pixel-redacted copies approved by a second staff member.
-3. **A planning certificate** — the s.98 fee is invoiced on submission and the workflow cannot move until it is settled; after payment the specialist prepares and issues the certificate, and the exact issued version stays with the request.
+3. **A planning certificate** — the s.98 fee is invoiced when staff advance intake to the Payment step and the workflow cannot move until it is settled; after payment the specialist prepares the certificate and a different authority holder issues it, and the exact issued version stays with the request.
 4. **Equipment hire billed on actual hours** — a request for four hours becomes a scheduled machine and operator; the field worker records five and a half actual hours with downtime and agreed expenses, finance approves it, and the final invoice shows exactly how the amount was calculated.
 5. **A road issue, reported and answered** — a pothole is pinned on the public map with a photo (the reporter's identity never leaves the case); staff triage it, a field worker records the inspection and repair, and the applicant receives a written response — the case closes only when a letter has been issued, not when an email was forwarded.
 6. **A confidential complaint** — a complaint about a staff member goes to the complaints officer and is excluded from that staff member's view — case, documents, search and dashboards all return "not found". A later request for review stays linked to the original.
@@ -67,7 +67,7 @@ The brief's full requirement list (§6, items 1–23) and where each lives — t
 | 22 | Legacy import with duplicate detection; full case export; integration outbox with retry | 🔶 Mechanism real — receivers are mocks (real council systems can't be verified) |
 | 23 | Admin manages users, services, prices, notification addresses; sees delivery errors & backups | ✅ Implemented |
 
-Email/SMS go to the built-in DemoMail mock; payments go through the built-in DemoPay mock. Nothing external is contacted — by design.
+Email/SMS go to the built-in DemoMail mock; payments go through the built-in DemoPay mock. Demo defaults contact only these mocks. Administrators can configure integration endpoints; real payment and mail provider adapters remain to be implemented. Outside demo mode `/mock/**` is absent and online Pay is hidden; counter and bank payments remain available.
 
 ## Architecture
 
@@ -114,10 +114,21 @@ Full details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The real-council res
 cp .env.example .env
 # For a local demo set in .env:  DEMO_MODE=true   COOKIE_SECURE=false
 docker compose up --build -d
-docker compose exec servicehub servicehub seed-demo   # personas + fictional data
+# A fresh database seeds automatically when DEMO_MODE=true.
 ```
 
 Open http://localhost:8080 — the `/demo` page lists the personas. The container listens on `127.0.0.1:8080` only; put your reverse proxy with TLS in front for anything else (see `deploy/`).
+
+### Self-hosted bootstrap
+
+Set `DEMO_MODE=false`, then initialise the catalogue and the first administrator:
+
+```sh
+docker compose exec servicehub servicehub seed-catalogue
+docker compose exec servicehub servicehub create-admin --email admin@example.org --name "Council administrator"
+```
+
+`seed-catalogue` loads services, prices, resources, templates, retention policies and holidays, with no fictional people or cases. `create-admin` prints a one-time password; the first administrator also has the manager role to establish governance. Sign in at `/login`, enrol a TOTP authenticator and replace that password before using the app. See [OPERATIONS](docs/OPERATIONS.md) for recovery and provider limitations.
 
 ### Local development
 
@@ -171,7 +182,7 @@ Issues and pull requests are welcome. Please keep the existing conventions: modu
 
 ## Cooperation
 
-The code is free and open source — a council (or anyone else) can run its own copy with no timer, no subscription and no hidden developer access. If you'd like **help implementing it, migrating existing services and legacy cases into it, or training staff**, get in touch via the repository. Nothing about using the code obliges you to purchase support, and no free ongoing support is implied.
+The code is free and open source — a council (or anyone else) can run its own copy with no timer, no subscription and no hidden developer access. If you'd like **help implementing it, migrating existing services and legacy cases into it, training staff, or further development**, get in touch via the repository. Nothing about using the code obliges you to purchase support, and no free ongoing support is implied.
 
 ## Licence
 

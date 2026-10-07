@@ -25,6 +25,15 @@ enum Command {
     SeedDemo,
     /// Same as seed-demo.
     ResetDemo,
+    /// Create a staff administrator; print an initial password. TOTP enrolment is mandatory.
+    CreateAdmin {
+        #[arg(long)]
+        email: String,
+        #[arg(long)]
+        name: String,
+    },
+    /// Seed configuration only, without demo users or cases.
+    SeedCatalogue,
     /// Write a backup (database + blobs) into DIR.
     Backup { dir: PathBuf },
     /// Verify that a backup in DIR restores cleanly.
@@ -45,6 +54,7 @@ async fn main() -> anyhow::Result<()> {
         match cli.command {
             Command::Serve => {
                 db::migrate(&state.db).await?;
+                servicehub::bootstrap::seed_fresh_demo(&state).await?;
                 app::serve(state.clone()).await.map_err(servicehub::AppError::from)?;
             }
             Command::Migrate => {
@@ -55,8 +65,25 @@ async fn main() -> anyhow::Result<()> {
                 db::migrate(&state.db).await?;
                 seed::reset_demo(&state).await?;
             }
-            Command::Backup { dir } => records::backup::backup(&state, &dir).await?,
-            Command::RestoreCheck { dir } => records::backup::restore_check(&state, &dir).await?,
+            Command::CreateAdmin { email, name } => {
+                db::migrate(&state.db).await?;
+                let password = servicehub::bootstrap::create_admin(&state, &email, &name).await?;
+                println!(
+                    "One-time initial password: {password}\nEnrol staff TOTP at first login and change this password."
+                );
+            }
+            Command::SeedCatalogue => {
+                db::migrate(&state.db).await?;
+                servicehub::bootstrap::seed_catalogue(&state).await?;
+            }
+            Command::Backup { dir } => {
+                db::migrate(&state.db).await?;
+                records::backup::backup(&state, &dir).await?;
+            }
+            Command::RestoreCheck { dir } => {
+                db::migrate(&state.db).await?;
+                records::backup::restore_check(&state, &dir).await?;
+            }
         }
         Ok::<(), servicehub::AppError>(())
     };

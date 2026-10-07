@@ -37,7 +37,7 @@ async fn export(State(state): State<AppState>, actor: Actor, Path(id): Path<i64>
 pub async fn export_case(state: &AppState, actor: &Actor, id: i64) -> AppResult<Vec<u8>> {
     let mut tx = write_tx(&state.db).await?;
     let (case, _) = authz::require_staff_case(&mut tx, actor, id).await?;
-    let mut data = json!({"case":case,"exported_at":time::fmt(state.now()),"demo":true});
+    let mut data = json!({"case":case,"exported_at":time::fmt(state.now()),"demo":state.cfg.demo_mode});
     for (key, table, column) in [
         ("submission", "submissions", "case_id"),
         ("events", "case_events", "case_id"),
@@ -46,12 +46,29 @@ pub async fn export_case(state: &AppState, actor: &Actor, id: i64) -> AppResult<
         ("assignments", "case_assignments", "case_id"),
         ("decisions", "decisions", "case_id"),
         ("documents", "documents", "case_id"),
+        ("bookings", "bookings", "case_id"),
+        ("payments", "payments", "case_id"),
+        ("invoices", "invoices", "case_id"),
+        ("refunds", "refunds", "case_id"),
+        ("deposit_decisions", "deposit_decisions", "case_id"),
+        ("tasks", "tasks", "case_id"),
+        ("deadlines", "deadlines", "case_id"),
+        ("equipment_requests", "equipment_requests", "case_id"),
         ("integration_refs", "integration_deliveries", "case_id"),
     ] {
         data[key] = json!(
             rows(&mut tx, &format!("SELECT * FROM {table} WHERE {column}=? ORDER BY id"), &[SqlValue::Int(id)]).await?
         );
     }
+    data["invoice_lines"] = json!(
+        rows(
+            &mut tx,
+            "SELECT l.* FROM invoice_lines l JOIN invoices i ON i.id=l.invoice_id WHERE i.case_id=? ORDER BY l.id",
+            &[SqlValue::Int(id)]
+        )
+        .await?
+    );
+    data["payment_allocations"] = json!(rows(&mut tx,"SELECT a.* FROM payment_allocations a JOIN invoice_lines l ON l.id=a.invoice_line_id JOIN invoices i ON i.id=l.invoice_id WHERE i.case_id=? ORDER BY a.id",&[SqlValue::Int(id)]).await?);
     data["decision_evidence"]=json!(rows(&mut tx,"SELECT e.* FROM decision_evidence e JOIN decisions d ON d.id=e.decision_id WHERE d.case_id=? ORDER BY e.decision_id,e.document_version_id",&[SqlValue::Int(id)]).await?);
     // Only links to cases the exporting actor can see are included.
     let scope = authz::case_scope_sql(actor);

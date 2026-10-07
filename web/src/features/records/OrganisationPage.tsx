@@ -7,7 +7,7 @@ import type { Organisation } from './types'
 import { useCommand } from './useCommand'
 export function OrganisationPage() {
   const q = useQuery({ queryKey: ['records', 'organisations'], queryFn: () => api.get<Organisation[]>('/api/my/organisations') })
-  return <div className="space-y-6"><PageHeader title="My organisations" description="Organisation cases are shared with active members. Revoking membership immediately removes access." /><QueryView query={q}>{orgs => orgs.length === 0 ? <EmptyState title="No organisation memberships" description="Ask your organisation owner to invite your account email." /> : <div className="space-y-5">{orgs.map(o => <OrganisationCard key={o.id} organisation={o} />)}</div>}</QueryView></div>
+  return <div className="space-y-6"><PageHeader title="My organisations" description="Organisation cases are shared with active members. Revoking membership immediately removes access." /><QueryView query={q}>{orgs => orgs.length === 0 ? <EmptyState title="No organisation memberships" description="Ask your organisation owner to invite your account email." /> : <div className="space-y-5">{orgs.map(o => <OrganisationCard key={o.id} organisation={o} />)}</div>}</QueryView><CreateOrganisation /></div>
 }
 function OrganisationCard({ organisation: o }: { organisation: Organisation }) {
   const [email, setEmail] = useState('')
@@ -25,4 +25,10 @@ export function InvitePage() {
   const { token } = useParams()
   const accept = useCommand(`/api/my/invites/${encodeURIComponent(token ?? '')}/accept`, 'Invitation accepted')
   return <div className="space-y-6"><PageHeader title="Accept organisation invitation" description="Sign in with the email address that received this invitation." /><Card title="Join the organisation"><ErrorAlert error={accept.error} />{accept.isSuccess ? <ButtonLink to="/my/organisation">View organisation members</ButtonLink> : <Button loading={accept.isPending} onClick={() => accept.mutate({})}>Accept invitation</Button>}</Card></div>
+}
+
+function CreateOrganisation() {
+  const [name,setName] = useState(''), [abn,setAbn] = useState('')
+  const create = useCommand('/api/my/organisations','Organisation created')
+  return <Card title="Create organisation"><form className="space-y-4" onSubmit={e => { e.preventDefault(); create.mutate({name,abn:abn || null}, {onSuccess:()=>{setName('');setAbn('')}}) }}><Field label="Organisation name" required><TextInput value={name} onChange={e=>setName(e.target.value)} /></Field><Field label="ABN (if applicable)"><TextInput value={abn} onChange={e=>setAbn(e.target.value)} /></Field><ErrorAlert error={create.error}/><Button type="submit" loading={create.isPending}>Create organisation</Button></form></Card>
 }

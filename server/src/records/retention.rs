@@ -40,7 +40,27 @@ struct Rule {
 }
 async fn save_rule(State(state): State<AppState>, actor: Actor, Json(body): Json<Rule>) -> AppResult<Json<Value>> {
     require_role(&actor, Role::Sysadmin)?;
-    if !["default", "building", "hire", "complaint", "works"].contains(&body.record_class.as_str()) {
+    if ![
+        "default",
+        "building",
+        "hire",
+        "complaint",
+        "works",
+        "document:application",
+        "document:plans",
+        "document:evidence",
+        "document:photo",
+        "document:supporting",
+        "document:receipt",
+        "document:decision",
+        "document:letter",
+        "document:invoice",
+        "document:credit_note",
+        "document:certificate",
+        "document:legacy",
+    ]
+    .contains(&body.record_class.as_str())
+    {
         return Err(AppError::field("record_class", "Choose a recognised record class."));
     }
     if !(0..=100).contains(&body.retain_years) {

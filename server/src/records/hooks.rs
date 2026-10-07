@@ -11,26 +11,52 @@ use chrono::NaiveDate;
 use serde_json::{Value, json};
 use sqlx::SqliteConnection;
 pub async fn validate_field(
-    _tx: &mut SqliteConnection,
+    tx: &mut SqliteConnection,
     _module: &str,
-    _field: &FieldDef,
-    _value: &Value,
+    field: &FieldDef,
+    value: &Value,
 ) -> AppResult<Option<String>> {
+    if field.key == "staff_member_concerned" {
+        let uid = value.as_str().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+        let valid: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id=? AND kind='staff' AND is_active=1)")
+                .bind(uid)
+                .fetch_one(tx)
+                .await?;
+        return Ok((!valid).then(|| "Choose an active staff member.".into()));
+    }
     Ok(None)
 }
 pub async fn on_submit(
     tx: &mut SqliteConnection,
-    _state: &AppState,
+    state: &AppState,
     actor: &Actor,
     case: &CaseRow,
-    _answers: &Value,
+    answers: &Value,
 ) -> AppResult<()> {
     sqlx::query("UPDATE cases SET confidential=1 WHERE id=?").bind(case.id).execute(&mut *tx).await?;
+    if let Some(uid) = answers["staff_member_concerned"].as_str().and_then(|v| v.parse::<i64>().ok()) {
+        let valid: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id=? AND kind='staff' AND is_active=1)")
+                .bind(uid)
+                .fetch_one(&mut *tx)
+                .await?;
+        if !valid {
+            return Err(AppError::field("staff_member_concerned", "Choose an active staff member."));
+        }
+        sqlx::query("INSERT INTO complaint_subjects(case_id,staff_user_id) VALUES(?,?)")
+            .bind(case.id)
+            .bind(uid)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO case_access_denials(case_id,user_id,reason,created_by,created_at) VALUES(?,?,'Subject of complaint',?,?)").bind(case.id).bind(uid).bind(actor.db_id()).bind(crate::time::fmt(state.now())).execute(&mut *tx).await?;
+    }
     let owner = super::complaints::select_handler(tx, case.id, None).await?;
     let Some(owner) = owner else {
         return Err(AppError::conflict("No eligible complaints officer or manager is available."));
     };
     crate::cases::api::assign_owner(
+        state,
         tx,
         actor,
         case.id,

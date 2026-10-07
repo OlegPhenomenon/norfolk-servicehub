@@ -157,10 +157,12 @@ def complete_task(c,kind):
     for item in task['checklist']: update('checklist',json.dumps({'key':item['key'],'done':True}))
     update('result','Fictional work complete. Extra cleaning recorded at inspection.'); update('status','done')
 def issue_decision(c,kind,outcome='approved'):
+    login('helen')
     template=next(t for t in req('priya','GET','/api/decision-templates') if t['decision_type']==kind)
     did=req('priya','POST',f'/api/cases/{c}/decisions',{'decision_type':kind,'outcome':outcome,'reasons':'Fictional specialist assessment completed.','conditions':'Demo only.','template_id':template['id'],'expected_revision':revision('priya',c)})['id']
     for command in ['submit','issue']:
-        req('priya','POST',f'/api/cases/{c}/decisions/{did}/{command}',{'expected_revision':revision('priya',c)})
+        approver = 'helen' if command == 'issue' else 'priya'
+        req(approver,'POST',f'/api/cases/{c}/decisions/{did}/{command}',{'expected_revision':revision(approver,c)})
 def trial_balance(c=None):
     journal=req('tom','GET','/api/finance/ledger'+(f'?case_id={c}' if c else ''))
     assert journal['entries'] and sum(r['balance_cents'] for r in journal['trial_balance'])==0
@@ -342,14 +344,16 @@ try:
     assert all(x['status']!='paused' for x in d['deadlines'])
     assert req('alexey','GET',f'/api/document-versions/{vid}/download',binary=True)==pdf
     action('priya',building,'advance'); action('priya',building,'skip','Exhibition is not required for this fictional test application.')
+    login('helen')
     templates=req('priya','GET','/api/decision-templates')
     for decision_type in ['development_approval','building_approval']:
         template=next(t for t in templates if t['decision_type']==decision_type)
         did=req('priya','POST',f'/api/cases/{building}/decisions',{'decision_type':decision_type,'outcome':'approved','reasons':'Fictional demo assessment completed.','conditions':'Follow approved drawing A-101 v2.','template_id':template['id'],'evidence_version_ids':[v2['version_id']],'expected_revision':revision('priya',building)})['id']
         for command in ['submit','issue']:
-            req('priya','POST',f'/api/cases/{building}/decisions/{did}/{command}',{'expected_revision':revision('priya',building)})
+            approver = 'helen' if command == 'issue' else 'priya'
+            req(approver,'POST',f'/api/cases/{building}/decisions/{did}/{command}',{'expected_revision':revision(approver,building)})
     assert detail('alexey',building)['case']['status']=='completed'
-    print('ok   building intake → replacement request → text reply keeps action → v2 clears action/resumes clock → two Priya approvals → completed')
+    print('ok   building intake → replacement request → text reply keeps action → v2 clears action/resumes clock → two independently issued approvals → completed')
 
     approvals=req('alexey','GET','/api/my/issued-approvals')
     approval=next(a for a in approvals if a['decision_type']=='building_approval')

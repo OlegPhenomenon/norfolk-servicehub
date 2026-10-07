@@ -29,6 +29,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/auth/login", post(login))
         .route("/api/auth/totp", post(totp_verify))
         .route("/api/auth/logout", post(logout))
+        .route("/api/auth/change-password", post(change_password))
         .route("/api/auth/totp/enroll", post(totp_enroll))
         .route("/api/auth/totp/enroll/confirm", post(totp_enroll_confirm))
         .route("/api/notifications", get(list_notifications))
@@ -43,6 +44,7 @@ pub struct Me {
     pub roles: Vec<String>,
     pub csrf_token: String,
     pub mfa_required: bool,
+    pub password_change_required: bool,
     pub demo_mode: bool,
     pub next_reset_at: Option<String>,
     pub ai_enabled: bool,
@@ -64,14 +66,24 @@ pub async fn build_me(
     } else {
         None
     };
+    let password_change_required = match actor {
+        Some(a) => {
+            sqlx::query_scalar("SELECT must_change_password FROM users WHERE id=?")
+                .bind(a.user_id)
+                .fetch_one(&mut *conn)
+                .await?
+        }
+        None => false,
+    };
     Ok(Me {
         user: user.map(serde_json::to_value).transpose()?,
         roles: actor.map(|a| a.role_names().into_iter().map(String::from).collect()).unwrap_or_default(),
         csrf_token: csrf.to_string(),
+        password_change_required,
         mfa_required: actor.is_some_and(|a| a.is_staff() && !a.mfa_passed),
         demo_mode: state.cfg.demo_mode,
         next_reset_at,
-        ai_enabled: state.cfg.ai_enabled,
+        ai_enabled: state.cfg.ai_enabled && state.cfg.demo_mode,
     })
 }
 
@@ -464,4 +476,45 @@ async fn read_all_notifications(State(st): State<AppState>, actor: Actor) -> App
         .await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct ChangePassword {
+    current_password: String,
+    new_password: String,
+}
+async fn change_password(
+    State(st): State<AppState>,
+    AuthSession(s): AuthSession,
+    Json(b): Json<ChangePassword>,
+) -> AppResult<Json<serde_json::Value>> {
+    if !s.actor.mfa_passed {
+        return Err(AppError::mfa_required());
+    }
+    if b.new_password.chars().count() < 12 || b.new_password.len() > 200 || b.new_password == b.current_password {
+        return Err(AppError::field("new_password", "Choose a different password of 12 to 200 characters."));
+    }
+    let mut tx = write_tx(&st.db).await?;
+    let old: Option<String> = sqlx::query_scalar("SELECT password_hash FROM users WHERE id=?")
+        .bind(s.actor.user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if !old.is_some_and(|h| password::verify(&b.current_password, &h)) {
+        return Err(AppError::field("current_password", "The current password is incorrect."));
+    }
+    let hash = password::hash(&b.new_password)?;
+    sqlx::query("UPDATE users SET password_hash=?,must_change_password=0 WHERE id=?")
+        .bind(hash)
+        .bind(s.actor.user_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM sessions WHERE user_id=? AND token_hash<>?")
+        .bind(s.actor.user_id)
+        .bind(&s.token_hash)
+        .execute(&mut *tx)
+        .await?;
+    audit::record(&mut tx, Some(s.actor.user_id), "auth.password_changed", "user", Some(s.actor.user_id), json!({}))
+        .await?;
+    tx.commit().await?;
+    Ok(Json(json!({"ok":true})))
 }

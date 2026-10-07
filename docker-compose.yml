@@ -7,6 +7,7 @@ services:
       - path: .env
         required: false
     environment:
+      WEB_DIST: /app/web
       DATA_DIR: /data
     ports:
       # Bind to loopback only; the host's reverse proxy terminates TLS.

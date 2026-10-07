@@ -50,7 +50,7 @@ async fn seeded_history_is_complete_balanced_repeatable_and_leaves_the_visitor_s
         1
     );
     assert_eq!(scalar(&state, "SELECT COUNT(*) FROM refunds WHERE status='completed'").await, 3);
-    assert_eq!(scalar(&state,"SELECT COUNT(*) FROM bookings b JOIN cases c ON c.id=b.case_id WHERE b.status='confirmed' AND c.status<>'completed'").await,2);
+    assert_eq!(scalar(&state,"SELECT COUNT(*) FROM bookings b JOIN cases c ON c.id=b.case_id WHERE b.status='confirmed' AND c.status<>'completed'").await,3);
     assert_eq!(scalar(&state,"SELECT COUNT(*) FROM bookings b JOIN cases c ON c.id=b.case_id WHERE b.status='requested' AND c.current_step='payment'").await,1);
     assert_eq!(scalar(&state,"SELECT COUNT(*) FROM decisions WHERE decision_type IN ('development_approval','building_approval') AND status='issued'").await,2);
     assert_eq!(scalar(&state,"SELECT COUNT(*) FROM decision_evidence e JOIN document_versions v ON v.id=e.document_version_id JOIN decisions d ON d.id=e.decision_id WHERE d.decision_type IN ('development_approval','building_approval') AND v.version=2").await,2);
@@ -104,7 +104,7 @@ async fn seeded_history_is_complete_balanced_repeatable_and_leaves_the_visitor_s
     assert_eq!(scalar(&state,"SELECT COUNT(*) FROM (SELECT system_code,operation_id FROM mock_external_records GROUP BY system_code,operation_id HAVING COUNT(*)>1)").await,0);
     assert_eq!(scalar(&state, "SELECT COUNT(*) FROM sessions").await, 0);
     assert_eq!(scalar(&state, "SELECT COUNT(*) FROM integration_deliveries WHERE status<>'accepted'").await, 0);
-    assert_eq!(scalar(&state,"SELECT COUNT(*) FROM cases WHERE module='venue_booking' AND applicant_user_id=(SELECT id FROM users WHERE persona_key='alexey') AND status IN ('draft','submitted','in_progress','waiting_on_applicant')").await,0);
+    assert_eq!(scalar(&state,"SELECT COUNT(*) FROM cases WHERE module='venue_booking' AND applicant_user_id=(SELECT id FROM users WHERE persona_key='alexey') AND status IN ('draft','submitted','in_progress','waiting_on_applicant')").await,1);
     let negative_durations: i64 = scalar(
         &state,
         "SELECT COUNT(*) FROM cases WHERE closed_at IS NOT NULL AND julianday(closed_at)<julianday(submitted_at)",
@@ -127,6 +127,8 @@ async fn seeded_history_is_complete_balanced_repeatable_and_leaves_the_visitor_s
         d.login(who).await.unwrap();
     }
     scenarios::verify(&mut d).await.unwrap();
+    let search = d.req("alexey", "GET", "/api/public/services?q=birthday%20party", json!({})).await.unwrap();
+    assert!(search["items"].as_array().unwrap().iter().any(|s| s["module"] == "venue_booking"));
     let dashboard = d.req("helen", "GET", "/api/staff/dashboard", json!({})).await.unwrap();
     assert!(dashboard["metrics"]["completed"].as_i64().unwrap() > 0);
     assert!(dashboard["metrics"]["overdue"].as_i64().unwrap() > 0);
@@ -203,4 +205,16 @@ async fn seeded_history_is_complete_balanced_repeatable_and_leaves_the_visitor_s
     let statuses: Vec<_> =
         statement["rows"].as_array().unwrap().iter().map(|r| r["status"].as_str().unwrap()).collect();
     assert_eq!(statuses, vec!["matched", "unmatched", "unmatched", "duplicate"]);
+    // A visitor can settle Alexey's seeded past bond at the real demo time, without advancing to the event.
+    let queue = d.req("tom", "GET", "/api/finance/deposits", json!({})).await.unwrap();
+    let row = queue.as_array().unwrap().iter().find(|r| r["applicant_name"] == "Alexey Turner").unwrap();
+    let case = row["case_id"].as_i64().unwrap();
+    assert_eq!(d.money("tom", case).await.unwrap()["deposit_ready"], true);
+    d.req("tom","POST", &format!("/api/cases/{case}/deposit-decision"),json!({"invoice_line_id":row["invoice_line_id"],"refund_cents":20000,"retain_items":[{"label":"Extra cleaning","cents":5000}],"reason":"Live visitor partial retention","expected_revision":row["case_revision"]})).await.unwrap();
+    assert_eq!(d.money("tom", case).await.unwrap()["refunds"][0]["status"], "processing");
+    d.drain().await.unwrap();
+    d.clock.advance(Duration::seconds(4));
+    d.drain().await.unwrap();
+    assert_eq!(d.money("alexey", case).await.unwrap()["refunds"][0]["status"], "completed");
+    assert_eq!(d.detail("alexey", case).await.unwrap()["case"]["status"], "completed");
 }

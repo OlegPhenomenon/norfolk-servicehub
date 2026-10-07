@@ -23,6 +23,9 @@ use serde_json::{Value, json};
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/admin/users", get(list_users).post(create_user))
+        .route("/api/admin/users/{id}/reactivate", post(reactivate))
+        .route("/api/admin/users/{id}/reset-password", post(reset_password))
+        .route("/api/admin/users/{id}/reset-totp", post(reset_totp))
         .route("/api/admin/users/{id}/deactivate", post(deactivate))
         .route("/api/admin/users/{id}/roles", get(roles).post(grant_role))
         .route("/api/admin/users/{id}/roles/{grant}/revoke", post(revoke_role))
@@ -118,7 +121,7 @@ async fn grant_role(
     Path(id): Path<i64>,
     Json(body): Json<GrantRole>,
 ) -> AppResult<Json<Value>> {
-    require_role(&actor, Role::Sysadmin)?;
+    actor.require_any_role(&[Role::Sysadmin, Role::Manager])?;
     let mut tx = write_tx(&state.db).await?;
     let grant = users::grant_role(&mut tx, id, body.role, body.scope_service_id, actor.db_id()).await?;
     common::admin_audit(
@@ -311,4 +314,65 @@ async fn backups(State(state): State<AppState>, actor: Actor) -> AppResult<Json<
     Ok(Json(
         json!({"runs":rows(&mut conn,"SELECT * FROM backup_runs ORDER BY id DESC LIMIT 50",&[]).await?,"last_backup":rows(&mut conn,"SELECT * FROM backup_runs WHERE kind='backup' AND status='ok' ORDER BY id DESC LIMIT 1",&[]).await?.first(),"last_verified_restore":rows(&mut conn,"SELECT * FROM backup_runs WHERE kind='restore_check' AND status='ok' ORDER BY id DESC LIMIT 1",&[]).await?.first()}),
     ))
+}
+
+async fn reactivate(State(state): State<AppState>, actor: Actor, Path(id): Path<i64>) -> AppResult<Json<Value>> {
+    require_role(&actor, Role::Sysadmin)?;
+    let mut tx = write_tx(&state.db).await?;
+    let n = sqlx::query("UPDATE users SET is_active=1 WHERE id=? AND is_active=0")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    if n == 0 {
+        return Err(AppError::conflict("This account is already active or missing."));
+    }
+    common::admin_audit(&mut tx, &actor, "user.reactivate", "user", Some(id), json!({})).await?;
+    tx.commit().await?;
+    Ok(Json(json!({"ok":true})))
+}
+async fn reset_password(State(state): State<AppState>, actor: Actor, Path(id): Path<i64>) -> AppResult<Json<Value>> {
+    use rand::RngCore;
+    require_role(&actor, Role::Sysadmin)?;
+    if id == actor.user_id {
+        return Err(AppError::forbidden_msg("Use your password settings to change your own password."));
+    }
+    let mut bytes = [0u8; 24];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let password = hex::encode(bytes);
+    let hash = crate::auth::password::hash(&password)?;
+    let mut tx = write_tx(&state.db).await?;
+    let n = sqlx::query("UPDATE users SET password_hash=?,must_change_password=1 WHERE id=?")
+        .bind(hash)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    if n == 0 {
+        return Err(AppError::not_found());
+    }
+    sqlx::query("DELETE FROM sessions WHERE user_id=?").bind(id).execute(&mut *tx).await?;
+    common::admin_audit(&mut tx, &actor, "user.password_reset", "user", Some(id), json!({})).await?;
+    tx.commit().await?;
+    Ok(Json(json!({"one_time_password":password})))
+}
+async fn reset_totp(State(state): State<AppState>, actor: Actor, Path(id): Path<i64>) -> AppResult<Json<Value>> {
+    require_role(&actor, Role::Sysadmin)?;
+    if id == actor.user_id {
+        return Err(AppError::forbidden_msg("Ask another administrator to reset your TOTP."));
+    }
+    let mut tx = write_tx(&state.db).await?;
+    let n =
+        sqlx::query("UPDATE users SET totp_secret=NULL,totp_enabled=0,totp_last_step=NULL WHERE id=? AND kind='staff'")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    if n == 0 {
+        return Err(AppError::not_found());
+    }
+    sqlx::query("DELETE FROM sessions WHERE user_id=?").bind(id).execute(&mut *tx).await?;
+    common::admin_audit(&mut tx, &actor, "user.totp_reset", "user", Some(id), json!({})).await?;
+    tx.commit().await?;
+    Ok(Json(json!({"ok":true})))
 }

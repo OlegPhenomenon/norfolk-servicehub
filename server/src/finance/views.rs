@@ -37,7 +37,7 @@ pub async fn case_money(tx: &mut SqliteConnection, case: i64, staff: bool, now: 
         });
         issued.push(v);
     }
-    let payments=sqlx::query("SELECT p.id,p.source,p.amount_cents,p.received_at,p.status,b.credit_cents FROM payments p JOIN finance_payment_balances b ON b.payment_id=p.id WHERE p.case_id=? OR EXISTS(SELECT 1 FROM payment_allocations a JOIN invoice_lines l ON l.id=a.invoice_line_id JOIN invoices i ON i.id=l.invoice_id WHERE a.payment_id=p.id AND i.case_id=?) ORDER BY p.id DESC").bind(case).bind(case).fetch_all(&mut *tx).await?;
+    let payments=sqlx::query("SELECT p.id,p.source,p.amount_cents,p.received_at,p.status,b.credit_cents FROM payments p JOIN finance_payment_balances b ON b.payment_id=p.id WHERE p.case_id=? OR EXISTS(SELECT 1 FROM payment_allocations a JOIN invoice_lines l ON l.id=a.invoice_line_id JOIN invoices i ON i.id=l.invoice_id WHERE a.payment_id=p.id AND i.case_id=? AND a.reversed_at IS NULL) ORDER BY p.id DESC").bind(case).bind(case).fetch_all(&mut *tx).await?;
     let credit:i64=sqlx::query_scalar("SELECT COALESCE(SUM(b.credit_cents),0) FROM finance_payment_balances b JOIN payments p ON p.id=b.payment_id WHERE p.case_id=? AND p.status='confirmed'").bind(case).fetch_one(&mut *tx).await?;
     let decisions = sqlx::query("SELECT * FROM deposit_decisions WHERE case_id=? ORDER BY id")
         .bind(case)

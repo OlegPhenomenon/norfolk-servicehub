@@ -39,12 +39,12 @@ pub fn api_routes() -> Router<AppState> {
         .merge(crate::operations::routes())
         .merge(crate::finance::routes())
         .merge(crate::records::routes())
-        .merge(crate::mock::routes())
 }
 
 /// The complete application router with middleware and the SPA fallback.
 pub fn build_router(state: AppState) -> Router {
-    api_routes()
+    let routes = if state.cfg.demo_mode { api_routes().merge(crate::mock::routes()) } else { api_routes() };
+    routes
         .fallback(fallback)
         .layer(middleware::from_fn_with_state(state.clone(), session_middleware))
         .layer(middleware::from_fn_with_state(state.clone(), rate_limit_middleware))
@@ -65,7 +65,7 @@ async fn health(State(st): State<AppState>) -> Result<Json<serde_json::Value>, A
 /// Unknown `/api/**` → JSON 404; everything else → static file from `WEB_DIST` with `index.html` fallback.
 async fn fallback(State(st): State<AppState>, req: Request) -> Response {
     let path = req.uri().path().to_string();
-    if path == "/api" || path.starts_with("/api/") {
+    if path == "/api" || path.starts_with("/api/") || path.starts_with("/mock/") {
         return AppError::new(ErrorCode::NotFound, "No such API endpoint.").into_response();
     }
     let dist = &st.cfg.web_dist;

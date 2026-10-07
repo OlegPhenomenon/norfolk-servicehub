@@ -183,7 +183,7 @@ pub async fn register(conn: &mut SqliteConnection, staged: Staged, actor: Option
     }
     sqlx::query(
         "INSERT INTO blobs (sha256, size_bytes, mime, original_name, scan_status, created_by, created_at) \
-         VALUES (?, ?, ?, ?, 'clean', ?, ?) ON CONFLICT(sha256) DO NOTHING",
+         VALUES (?, ?, ?, ?, 'not_scanned', ?, ?) ON CONFLICT(sha256) DO NOTHING",
     )
     .bind(&staged.sha256)
     .bind(staged.size_bytes)
@@ -348,7 +348,7 @@ mod tests {
         let b = put(&state, &tiny_pdf(), "b.pdf", AllowList::Docs, None).await.unwrap();
         assert_eq!(a.id, b.id, "same bytes dedupe to one blob");
         assert_eq!(a.mime, "application/pdf");
-        assert_eq!(a.scan_status, "clean");
+        assert_eq!(a.scan_status, "not_scanned");
         let (row, bytes) = read(&state, a.id).await.unwrap();
         assert_eq!((row.id, bytes), (a.id, tiny_pdf()));
 

@@ -14,7 +14,7 @@ pub fn routes() -> Router<AppState> {
     Router::new().route("/api/admin/services/ai-suggest", post(suggest))
 }
 async fn suggest(State(state): State<AppState>, actor: Actor, mut form: Multipart) -> AppResult<Json<Value>> {
-    if !state.cfg.ai_enabled {
+    if !state.cfg.ai_enabled || !state.cfg.demo_mode {
         return Err(AppError::not_found());
     }
     admin::require_admin(&actor)?;

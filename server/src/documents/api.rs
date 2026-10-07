@@ -64,7 +64,7 @@ pub async fn issue_letter(
     title: &str,
     body: &str,
 ) -> AppResult<DocumentId> {
-    if !matches!(letter_type, "complaint_response" | "road_response") {
+    if !matches!(letter_type, "complaint_response" | "road_response" | "service_response") {
         return Err(AppError::field("letter_type", "Choose a complaint or road response."));
     }
     let case = super::manage(
@@ -103,7 +103,8 @@ pub async fn issue_letter(
         &format!("{title} has been issued — download it."),
     )
     .await?;
-    super::notify_applicant(tx, &case, "Your response has been issued — download it", title).await?;
+    super::notify_applicant(tx, &case, "Your response has been issued — download it", &format!("{title}\n\n{body}"))
+        .await?;
     crate::cases::workflow::try_auto_advance(tx, state, case_id).await?;
     Ok(id)
 }

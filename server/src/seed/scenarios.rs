@@ -24,6 +24,23 @@ pub async fn run(state: &AppState) -> AppResult<()> {
         d.complete_task(case, "venue_inspection").await?;
         settle_bond(&mut d, case, if index == 0 { 5000 } else { 0 }).await?;
     }
+    d.seed_time(present - Duration::days(9)).await?;
+    let hall = free_hall(&mut d, "rawson-main", 3).await?;
+    let (live_bond, _) = d.submit("alexey", "rawson-hall-hire", hall, None).await?;
+    d.action("olga", live_bond, "advance").await?;
+    d.pay("alexey", live_bond, false).await?;
+    let booking = d.req("olga", "GET", &format!("/api/cases/{live_bond}/booking"), json!({})).await?["booking"].clone();
+    d.req(
+        "olga",
+        "POST",
+        &format!("/api/cases/{live_bond}/booking/confirm"),
+        json!({"expected_revision":booking["revision"]}),
+    )
+    .await?;
+    d.complete_task(live_bond, "venue_prep").await?;
+    d.seed_time(present - Duration::days(2)).await?;
+    d.complete_task(live_bond, "venue_inspection").await?;
+    // Leave the paid bond undecided for the visitor.
     // Island Builders' revised plans and separate approvals, followed by linked requests.
     d.seed_time(present - Duration::days(20)).await?;
     let org: i64 = sqlx::query_scalar("SELECT organisation_id FROM memberships WHERE user_id=(SELECT id FROM users WHERE persona_key='ben') AND status='active'").fetch_one(&state.db).await?;
