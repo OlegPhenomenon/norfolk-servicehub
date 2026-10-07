@@ -1,8 +1,6 @@
-// OWNER: records
 import type { CasePanel } from '@/featureTypes'
-
-/*
- * Tabs this feature adds to the case page.
- *   { key: 'records.example', label: 'Example', audience: 'staff', applies: (c) => c.module === 'generic', Component: ExamplePanel }
- */
-export const casePanels: CasePanel[] = []
+import { ComplaintPanel, RecordsPanel } from './Panels'
+export const casePanels: CasePanel[] = [
+  { key: 'records.complaint', label: 'Confidential feedback', audience: 'both', applies: c => c.module === 'complaint', Component: ComplaintPanel },
+  { key: 'records.records', label: 'Records', audience: 'staff', applies: () => true, Component: RecordsPanel },
+]

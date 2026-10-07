@@ -1,0 +1,16 @@
+source_system,source_id,service_slug,applicant_name,applicant_email,property_ref,title,opened_on,closed_on,status,notes
+Fictional archive,FA-001,rawson-hall-hire,Alexey Turner,alexey@example.invalid,,Fictional family celebration,2023-06-01,2023-06-20,completed,Fictional demonstration record
+Fictional archive,FA-002,planning-certificate,Ben Carter,ben@example.invalid,Portion 44h,Fictional planning certificate,2023-07-03,2023-07-18,completed,Fictional demonstration record
+Fictional archive,FA-003,development-application,Mara Finch,mara@example.invalid,Portion 52b1,Fictional veranda application,2023-08-01,2023-10-10,completed,Fictional demonstration record
+Fictional archive,FA-004,equipment-hire,Alexey Turner,alexey@example.invalid,Portion 44h,Fictional depot hire,2023-09-01,2023-09-06,completed,Fictional demonstration record
+Fictional archive,FA-005,driveway-crossover,Mara Finch,mara@example.invalid,Portion 52b1,Fictional driveway request,2024-01-05,2024-01-19,refused,Fictional approval only; no works performed
+Fictional archive,FA-006,road-issue,Ivan Reed,ivan@example.invalid,,Fictional pothole report,2024-03-05,2024-03-15,completed,Fictional road response
+Fictional archive,FA-007,complaint,Alexey Turner,alexey@example.invalid,,Fictional customer feedback,2024-04-01,2024-04-19,completed,Confidential fictional record
+Fictional archive,FA-008,council-record-copy,Ben Carter,ben@example.invalid,,Fictional record copy,2024-07-02,2024-07-05,completed,Fictional demonstration record
+Fictional archive,FA-009,modify-approval,Mara Finch,mara@example.invalid,Portion 52b1,Fictional modification enquiry,2024-08-01,2024-08-06,withdrawn,Fictional historical record; no issued approval imported
+Fictional archive,FA-010,rawson-hall-hire,Ivan Reed,ivan@example.invalid,,Fictional cancelled meeting,2025-01-10,2025-01-20,cancelled,Fictional demonstration record
+Fictional archive,FA-011,road-issue,Mara Finch,mara@example.invalid,,Fictional open road report,2026-09-01,,open,Fictional demonstration record
+Fictional archive,FA-012,planning-certificate,Ivan Reed,ivan@example.invalid,Portion 71,Fictional certificate pending,2026-09-10,,in_progress,Fictional demonstration record
+Fictional archive,FA-001,rawson-hall-hire,Alexey Turner,alexey@example.invalid,,Fictional family celebration,2023-06-01,2023-06-20,completed,Exact duplicate source identifier
+Fictional archive,FA-013,planning-certificate,Ben Carter,ben@example.invalid,Portion 44h,Fictional planning certificate,2023-07-03,2023-07-18,completed,Possible duplicate with a different source identifier
+Fictional archive,FA-BAD,unknown-service,Noah Vale,bad-email,,Fictional malformed row,not-a-date,2022-01-01,unknown,Deliberately bad demonstration row

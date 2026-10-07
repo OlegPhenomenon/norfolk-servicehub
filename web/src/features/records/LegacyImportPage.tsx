@@ -1,0 +1,20 @@
+import { useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { api, isApiError } from '@/api/client'
+import { Alert, Button, Card, Checkbox, DateTime, EmptyState, ErrorAlert, Field, FileInput, PageHeader, QueryView, Table } from '@/ui'
+import type { ImportReport } from './types'
+import { useCommand } from './useCommand'
+export function LegacyImportPage() {
+  const [file, setFile] = useState<File | null>(null), [report, setReport] = useState<ImportReport | null>(null), [skip, setSkip] = useState(true)
+  const preview = useCommand<{ filename: string; csv: string }>('/api/admin/legacy-imports', 'Preview ready')
+  const apply = useCommand(`/api/admin/legacy-imports/${report?.id}/import`, 'Legacy records imported')
+  const batches = useQuery({ queryKey: ['records', 'legacy-batches'], queryFn: () => api.get<{ id: number; filename: string; status: string; created_at: string }[]>('/api/admin/legacy-imports') })
+  const fields = isApiError(preview.error) ? preview.error.fields : {}
+  const [fileError, setFileError] = useState<string | undefined>()
+  return <div className="space-y-6"><PageHeader title="Import legacy records" description="Preview errors and duplicates before importing. Imported history records retain their original source reference and dates." />
+    <Alert title="CSV format">Use these headers: source_system, source_id, service_slug, applicant_name, applicant_email, property_ref, title, opened_on, closed_on, status, notes. Dates use YYYY-MM-DD. Use the fictional sample in server/seed-data/legacy for demonstration.</Alert>
+    <Card title="Preview CSV"><form className="space-y-4" onSubmit={e => { e.preventDefault(); if (!file) { setFileError('Choose a CSV file.'); return } void file.text().then(csv => preview.mutate({ filename: file.name, csv }, { onSuccess: r => setReport(r as ImportReport) })) }}><ErrorAlert error={preview.error} /><Field label="Legacy CSV file" required error={fields.csv ?? fields.filename ?? fileError}><FileInput accept=".csv,text/csv" onChange={e => { setFile(e.target.files?.[0] ?? null); setFileError(undefined) }} /></Field><Button type="submit" loading={preview.isPending}>Preview import</Button></form></Card>
+    {report && <Card title={`Import ${report.id}: ${report.valid} valid records`} description={`${report.errors} rows with errors; ${report.duplicates} exact duplicates; ${report.possible_duplicates} possible duplicates.`}><ErrorAlert error={apply.error} /><Table caption="Preview report" rows={report.rows} rowKey={r => r.row} columns={[{ key: 'row', header: 'CSV row', cell: r => r.row }, { key: 'source', header: 'Source', cell: r => `${r.source_system} / ${r.source_id}` }, { key: 'title', header: 'Title', cell: r => r.title }, { key: 'result', header: 'Result', cell: r => r.errors.length ? r.errors.join(' ') : r.duplicate ? 'Exact duplicate — skipped' : r.possible_duplicate ? 'Possible duplicate — your decision required' : 'Valid' }]} />{report.status !== 'imported' && <form className="mt-5 space-y-4" onSubmit={e => { e.preventDefault(); apply.mutate({ skip_possible_duplicates: skip }, { onSuccess: r => setReport(r as ImportReport) }) }}><Checkbox label="Skip possible duplicates" hint="Untick only after checking that the matching records are different requests." checked={skip} onChange={e => setSkip(e.target.checked)} /><Button type="submit" loading={apply.isPending}>Import valid records</Button></form>}</Card>}
+    <Card title="Previous imports" padded={false}><QueryView query={batches}>{d => <Table caption="Import batches" rows={d} rowKey={r => r.id} empty={<EmptyState title="No legacy imports yet" />} columns={[{ key: 'file', header: 'File', cell: r => r.filename }, { key: 'status', header: 'Status', cell: r => r.status }, { key: 'date', header: 'Uploaded', cell: r => <DateTime value={r.created_at} /> }, { key: 'view', header: 'Report', cell: r => <Button variant="ghost" onClick={() => { void api.get<ImportReport>(`/api/admin/legacy-imports/${r.id}`).then(setReport) }}>View report</Button> }]} />}</QueryView></Card>
+  </div>
+}
