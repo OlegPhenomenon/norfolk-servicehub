@@ -1,33 +1,24 @@
-// OWNER: documents
-#![allow(dead_code, unused_variables)]
-//! Cross-module documents API.
-
+//! Transaction-composable documents API.
+use crate::{
+    auth::Actor,
+    cases::core::Visibility,
+    error::{AppError, AppResult},
+    state::AppState,
+    storage, time,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::SqliteConnection;
-
-use crate::auth::Actor;
-use crate::cases::core::Visibility;
-use crate::error::{AppError, AppResult};
-use crate::state::AppState;
-
 pub type DocumentId = i64;
 pub type DocumentVersionId = i64;
-
-/// An issued (or refused) decision, as seen by the workflow guard.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct DecisionSummary {
     pub id: i64,
     pub decision_type: String,
-    /// `approved` | `approved_with_conditions` | `refused`.
     pub outcome: String,
     pub status: String,
     pub issued_at: Option<String>,
     pub output_document_version_id: Option<i64>,
 }
-
-/// Stores a generated PDF as a new case document (version 1). Stage the bytes with
-/// `storage::stage` *before* opening `tx` if you generate them yourself — this function receives bytes and
-/// must not touch the pool. `actor` = `users.id` or `None` for system-generated documents.
 #[allow(clippy::too_many_arguments)]
 pub async fn attach_generated(
     tx: &mut SqliteConnection,
@@ -39,15 +30,28 @@ pub async fn attach_generated(
     pdf_bytes: Vec<u8>,
     actor: Option<i64>,
 ) -> AppResult<(DocumentId, DocumentVersionId)> {
-    Err(AppError::internal("not implemented: documents::api::attach_generated"))
+    let staged = storage::stage(state, &pdf_bytes, "document.pdf", storage::AllowList::Docs).await?;
+    let blob = storage::register(tx, staged, actor).await?;
+    insert(tx, case_id, category, title, visibility, None, blob.id, actor).await
 }
-
-/// Issued decisions of a case (all types).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn insert(
+    tx: &mut SqliteConnection,
+    case_id: i64,
+    category: &str,
+    title: &str,
+    visibility: Visibility,
+    requirement: Option<&str>,
+    blob: i64,
+    actor: Option<i64>,
+) -> AppResult<(i64, i64)> {
+    let id=sqlx::query_scalar("INSERT INTO documents(case_id,category,title,visibility,requirement_key,created_by,created_at) VALUES(?,?,?,?,?,?,?) RETURNING id").bind(case_id).bind(category).bind(title).bind(visibility.as_str()).bind(requirement).bind(actor).bind(time::now_str()).fetch_one(&mut *tx).await?;
+    let vid=sqlx::query_scalar("INSERT INTO document_versions(document_id,version,blob_id,uploaded_by,uploaded_at) VALUES(?,1,?,?,?) RETURNING id").bind(id).bind(blob).bind(actor).bind(time::now_str()).fetch_one(&mut *tx).await?;
+    Ok((id, vid))
+}
 pub async fn issued_decisions(tx: &mut SqliteConnection, case_id: i64) -> AppResult<Vec<DecisionSummary>> {
-    Err(AppError::internal("not implemented: documents::api::issued_decisions"))
+    Ok(sqlx::query_as("SELECT id,decision_type,outcome,status,issued_at,output_document_version_id FROM decisions WHERE case_id=? AND status='issued' ORDER BY id").bind(case_id).fetch_all(tx).await?)
 }
-
-/// Issues a letter (`complaint_response` | `road_response`) as an applicant-visible PDF document.
 #[allow(clippy::too_many_arguments)]
 pub async fn issue_letter(
     tx: &mut SqliteConnection,
@@ -58,10 +62,53 @@ pub async fn issue_letter(
     title: &str,
     body: &str,
 ) -> AppResult<DocumentId> {
-    Err(AppError::internal("not implemented: documents::api::issue_letter"))
+    if !matches!(letter_type, "complaint_response" | "road_response") {
+        return Err(AppError::field("letter_type", "Choose a complaint or road response."));
+    }
+    let case = super::manage(
+        tx,
+        actor,
+        case_id,
+        &[
+            crate::authz::Role::ComplaintsOfficer,
+            crate::authz::Role::Intake,
+            crate::authz::Role::Specialist,
+            crate::authz::Role::Manager,
+        ],
+    )
+    .await?;
+    if (letter_type == "complaint_response" && case.module != "complaint")
+        || (letter_type == "road_response" && case.module != "road_issue")
+    {
+        return Err(AppError::field("letter_type", "This letter does not match the service."));
+    }
+    super::text("title", title, 200)?;
+    super::text("body", body, 20000)?;
+    let bytes = crate::pdf::simple_document(
+        title,
+        &[("Case", case.number.clone().unwrap_or_default())],
+        &[("Response", body.into())],
+    );
+    let (id, vid) =
+        attach_generated(tx, state, case_id, "letter", title, Visibility::Applicant, bytes, actor.db_id()).await?;
+    sqlx::query("INSERT INTO issued_letters(case_id,letter_type,document_id,document_version_id,issued_by,issued_at) VALUES(?,?,?,?,?,?)").bind(case_id).bind(letter_type).bind(id).bind(vid).bind(actor.db_id()).bind(time::now_str()).execute(&mut *tx).await?;
+    super::changed(
+        tx,
+        actor.db_id(),
+        case_id,
+        "documents.letter_issued",
+        Visibility::Applicant,
+        &format!("{title} has been issued — download it."),
+    )
+    .await?;
+    super::notify_applicant(tx, &case, "Your response has been issued — download it", title).await?;
+    crate::cases::workflow::try_auto_advance(tx, state, case_id).await?;
+    Ok(id)
 }
-
-/// Has a letter of `letter_type` been issued for the case?
 pub async fn letter_issued(tx: &mut SqliteConnection, case_id: i64, letter_type: &str) -> AppResult<bool> {
-    Err(AppError::internal("not implemented: documents::api::letter_issued"))
+    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM issued_letters WHERE case_id=? AND letter_type=?)")
+        .bind(case_id)
+        .bind(letter_type)
+        .fetch_one(tx)
+        .await?)
 }
