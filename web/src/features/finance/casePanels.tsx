@@ -1,8 +1,3 @@
-// OWNER: finance
 import type { CasePanel } from '@/featureTypes'
-
-/*
- * Tabs this feature adds to the case page.
- *   { key: 'finance.example', label: 'Example', audience: 'staff', applies: (c) => c.module === 'generic', Component: ExamplePanel }
- */
-export const casePanels: CasePanel[] = []
+import { MoneyPanel } from './MoneyPanel'
+export const casePanels: CasePanel[] = [{ key: 'finance.money', label: 'Money', audience: 'both', applies: () => true, Component: MoneyPanel }]

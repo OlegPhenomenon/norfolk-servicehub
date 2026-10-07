@@ -1,16 +1,11 @@
-// OWNER: finance
 import type { NavItem } from '@/featureTypes'
-
-/*
- * Navigation entries of the "finance" feature. `to` is absolute; `roles` limits visibility.
- *   { to: '/staff/bookings', label: 'Bookings', icon: 'calendar', roles: ['intake', 'manager'] }
- */
-
-/** Sidebar of the staff workspace. */
-export const staffNav: NavItem[] = []
-
-/** Sidebar of the admin area. */
-export const adminNav: NavItem[] = []
-
-/** Menu of the resident area (`/my`); `roles` is ignored there. */
+export const staffNav: NavItem[] = [
+  { to: '/staff/finance', label: 'Finance', icon: 'coins', roles: ['finance'], end: true },
+  { to: '/staff/finance/statements', label: 'Bank statements', icon: 'upload', roles: ['finance'] },
+  { to: '/staff/finance/unmatched', label: 'Unmatched transfers', icon: 'receipt', roles: ['finance'] },
+  { to: '/staff/finance/deposits', label: 'Refundable bonds', icon: 'shield', roles: ['finance'] },
+  { to: '/staff/finance/refunds', label: 'Refunds', icon: 'coins', roles: ['finance'] },
+  { to: '/staff/finance/prices', label: 'Prices', icon: 'coins', roles: ['finance'] },
+]
+export const adminNav: NavItem[] = [{ to: '/admin/prices', label: 'Prices', icon: 'coins', roles: ['finance', 'sysadmin'] }]
 export const residentNav: NavItem[] = []
