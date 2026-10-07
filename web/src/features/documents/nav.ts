@@ -1,16 +1,4 @@
-// OWNER: documents
 import type { NavItem } from '@/featureTypes'
-
-/*
- * Navigation entries of the "documents" feature. `to` is absolute; `roles` limits visibility.
- *   { to: '/staff/bookings', label: 'Bookings', icon: 'calendar', roles: ['intake', 'manager'] }
- */
-
-/** Sidebar of the staff workspace. */
-export const staffNav: NavItem[] = []
-
-/** Sidebar of the admin area. */
+export const staffNav: NavItem[] = [{ to: '/staff/exhibitions', label: 'Exhibitions', icon: 'file', roles: ['specialist', 'manager'] }]
 export const adminNav: NavItem[] = []
-
-/** Menu of the resident area (`/my`); `roles` is ignored there. */
 export const residentNav: NavItem[] = []
