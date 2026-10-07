@@ -167,12 +167,12 @@ pub async fn applicant_reply(
     )
     .await?;
     let owners: Vec<i64> =
-        sqlx::query_scalar("SELECT user_id FROM case_assignments WHERE case_id=? AND ended_at IS NULL")
+        sqlx::query_scalar("SELECT a.user_id FROM case_assignments a JOIN users u ON u.id=a.user_id WHERE a.case_id=? AND a.ended_at IS NULL AND u.is_active=1")
             .bind(id)
             .fetch_all(&mut *tx)
             .await?;
     for uid in owners {
-        let recipient = Actor::load(tx, uid, true).await?;
+        let Some(recipient) = Actor::load_recipient(tx, uid).await? else { continue };
         if authz::case_access(tx, &recipient, id).await?.is_staff() {
             notify::send(
                 tx,

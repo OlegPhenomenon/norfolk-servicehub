@@ -114,7 +114,9 @@ fn staff_access_from_roles(actor: &Actor, service_id: i64, confidential: bool) -
     }
     if confidential {
         return actor
-            .has_any_role(&[crate::authz::Role::ComplaintsOfficer, Role::Manager])
+            .roles_for_service(service_id)
+            .iter()
+            .any(|r| matches!(r, Role::ComplaintsOfficer | Role::Manager))
             .then_some(CaseAccess::Staff { can_manage: true });
     }
     let roles = actor.roles_for_service(service_id);
@@ -238,18 +240,27 @@ pub fn case_scope_sql(actor: &Actor) -> ScopeSql {
 
     // Staff branches (rule 2).
     if actor.is_staff() {
-        if actor.has_any_role(&[Role::ComplaintsOfficer, Role::Manager]) {
-            branches.push("c.confidential = 1".into());
+        for grant in actor.roles.iter().filter(|g| matches!(g.role, Role::ComplaintsOfficer | Role::Manager)) {
+            if let Some(service) = grant.scope_service_id {
+                branches.push("(c.confidential = 1 AND c.service_id = ?)".into());
+                binds.push(SqlValue::Int(service));
+            } else {
+                branches.push("c.confidential = 1".into());
+            }
         }
         let all_services = actor.roles.iter().any(|g| {
-            matches!(g.role, Role::Intake | Role::Manager | Role::Finance)
-                || (g.role == Role::Specialist && g.scope_service_id.is_none())
+            matches!(g.role, Role::Intake | Role::Manager | Role::Finance | Role::Specialist)
+                && g.scope_service_id.is_none()
         });
         if all_services {
             branches.push("c.confidential = 0".into());
         } else {
-            let mut scoped: Vec<i64> =
-                actor.roles.iter().filter(|g| g.role == Role::Specialist).filter_map(|g| g.scope_service_id).collect();
+            let mut scoped: Vec<i64> = actor
+                .roles
+                .iter()
+                .filter(|g| matches!(g.role, Role::Intake | Role::Manager | Role::Finance | Role::Specialist))
+                .filter_map(|g| g.scope_service_id)
+                .collect();
             scoped.sort_unstable();
             scoped.dedup();
             if !scoped.is_empty() {
@@ -412,6 +423,10 @@ mod tests {
             ("specialist scoped to service 1", actor(11, s, &[(Role::Specialist, Some(1))]), [M, None, M, None, None]),
             ("specialist unscoped", actor(12, s, &[(Role::Specialist, Option::None)]), [M, M, M, None, M]),
             ("finance", actor(13, s, &[(Role::Finance, Option::None)]), [R, R, R, None, R]),
+            ("scoped intake", actor(10, s, &[(Role::Intake, Some(1))]), [M, None, M, None, None]),
+            ("scoped finance", actor(13, s, &[(Role::Finance, Some(1))]), [R, None, R, None, None]),
+            ("scoped manager", actor(15, s, &[(Role::Manager, Some(1))]), [M, None, M, None, None]),
+            ("scoped complaint manager", actor(15, s, &[(Role::Manager, Some(3))]), [None, None, None, M, None]),
             (
                 "field worker with task",
                 actor(14, s, &[(Role::FieldWorker, Option::None)]),

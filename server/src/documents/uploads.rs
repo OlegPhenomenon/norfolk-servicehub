@@ -152,7 +152,7 @@ pub async fn upload(
     super::text("title", &title, 200)?;
     let category = u.fields.get("category").map(String::as_str).unwrap_or("application");
     super::text("category", category, 60)?;
-    if matches!(category, "decision" | "letter" | "certificate") {
+    if generated_category(category) {
         return Err(AppError::field("category", "Issued results are created by the decision or letter process."));
     }
     let visibility = match u.fields.get("visibility").map(String::as_str).unwrap_or("applicant") {
@@ -160,7 +160,7 @@ pub async fn upload(
         "staff" => Visibility::Staff,
         _ => return Err(AppError::field("visibility", "Choose applicant or staff.")),
     };
-    let blob = storage::put(&state, &u.bytes, &u.name, storage::AllowList::Docs, actor.db_id()).await?;
+    let staged = storage::stage(&state, &u.bytes, &u.name, storage::AllowList::Docs).await?;
     let mut tx = write_tx(&state.db).await?;
     let (case, a) = super::access(&mut tx, &actor, id).await?;
     editable(&case)?;
@@ -184,6 +184,9 @@ pub async fn upload(
             return Err(AppError::field("requirement_key", "Choose a document requirement from this request."));
         }
     }
+    validate_upload_category(&mut tx, &case, a, category).await?;
+    upload_quota(&mut tx, actor.user_id, staged.size_bytes).await?;
+    let blob = storage::register(&mut tx, staged, actor.db_id()).await?;
     let (doc, vid) =
         super::api::insert(&mut tx, id, category, &title, visibility, requirement, blob.id, actor.db_id()).await?;
     super::changed(
@@ -239,24 +242,22 @@ pub async fn version(
         let (case, a, _, category) = document_access(&mut c, &actor, id).await?;
         editable(&case)?;
         writable(a)?;
-        if matches!(category.as_str(), "decision" | "letter" | "certificate") {
-            return Err(AppError::conflict("Issued results are immutable; prepare a new decision."));
-        }
+        immutable(&mut c, id, &category).await?;
     }
     let u = parse(multi.0).await?;
-    let blob = storage::put(&state, &u.bytes, &u.name, storage::AllowList::Docs, actor.db_id()).await?;
+    let staged = storage::stage(&state, &u.bytes, &u.name, storage::AllowList::Docs).await?;
     let mut tx = write_tx(&state.db).await?;
     let (case, a, title, category) = document_access(&mut tx, &actor, id).await?;
     editable(&case)?;
     writable(a)?;
-    if matches!(category.as_str(), "decision" | "letter" | "certificate") {
-        return Err(AppError::conflict("Issued results are immutable."));
-    }
+    immutable(&mut tx, id, &category).await?;
     revision(&mut tx, case.id, a, &u.fields).await?;
     let n: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(version),0)+1 FROM document_versions WHERE document_id=?")
         .bind(id)
         .fetch_one(&mut *tx)
         .await?;
+    upload_quota(&mut tx, actor.user_id, staged.size_bytes).await?;
+    let blob = storage::register(&mut tx, staged, actor.db_id()).await?;
     let vid:i64=sqlx::query_scalar("INSERT INTO document_versions(document_id,version,blob_id,uploaded_by,note,uploaded_at) VALUES(?,?,?,?,?,?) RETURNING id").bind(id).bind(n).bind(blob.id).bind(actor.db_id()).bind(u.fields.get("note")).bind(time::now_str()).fetch_one(&mut *tx).await?;
     for cid in u.resolves {
         let updated=sqlx::query("UPDATE document_comments SET resolved_at=?,resolved_by_version_id=? WHERE id=? AND resolved_at IS NULL AND visibility='applicant' AND document_version_id IN (SELECT id FROM document_versions WHERE document_id=? AND version<?)").bind(time::now_str()).bind(vid).bind(cid).bind(id).bind(n).execute(&mut *tx).await?;
@@ -400,4 +401,46 @@ pub async fn comment(
     }
     tx.commit().await?;
     Ok(Json(serde_json::json!({"id":id})))
+}
+
+fn generated_category(category: &str) -> bool {
+    matches!(category, "decision" | "letter" | "certificate" | "invoice" | "credit_note" | "booking_confirmation")
+}
+async fn immutable(tx: &mut SqliteConnection, id: i64, category: &str) -> AppResult<()> {
+    let generated: bool =
+        sqlx::query_scalar("SELECT generated FROM documents WHERE id=?").bind(id).fetch_one(tx).await?;
+    if generated || generated_category(category) {
+        return Err(AppError::conflict("Generated documents are immutable."));
+    }
+    Ok(())
+}
+async fn validate_upload_category(
+    tx: &mut SqliteConnection,
+    case: &crate::cases::core::CaseRow,
+    access: CaseAccess,
+    category: &str,
+) -> AppResult<()> {
+    if generated_category(category) {
+        return Err(AppError::field("category", "Generated document categories are reserved."));
+    }
+    if access == CaseAccess::Applicant && !matches!(category, "application" | "supporting" | "receipt") {
+        let definition: String = sqlx::query_scalar("SELECT definition_json FROM service_versions WHERE id=?")
+            .bind(case.service_version_id)
+            .fetch_one(tx)
+            .await?;
+        let definition: serde_json::Value = serde_json::from_str(&definition)?;
+        if !definition["documents"].as_array().is_some_and(|ds| ds.iter().any(|d| d["key"].as_str() == Some(category)))
+        {
+            return Err(AppError::field("category", "Choose an application document category."));
+        }
+    }
+    Ok(())
+}
+async fn upload_quota(tx: &mut SqliteConnection, user: i64, size: i64) -> AppResult<()> {
+    let used: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(b.size_bytes),0) FROM document_versions v JOIN blobs b ON b.id=v.blob_id JOIN documents d ON d.id=v.document_id WHERE v.uploaded_by=? AND d.generated=0 AND d.disposed_at IS NULL")
+        .bind(user).fetch_one(tx).await?;
+    if used.saturating_add(size) > 100 * 1024 * 1024 {
+        return Err(AppError::field("file", "Your document uploads exceed the 100 MB limit."));
+    }
+    Ok(())
 }

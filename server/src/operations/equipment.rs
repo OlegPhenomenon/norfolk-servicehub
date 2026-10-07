@@ -27,6 +27,7 @@ pub struct Request {
     pub operator_user_id: Option<i64>,
     pub scheduled_start: Option<String>,
     pub scheduled_end: Option<String>,
+    pub status: String,
 }
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct Usage {
@@ -127,7 +128,7 @@ pub async fn schedule(
         };
         return Err(AppError::conflict(format!("Plant is unavailable: {label}.")));
     }
-    let operator_busy:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM equipment_requests WHERE operator_user_id=? AND case_id<>? AND scheduled_start<? AND scheduled_end>?)").bind(v.operator_user_id).bind(id).bind(time::fmt(end)).bind(time::fmt(start)).fetch_one(&mut *tx).await?;
+    let operator_busy:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM equipment_requests WHERE status<>'cancelled' AND operator_user_id=? AND case_id<>? AND scheduled_start<? AND scheduled_end>?)").bind(v.operator_user_id).bind(id).bind(time::fmt(end)).bind(time::fmt(start)).fetch_one(&mut *tx).await?;
     if operator_busy {
         return Err(AppError::field("operator_user_id", "The operator already has a job at that time."));
     }
@@ -136,7 +137,7 @@ pub async fn schedule(
         .execute(&mut *tx)
         .await?;
     sqlx::query("INSERT INTO occupancies(resource_id,source,case_id,label,start_at,end_at,created_at) VALUES (?,'equipment',?,?,?,?,?)").bind(resource.id).bind(id).bind(&c.title).bind(time::fmt(start)).bind(time::fmt(end)).bind(time::now_str()).execute(&mut *tx).await?;
-    sqlx::query("UPDATE equipment_requests SET assigned_resource_id=?,operator_user_id=?,scheduled_start=?,scheduled_end=? WHERE id=?").bind(resource.id).bind(v.operator_user_id).bind(time::fmt(start)).bind(time::fmt(end)).bind(e.id).execute(&mut *tx).await?;
+    sqlx::query("UPDATE equipment_requests SET status='scheduled',assigned_resource_id=?,operator_user_id=?,scheduled_start=?,scheduled_end=? WHERE id=?").bind(resource.id).bind(v.operator_user_id).bind(time::fmt(start)).bind(time::fmt(end)).bind(e.id).execute(&mut *tx).await?;
     if let Some(task) = e.task_id {
         let t = tasks::load(&mut tx, task).await?;
         if matches!(t.status.as_str(), "done" | "cancelled") {

@@ -40,7 +40,7 @@ async fn fixture() -> (AppState, tempfile::TempDir) {
         .execute(&mut *tx)
         .await
         .unwrap();
-        sqlx::query("INSERT INTO service_versions(id,service_id,version,status,definition_json,created_at) VALUES(?,?,1,'published','{}',?)").bind(sid).bind(sid).bind(NOW).execute(&mut *tx).await.unwrap();
+        sqlx::query("INSERT INTO service_versions(id,service_id,version,status,definition_json,created_at) VALUES(?,?,1,'published','{\"summary\":\"Test\",\"outcome\":\"Test\",\"workflow\":{\"steps\":[]}}' ,?)").bind(sid).bind(sid).bind(NOW).execute(&mut *tx).await.unwrap();
     }
     tx.commit().await.unwrap();
     (state, dir)
@@ -278,6 +278,7 @@ async fn request(
     use tower::ServiceExt;
     let app = routes()
         .merge(crate::documents::routes())
+        .merge(crate::cases::routes())
         .layer(axum::middleware::from_fn_with_state(state.clone(), crate::auth::extract::session_middleware))
         .with_state(state.clone());
     let req = axum::http::Request::builder()
@@ -447,7 +448,7 @@ async fn legacy_preview_reports_bad_rows_and_both_duplicate_kinds() {
     {
         let sid = 10 + i as i64;
         sqlx::query("INSERT INTO services(id,slug,name,category,module,department,created_at) VALUES(?,?,?,'Demo','generic','Customer Care',?)").bind(sid).bind(slug).bind(slug).bind(NOW).execute(&mut *tx).await.unwrap();
-        sqlx::query("INSERT INTO service_versions(id,service_id,version,status,definition_json,created_at) VALUES(?,?,1,'published','{}',?)").bind(sid).bind(sid).bind(NOW).execute(&mut *tx).await.unwrap();
+        sqlx::query("INSERT INTO service_versions(id,service_id,version,status,definition_json,created_at) VALUES(?,?,1,'published','{\"summary\":\"Test\",\"outcome\":\"Test\",\"workflow\":{\"steps\":[]}}' ,?)").bind(sid).bind(sid).bind(NOW).execute(&mut *tx).await.unwrap();
     }
     tx.commit().await.unwrap();
     let admin = session(&state, 2).await;
@@ -567,4 +568,146 @@ async fn disposal_endpoint_preserves_decision_evidence_and_shared_blob_until_las
             .unwrap(),
         2
     );
+}
+
+#[tokio::test]
+async fn reclose_extends_retention_and_delivers_distinct_closure_with_stable_retries() {
+    let (state, _dir) = fixture().await;
+    let mut tx = write_tx(&state.db).await.unwrap();
+    crate::auth::users::grant_role(&mut tx, 4, Role::Manager, None, None).await.unwrap();
+    sqlx::query("UPDATE service_versions SET status='retired' WHERE id=1").execute(&mut *tx).await.unwrap();
+    let definition = json!({"summary":"Test","outcome":"Test","workflow":{"steps":[{"key":"review","kind":"review","role":"manager","label":"Review"},{"key":"done","kind":"complete","label":"Done"}]}});
+    let version:i64=sqlx::query_scalar("INSERT INTO service_versions(service_id,version,status,definition_json,created_at) VALUES(1,2,'published',?,'2026-10-07') RETURNING id").bind(definition.to_string()).fetch_one(&mut *tx).await.unwrap();
+    let case = new_case(&mut tx, "generic", "completed").await;
+    sqlx::query(
+        "UPDATE cases SET service_version_id=?,current_step='done',closed_at='2000-01-01T00:00:00Z' WHERE id=?",
+    )
+    .bind(version)
+    .bind(case.id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    let first = core::load_case(&mut tx, case.id).await.unwrap();
+    api::on_case_closed(&mut tx, &first).await.unwrap();
+    assert_eq!(core::load_case(&mut tx, case.id).await.unwrap().retention_until.as_deref(), Some("2007-01-01"));
+    tx.commit().await.unwrap();
+    let credentials = session(&state, 4).await;
+    let (status, body) = request(
+        &state,
+        &credentials,
+        "POST",
+        &format!("/api/cases/{}/actions/reopen", case.id),
+        json!({"expected_revision":1,"reason":"New evidence"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let mut tx = write_tx(&state.db).await.unwrap();
+    crate::documents::api::attach_generated(
+        &mut tx,
+        &state,
+        case.id,
+        "supporting",
+        "New evidence",
+        Visibility::Applicant,
+        crate::pdf::simple_document("New evidence", &[], &[]),
+        Some(1),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let (status, body) = request(
+        &state,
+        &credentials,
+        "POST",
+        &format!("/api/cases/{}/actions/refuse", case.id),
+        json!({"expected_revision":2,"reason":"New evidence reviewed"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let mut tx = write_tx(&state.db).await.unwrap();
+    let closed = core::load_case(&mut tx, case.id).await.unwrap();
+    assert!(closed.retention_until.as_deref().unwrap() > "2030-01-01");
+    api::on_case_closed(&mut tx, &closed).await.unwrap();
+    let deliveries:Vec<(String,String)>=sqlx::query_as("SELECT operation_id,payload_json FROM integration_deliveries WHERE case_id=? AND kind='record.case_closed' ORDER BY id").bind(case.id).fetch_all(&mut *tx).await.unwrap();
+    assert_eq!(deliveries.len(), 2);
+    assert_ne!(deliveries[0].0, deliveries[1].0);
+    assert_eq!(serde_json::from_str::<Value>(&deliveries[1].1).unwrap()["case"]["status"], "refused");
+    sqlx::query("UPDATE cases SET retention_until='2099-01-01' WHERE id=?")
+        .bind(case.id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    // Repeating the new closure never shortens a longer legal retention date.
+    api::on_case_closed(&mut tx, &closed).await.unwrap();
+    assert_eq!(core::load_case(&mut tx, case.id).await.unwrap().retention_until.as_deref(), Some("2099-01-01"));
+}
+
+#[tokio::test]
+async fn integration_delivery_receipt_does_not_invalidate_staff_revision() {
+    let (state, _dir) = fixture().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut cfg = (*state.cfg).clone();
+    cfg.internal_base_url = format!("http://{}", listener.local_addr().unwrap());
+    let state = AppState { cfg: std::sync::Arc::new(cfg), ..state };
+    let app = crate::mock::records::routes().with_state(state.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let mut tx = write_tx(&state.db).await.unwrap();
+    let case = new_case(&mut tx, "generic", "in_progress").await;
+    integrations::enqueue(
+        &mut tx,
+        "content_manager",
+        Some(case.id),
+        "payment.receipt",
+        100,
+        json!({"case_id":case.id}),
+    )
+    .await
+    .unwrap();
+    let delivery = sqlx::query_scalar("SELECT id FROM integration_deliveries WHERE case_id=?")
+        .bind(case.id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    integrations::deliver(&state, delivery).await.unwrap();
+    let mut tx = write_tx(&state.db).await.unwrap();
+    assert_eq!(core::load_case(&mut tx, case.id).await.unwrap().revision, case.revision);
+    core::bump_revision(&mut tx, case.id, Some(case.revision)).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM case_events WHERE case_id=? AND kind='records.integration_accepted'"
+        )
+        .bind(case.id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap(),
+        1
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn distinct_closure_generations_have_distinct_delivery_keys() {
+    let (state, _dir) = fixture().await;
+    let mut tx = write_tx(&state.db).await.unwrap();
+    let case = new_case(&mut tx, "generic", "completed").await;
+    sqlx::query("UPDATE cases SET closed_at=? WHERE id=?").bind(NOW).bind(case.id).execute(&mut *tx).await.unwrap();
+    let first = core::load_case(&mut tx, case.id).await.unwrap();
+    api::on_case_closed(&mut tx, &first).await.unwrap();
+    sqlx::query("UPDATE cases SET reopened_count=reopened_count+1,status='refused' WHERE id=?")
+        .bind(case.id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let second = core::load_case(&mut tx, case.id).await.unwrap();
+    api::on_case_closed(&mut tx, &second).await.unwrap();
+    api::on_case_closed(&mut tx, &second).await.unwrap();
+    let keys: Vec<String> =
+        sqlx::query_scalar("SELECT operation_id FROM integration_deliveries WHERE case_id=? ORDER BY id")
+            .bind(case.id)
+            .fetch_all(&mut *tx)
+            .await
+            .unwrap();
+    assert_eq!(keys.len(), 2);
+    assert_ne!(keys[0], keys[1]);
 }

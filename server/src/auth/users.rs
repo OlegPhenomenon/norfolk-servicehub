@@ -85,6 +85,13 @@ pub async fn deactivate_user(conn: &mut SqliteConnection, user_id: i64) -> AppRe
     if count == 0 {
         return Err(AppError::not_found());
     }
+    sqlx::query("UPDATE case_assignments SET ended_at=? WHERE user_id=? AND ended_at IS NULL")
+        .bind(time::now_str())
+        .bind(user_id)
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("UPDATE tasks SET assigned_to=NULL,revision=revision+1 WHERE assigned_to=? AND status NOT IN ('done','cancelled')")
+        .bind(user_id).execute(&mut *conn).await?;
     sqlx::query("DELETE FROM sessions WHERE user_id=?").bind(user_id).execute(conn).await?;
     Ok(())
 }

@@ -225,7 +225,7 @@ pub async fn applicant_notice(tx: &mut SqliteConnection, c: &CaseRow, subject: &
 pub async fn role_notice(tx: &mut SqliteConnection, case: i64, role: &str, subject: &str, body: &str) -> AppResult<()> {
     let users:Vec<i64>=sqlx::query_scalar("SELECT DISTINCT g.user_id FROM role_grants g JOIN users u ON u.id=g.user_id JOIN cases c ON c.id=? WHERE u.is_active=1 AND g.role=? AND g.revoked_at IS NULL AND (g.scope_service_id IS NULL OR g.scope_service_id=c.service_id)").bind(case).bind(role).fetch_all(&mut *tx).await?;
     for id in users {
-        let actor = Actor::load(tx, id, true).await?;
+        let Some(actor) = Actor::load_recipient(tx, id).await? else { continue };
         if authz::case_access(tx, &actor, case).await?.is_staff() {
             notify::send(
                 tx,

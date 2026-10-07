@@ -5,7 +5,7 @@ use super::{
 use crate::{
     auth::{Actor, StaffActor},
     authz::Role,
-    cases::core::Visibility,
+    cases::core::{CaseRow, Visibility},
     db, documents,
     error::{AppError, AppResult},
     finance, pdf,
@@ -140,6 +140,15 @@ async fn confirmation(
         a.db_id(),
     )
     .await?;
+    sqlx::query(
+        "INSERT INTO booking_confirmations(case_id,booking_id,booking_revision,document_version_id) VALUES(?,?,?,?)",
+    )
+    .bind(c.id)
+    .bind(b.id)
+    .bind(b.revision)
+    .bind(version)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query("UPDATE bookings SET confirmation_version_id=? WHERE id=?")
         .bind(version)
         .bind(b.id)
@@ -155,6 +164,8 @@ pub async fn confirm(
 ) -> AppResult<Json<Value>> {
     let mut tx = db::write_tx(&st.db).await?;
     let c = model::manage(&mut tx, &a, id, BOOKING_ROLES).await?;
+    let requested = model::booking(&mut tx, id).await?;
+    require_confirmation_money(&mut tx, &c, &requested).await?;
     if !finance::api::case_settled(&mut tx, id).await? {
         return Err(AppError::conflict("Hire fees and bond must be received before confirmation."));
     }
@@ -252,6 +263,7 @@ pub async fn reschedule(
     if b.revision != v.expected_revision {
         return Err(AppError::stale_revision());
     }
+    finance::api::require_unconsumed(&mut tx, &st, id).await?;
     let s = moved_slot(&b, &v);
     let u = model::validate_slot(&mut tx, &s, st.now()).await?;
     let old: Unit =
@@ -318,6 +330,7 @@ pub async fn cancel(
         return Err(AppError::conflict("This booking cannot be cancelled."));
     }
     sqlx::query("UPDATE occupancies SET active=0 WHERE booking_id=?").bind(b.id).execute(&mut *tx).await?;
+    record_cancellation(&mut tx, &b, st.now(), a.db_id(), &v.reason).await?;
     b.status = "cancelled".into();
     b.revision += 1;
     persist(&mut tx, &b).await?;
@@ -347,7 +360,7 @@ pub async fn download_confirmation(
     let blob = {
         let mut tx = st.db.acquire().await?;
         model::read_case(&mut tx, &a, id).await?;
-        sqlx::query_scalar::<_,i64>("SELECT v.blob_id FROM document_versions v JOIN documents d ON d.id=v.document_id WHERE v.id=? AND d.case_id=? AND d.category='booking_confirmation' AND d.visibility='applicant' AND d.disposed_at IS NULL").bind(version).bind(id).fetch_one(&mut *tx).await?
+        sqlx::query_scalar::<_,i64>("SELECT v.blob_id FROM document_versions v JOIN documents d ON d.id=v.document_id WHERE v.id=? AND d.case_id=? AND d.category='booking_confirmation' AND d.visibility='applicant' AND d.generated=1 AND d.disposed_at IS NULL AND EXISTS(SELECT 1 FROM booking_confirmations bc WHERE bc.case_id=d.case_id AND bc.document_version_id=v.id)").bind(version).bind(id).fetch_one(&mut *tx).await?
     };
     let (_, bytes) = crate::storage::read(&st, blob).await?;
     Ok((
@@ -358,4 +371,42 @@ pub async fn download_confirmation(
         ],
         bytes,
     ))
+}
+
+async fn require_confirmation_money(tx: &mut SqliteConnection, case: &CaseRow, booking: &Booking) -> AppResult<()> {
+    if case.current_step.as_deref() != Some("confirm") {
+        return Err(AppError::conflict("Reach the paid booking confirmation step first."));
+    }
+    let issued: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM invoices WHERE case_id=? AND kind='invoice' AND status='issued')",
+    )
+    .bind(case.id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !issued {
+        return Err(AppError::conflict("Issued invoices must cover all required hire fees and bond."));
+    }
+    let unit: Unit =
+        sqlx::query_as("SELECT * FROM bookable_units WHERE id=?").bind(booking.unit_id).fetch_one(&mut *tx).await?;
+    let (_, required) = hooks::venue_lines(tx, &unit, &booking.start_at, &booking.end_at).await?;
+    for line in required {
+        let covered: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(l.amount_cents-l.credited_cents),0) FROM finance_line_balances l JOIN invoices i ON i.id=l.invoice_id WHERE i.case_id=? AND i.kind='invoice' AND i.status='issued' AND l.price_item_id=? AND l.kind=?")
+            .bind(case.id).bind(line.price_item_id).bind(&line.kind).fetch_one(&mut *tx).await?;
+        if covered < line.amount_cents {
+            return Err(AppError::conflict("Issued invoices must cover all required hire fees and bond."));
+        }
+    }
+    Ok(())
+}
+
+pub(super) async fn record_cancellation(
+    tx: &mut SqliteConnection,
+    b: &Booking,
+    now: chrono::DateTime<chrono::Utc>,
+    actor: Option<i64>,
+    reason: &str,
+) -> AppResult<()> {
+    sqlx::query("INSERT INTO booking_cancellations(booking_id,cancelled_at,unused,actor_user_id,reason) VALUES(?,?,?,?,?) ON CONFLICT(booking_id) DO NOTHING")
+        .bind(b.id).bind(time::fmt(now)).bind(time::parse(&b.start_at)? > now).bind(actor).bind(reason).execute(tx).await?;
+    Ok(())
 }

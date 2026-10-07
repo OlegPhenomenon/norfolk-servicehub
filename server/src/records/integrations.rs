@@ -53,7 +53,11 @@ pub async fn enqueue(
         .bind(system)
         .execute(&mut *tx)
         .await?;
-    let operation = format!("{kind}:{entity}");
+    let operation = if kind == "record.case_closed" && payload["closure_event_id"].as_i64().is_some() {
+        format!("{kind}:case:{}:closure:{entity}", case_id.ok_or_else(|| AppError::internal("Closure has no case"))?)
+    } else {
+        format!("{kind}:{entity}")
+    };
     let now = time::now_str();
     let id: Option<i64> = sqlx::query_scalar("INSERT INTO integration_deliveries (system_code,case_id,operation_id,kind,payload_json,status,created_at,updated_at) VALUES (?,?,?,?,?,'pending',?,?) ON CONFLICT(operation_id) DO NOTHING RETURNING id")
         .bind(system).bind(case_id).bind(&operation).bind(kind).bind(payload.to_string()).bind(&now).bind(&now).fetch_optional(&mut *tx).await?;
@@ -160,12 +164,23 @@ pub async fn deliver(state: &AppState, id: i64) -> AppResult<()> {
             sqlx::query("UPDATE integration_deliveries SET status='accepted',external_ref=?,last_error=NULL,next_attempt_at=NULL,updated_at=? WHERE id=?")
                 .bind(&accepted.external_ref).bind(&now).bind(id).execute(&mut *tx).await?;
             if let Some(cid) = d.case_id {
-                common::changed(
+                // Delivery receipts are bookkeeping, not a change to the staff command's subject.
+                crate::cases::core::append_event(
                     &mut tx,
-                    &Actor::system(),
                     cid,
+                    None,
                     "records.integration_accepted",
+                    crate::cases::core::Visibility::Staff,
                     "Record accepted by the external system.",
+                    json!({"delivery_id":id,"external_ref":accepted.external_ref}),
+                )
+                .await?;
+                crate::audit::record(
+                    &mut tx,
+                    None,
+                    "records.integration_accepted",
+                    "case",
+                    Some(cid),
                     json!({"delivery_id":id,"external_ref":accepted.external_ref}),
                 )
                 .await?;

@@ -21,6 +21,10 @@ async fn fixture() -> (AppState, tempfile::TempDir, i64, Actor, Actor, Actor) {
         .await
         .unwrap();
     }
+    sqlx::query("INSERT INTO role_grants(user_id,role,granted_at) VALUES(2,'specialist','2026-10-07')")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
     sqlx::query("INSERT INTO services(id,slug,name,category,module,department,created_at) VALUES(1,'development-application','Development application','Planning','building','Planning',?)").bind(crate::time::now_str()).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO service_versions(id,service_id,version,status,definition_json,created_at) VALUES(1,1,1,'published','{}',?)").bind(crate::time::now_str()).execute(&mut *tx).await.unwrap();
     let c = crate::cases::core::create_case(
@@ -757,5 +761,182 @@ async fn image_redaction_is_opaque_and_has_no_alpha_channel() {
         )
         .await
         .is_err()
+    );
+}
+
+#[tokio::test]
+async fn rejected_uploads_register_nothing() {
+    use crate::web::Path;
+    use axum::extract::State;
+    let (state, _dir, cid, resident, _, _) = fixture().await;
+    let file = crate::pdf::simple_document("Rejected bytes", &[], &[]);
+    for fields in [
+        vec![("visibility", "staff".into())],
+        vec![("requirement_key", "nonexistent".into())],
+        vec![("expected_revision", "0".into())],
+    ] {
+        let form = multipart(&state, &file, &fields).await;
+        assert!(uploads::upload(State(state.clone()), resident.clone(), Path(cid), form).await.is_err());
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM blobs").fetch_one(&state.db).await.unwrap(), 0);
+    }
+}
+
+#[tokio::test]
+async fn applicant_cannot_upload_generated_categories_or_version_generated_documents() {
+    use crate::web::Path;
+    use axum::extract::State;
+    let (state, _dir, cid, resident, _, _) = fixture().await;
+    let file = crate::pdf::simple_document("Applicant bytes", &[], &[]);
+    for category in ["booking_confirmation", "invoice", "credit_note", "certificate", "made_up"] {
+        let form = multipart(&state, &file, &[("category", category.into())]).await;
+        assert!(uploads::upload(State(state.clone()), resident.clone(), Path(cid), form).await.is_err());
+    }
+    let mut tx = crate::db::write_tx(&state.db).await.unwrap();
+    let (invoice, _) = api::attach_generated(
+        &mut tx,
+        &state,
+        cid,
+        "invoice",
+        "Issued invoice",
+        Visibility::Applicant,
+        file.clone(),
+        Some(2),
+    )
+    .await
+    .unwrap();
+    let (provenance, _) = api::attach_generated(
+        &mut tx,
+        &state,
+        cid,
+        "supporting",
+        "Generated attachment",
+        Visibility::Applicant,
+        file.clone(),
+        Some(2),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    for doc in [invoice, provenance] {
+        let form = multipart(&state, &file, &[]).await;
+        let err = uploads::version(State(state.clone()), resident.clone(), Path(doc), form).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::Conflict);
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM document_versions").fetch_one(&state.db).await.unwrap(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn closed_case_cannot_issue_pending_decision_or_create_artifact() {
+    use crate::web::{Json, Path};
+    use axum::extract::State;
+    let (state, _dir, cid, _, specialist, _) = fixture().await;
+    let mut tx = crate::db::write_tx(&state.db).await.unwrap();
+    sqlx::query("INSERT INTO decision_authorities(user_id,decision_type,granted_by,granted_at) VALUES(2,'development_approval',3,'2026-10-07')").execute(&mut *tx).await.unwrap();
+    seed(&mut tx, &state).await.unwrap();
+    let template: i64 =
+        sqlx::query_scalar("SELECT id FROM decision_templates WHERE decision_type='development_approval' LIMIT 1")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    let did:i64=sqlx::query_scalar("INSERT INTO decisions(case_id,decision_type,outcome,reasons,status,prepared_by,template_id,created_at) VALUES(?,'development_approval','approved','Reasons','pending_approval',2,?,'2026-10-07') RETURNING id").bind(cid).bind(template).fetch_one(&mut *tx).await.unwrap();
+    sqlx::query("UPDATE cases SET status='withdrawn',closed_at='2026-10-07T00:00:00Z' WHERE id=?")
+        .bind(cid)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let err = decisions::action(
+        State(state.clone()),
+        specialist,
+        Path((cid, did, "issue".into())),
+        Json(decisions::ActionInput { expected_revision: 1, reason: None }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Conflict);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM decisions WHERE id=?")
+            .bind(did)
+            .fetch_one(&state.db)
+            .await
+            .unwrap(),
+        "pending_approval"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM documents WHERE case_id=?")
+            .bind(cid)
+            .fetch_one(&state.db)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn enormous_pdf_geometry_is_rendered_with_bounded_dimensions() {
+    let (doc, _, _) = printpdf::PdfDocument::new("Huge", printpdf::Mm(700.0), printpdf::Mm(700.0), "Page");
+    let source = doc.save_to_bytes().unwrap();
+    let (bytes, _) = exhibition::redacted(&source, "application/pdf", &[]).await.unwrap();
+    let pdf = printpdf::lopdf::Document::load_mem(&bytes).unwrap();
+    for object in pdf.objects.values() {
+        if let Ok(stream) = object.as_stream()
+            && stream.dict.get(b"Subtype").and_then(|v| v.as_name()).ok() == Some(b"Image".as_slice())
+        {
+            assert!(stream.dict.get(b"Width").unwrap().as_i64().unwrap() <= 1800);
+            assert!(stream.dict.get(b"Height").unwrap().as_i64().unwrap() <= 1800);
+        }
+    }
+    assert!(bytes.len() < crate::storage::MAX_BYTES);
+}
+
+#[tokio::test]
+async fn inactive_authority_does_not_rollback_decision_submission() {
+    use crate::web::{Json, Path};
+    use axum::extract::State;
+    let (state, _dir, cid, _, specialist, _) = fixture().await;
+    let mut tx = crate::db::write_tx(&state.db).await.unwrap();
+    sqlx::query("UPDATE users SET is_active=0 WHERE id=3").execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO decision_authorities(user_id,decision_type,granted_by,granted_at) VALUES(3,'development_approval',2,'2026-10-07')").execute(&mut *tx).await.unwrap();
+    let did:i64=sqlx::query_scalar("INSERT INTO decisions(case_id,decision_type,outcome,reasons,status,prepared_by,created_at) VALUES(?,'development_approval','approved','Reasons','draft',2,'2026-10-07') RETURNING id").bind(cid).fetch_one(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+    decisions::action(
+        State(state.clone()),
+        specialist,
+        Path((cid, did, "submit".into())),
+        Json(decisions::ActionInput { expected_revision: 1, reason: None }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM decisions WHERE id=?")
+            .bind(did)
+            .fetch_one(&state.db)
+            .await
+            .unwrap(),
+        "pending_approval"
+    );
+}
+
+#[tokio::test]
+async fn aggregate_upload_quota_rejects_attachment_without_registering_more_bytes() {
+    use crate::web::Path;
+    use axum::extract::State;
+    let (state, _dir, cid, resident, _, _) = fixture().await;
+    let first = crate::pdf::simple_document("Existing bytes", &[], &[]);
+    let form = multipart(&state, &first, &[]).await;
+    uploads::upload(State(state.clone()), resident.clone(), Path(cid), form).await.unwrap();
+    // Model an account with 100 MB of retained applicant uploads.
+    sqlx::query("UPDATE blobs SET size_bytes=104857600").execute(&state.db).await.unwrap();
+    let extra = crate::pdf::simple_document("Extra bytes", &[], &[]);
+    let form = multipart(&state, &extra, &[]).await;
+    let err = uploads::upload(State(state.clone()), resident, Path(cid), form).await.unwrap_err();
+    assert!(err.fields["file"].contains("100 MB"));
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM blobs").fetch_one(&state.db).await.unwrap(), 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM document_versions").fetch_one(&state.db).await.unwrap(),
+        1
     );
 }

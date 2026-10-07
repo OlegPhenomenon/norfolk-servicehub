@@ -278,6 +278,9 @@ pub async fn action(
         return Err(AppError::not_found());
     }
     let d = load(&mut tx, id, case_id).await?;
+    if !crate::cases::workflow::is_open(&case) {
+        return Err(AppError::conflict("Reopen the request before acting on a decision."));
+    }
     if action == "submit" {
         super::manage(&mut tx, &actor, case_id, &[Role::Specialist, Role::Manager]).await?;
         if !matches!(d.status.as_str(), "draft" | "returned") {
@@ -300,9 +303,9 @@ pub async fn action(
                 .bind(id)
                 .execute(&mut *tx)
                 .await?;
-            let users:Vec<i64>=sqlx::query_scalar("SELECT DISTINCT user_id FROM decision_authorities WHERE decision_type=? AND revoked_at IS NULL AND (service_id IS NULL OR service_id=?)").bind(&d.decision_type).bind(case.service_id).fetch_all(&mut *tx).await?;
+            let users:Vec<i64>=sqlx::query_scalar("SELECT DISTINCT a.user_id FROM decision_authorities a JOIN users u ON u.id=a.user_id WHERE a.decision_type=? AND a.revoked_at IS NULL AND (a.service_id IS NULL OR a.service_id=?) AND u.is_active=1").bind(&d.decision_type).bind(case.service_id).fetch_all(&mut *tx).await?;
             for user in users {
-                let recipient = Actor::load(&mut tx, user, true).await?;
+                let Some(recipient) = Actor::load_recipient(&mut tx, user).await? else { continue };
                 if crate::authz::case_access(&mut tx, &recipient, case_id).await?.is_staff() {
                     crate::notify::send(
                         &mut tx,
@@ -376,6 +379,10 @@ pub(crate) async fn issue_document(
     case: &CaseRow,
     d: Decision,
 ) -> AppResult<()> {
+    let current = crate::cases::core::load_case(tx, case.id).await?;
+    if !crate::cases::workflow::is_open(&current) || d.status != "pending_approval" {
+        return Err(AppError::conflict("An open request and pending approval are required for issuance."));
+    }
     if !authority(tx, actor, case, &d.decision_type).await? {
         return Err(AppError::forbidden_msg("An active authority for this decision type is required."));
     }

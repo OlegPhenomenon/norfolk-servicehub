@@ -214,3 +214,54 @@ pub async fn pricing_lines(
     }
     Ok(None)
 }
+
+/// Cancel operational work in the same transaction as a cancellation-like case closure.
+pub async fn on_case_cancelled(
+    tx: &mut SqliteConnection,
+    state: &AppState,
+    actor: &Actor,
+    case_id: i64,
+    reason: &str,
+) -> AppResult<()> {
+    if let Some(mut b) = sqlx::query_as::<_, model::Booking>(
+        "SELECT * FROM bookings WHERE case_id=? AND status IN ('requested','confirmed')",
+    )
+    .bind(case_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    {
+        super::bookings::record_cancellation(tx, &b, state.now(), actor.db_id(), reason).await?;
+        b.status = "cancelled".into();
+        b.revision += 1;
+        sqlx::query("UPDATE bookings SET status='cancelled',revision=?,updated_at=? WHERE id=?")
+            .bind(b.revision)
+            .bind(time::fmt(state.now()))
+            .bind(b.id)
+            .execute(&mut *tx)
+            .await?;
+        model::revision(tx, &b, actor.db_id(), reason).await?;
+    }
+    sqlx::query("UPDATE occupancies SET active=0 WHERE case_id=? AND active=1 AND end_at>?")
+        .bind(case_id)
+        .bind(time::fmt(state.now()))
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "UPDATE equipment_requests SET status='cancelled' WHERE case_id=? AND status NOT IN ('completed','cancelled')",
+    )
+    .bind(case_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("UPDATE tasks SET status='cancelled',revision=revision+1,completed_at=? WHERE case_id=? AND status NOT IN ('done','cancelled')")
+        .bind(time::fmt(state.now())).bind(case_id).execute(&mut *tx).await?;
+    model::record(
+        tx,
+        actor.db_id(),
+        case_id,
+        "operations.case_cancelled",
+        "Reservations released and outstanding operational tasks cancelled.",
+        serde_json::json!({"reason":reason}),
+    )
+    .await?;
+    model::role_notice(tx, case_id, "finance", "Cancelled request: review settlement", reason).await
+}

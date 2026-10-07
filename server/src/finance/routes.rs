@@ -25,7 +25,14 @@ pub fn routes() -> Router<AppState> {
         .route("/api/admin/prices/{code}/versions", post(price_version))
         .route("/api/cases/{id}/money", get(money))
         .route("/api/cases/{id}/checkout", post(checkout))
-        .route("/api/webhooks/demopay", post(super::webhooks::handler))
+        .route(
+            "/api/webhooks/demopay",
+            post(super::webhooks::handler)
+                .layer::<_, std::convert::Infallible>(axum::extract::DefaultBodyLimit::max(
+                    super::webhooks::MAX_WEBHOOK_BYTES,
+                ))
+                .layer(tower_http::limit::RequestBodyLimitLayer::new(super::webhooks::MAX_WEBHOOK_BYTES)),
+        )
         .route("/api/finance/overview", get(overview))
         .route("/api/finance/statements", post(import_statement))
         .route("/api/finance/unmatched", get(unmatched))

@@ -69,7 +69,7 @@ pub async fn tell(tx: &mut SqliteConnection, case: i64, subject: &str, body: &st
     let recipients:Vec<(i64,String)>=sqlx::query_as("SELECT u.id,u.email FROM users u WHERE u.is_active=1 AND (u.id=? OR u.id IN (SELECT user_id FROM memberships WHERE organisation_id=? AND status='active') OR u.id IN (SELECT user_id FROM case_representatives WHERE case_id=? AND status='active'))")
         .bind(c.applicant_user_id).bind(c.applicant_org_id).bind(case).fetch_all(&mut *tx).await?;
     for (uid, email) in recipients {
-        let recipient = Actor::load(tx, uid, true).await?;
+        let Some(recipient) = Actor::load_recipient(tx, uid).await? else { continue };
         if matches!(
             crate::authz::case_access(tx, &recipient, case).await?,
             crate::authz::CaseAccess::Applicant | crate::authz::CaseAccess::Staff { .. }
@@ -136,7 +136,7 @@ pub async fn finance_notice(tx: &mut SqliteConnection, case: i64, subject: &str)
             .fetch_all(&mut *tx)
             .await?;
     for uid in users {
-        let actor = Actor::load(tx, uid, true).await?;
+        let Some(actor) = Actor::load_recipient(tx, uid).await? else { continue };
         let access = crate::authz::case_access(tx, &actor, case).await?;
         if access.is_staff() {
             notify::send(

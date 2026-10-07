@@ -28,12 +28,15 @@ pub async fn on_case_closed(tx: &mut SqliteConnection, case: &CaseRow) -> AppRes
         .bind(record_class(&case.module)).bind(record_class(&case.module)).fetch_optional(&mut *tx).await?.unwrap_or(7);
     let closed = case.closed_at.as_deref().ok_or_else(|| AppError::conflict("The case is still open."))?;
     let until = time::fmt_date(anniversary(time::local_date(time::parse(closed)?), years)?);
-    let changed = sqlx::query("UPDATE cases SET retention_until = ? WHERE id = ? AND retention_until IS NULL")
-        .bind(&until)
-        .bind(case.id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
+    let changed = sqlx::query(
+        "UPDATE cases SET retention_until = ? WHERE id = ? AND (retention_until IS NULL OR retention_until < ?)",
+    )
+    .bind(&until)
+    .bind(case.id)
+    .bind(&until)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
     if changed > 0 {
         crate::cases::core::append_event(
             tx,
@@ -41,8 +44,8 @@ pub async fn on_case_closed(tx: &mut SqliteConnection, case: &CaseRow) -> AppRes
             None,
             "records.retention_set",
             crate::cases::core::Visibility::Staff,
-            "Retention date set for the closed request.",
-            json!({"retention_until":until}),
+            "Retention date set or extended for the closed request.",
+            json!({"retention_until":until,"previous_retention_until":case.retention_until}),
         )
         .await?;
         crate::audit::record(
@@ -51,17 +54,21 @@ pub async fn on_case_closed(tx: &mut SqliteConnection, case: &CaseRow) -> AppRes
             "records.retention_set",
             "case",
             Some(case.id),
-            json!({"retention_until":until}),
+            json!({"retention_until":until,"previous_retention_until":case.retention_until}),
         )
         .await?;
     }
+    let closure_id: i64 = sqlx::query_scalar("INSERT INTO case_closure_events(case_id,generation,closed_at) VALUES(?,?,?) ON CONFLICT(case_id,generation) DO UPDATE SET case_id=excluded.case_id RETURNING id")
+        .bind(case.id).bind(case.reopened_count).bind(closed).fetch_one(&mut *tx).await?;
+    let retained: String =
+        sqlx::query_scalar("SELECT retention_until FROM cases WHERE id=?").bind(case.id).fetch_one(&mut *tx).await?;
     super::integrations::enqueue(
         tx,
         "content_manager",
         Some(case.id),
         "record.case_closed",
-        case.id,
-        json!({"case":case,"retention_until":until,"demo":true}),
+        closure_id,
+        json!({"case":case,"retention_until":retained,"closure_event_id":closure_id,"demo":true}),
     )
     .await
 }

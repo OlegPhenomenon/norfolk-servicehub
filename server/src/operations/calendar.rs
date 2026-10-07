@@ -205,9 +205,17 @@ pub async fn maintenance(
     let mut tx = db::write_tx(&st.db).await?;
     let resource: i64 =
         sqlx::query_scalar("SELECT id FROM resources WHERE code=?").bind(&v.resource_code).fetch_one(&mut *tx).await?;
-    let conflict:Option<String>=sqlx::query_scalar("SELECT COALESCE(c.number,o.label) FROM occupancies o LEFT JOIN cases c ON c.id=o.case_id WHERE resource_id=? AND active=1 AND start_at<? AND end_at>? LIMIT 1").bind(resource).bind(&end).bind(&start).fetch_optional(&mut *tx).await?;
-    if let Some(c) = conflict {
-        return Err(AppError::conflict(format!("Maintenance conflicts with {c}.")));
+    let conflict:Option<(Option<i64>,String)>=sqlx::query_as("SELECT o.case_id,COALESCE(c.number,o.label) FROM occupancies o LEFT JOIN cases c ON c.id=o.case_id WHERE resource_id=? AND active=1 AND start_at<? AND end_at>? LIMIT 1").bind(resource).bind(&end).bind(&start).fetch_optional(&mut *tx).await?;
+    if let Some((case_id, label)) = conflict {
+        let visible = match case_id {
+            Some(id) => crate::authz::case_access(&mut tx, &a, id).await?.is_staff(),
+            None => true,
+        };
+        return Err(AppError::conflict(if visible {
+            format!("Maintenance conflicts with {label}.")
+        } else {
+            "Maintenance conflicts with an occupied resource.".into()
+        }));
     }
     let id:i64=sqlx::query_scalar("INSERT INTO occupancies(resource_id,source,label,start_at,end_at,created_at) VALUES (?,'maintenance',?,?,?,?) RETURNING id").bind(resource).bind(&v.label).bind(&start).bind(&end).bind(time::now_str()).fetch_one(&mut *tx).await?;
     crate::audit::record(

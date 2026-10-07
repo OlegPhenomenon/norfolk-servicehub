@@ -61,10 +61,10 @@ pub async fn handle_job(state: &AppState, kind: &str, _payload: &Value) -> AppRe
     Ok(())
 }
 async fn notify_staff(tx: &mut sqlx::SqliteConnection, case_id: i64, body: &str) -> AppResult<()> {
-    let ids:Vec<i64>=sqlx::query_scalar("SELECT user_id FROM case_assignments WHERE case_id=? AND role='owner' AND ended_at IS NULL UNION SELECT user_id FROM role_grants WHERE role='manager' AND revoked_at IS NULL").bind(case_id).fetch_all(&mut *tx).await?;
+    let ids:Vec<i64>=sqlx::query_scalar("SELECT a.user_id FROM case_assignments a JOIN users u ON u.id=a.user_id WHERE a.case_id=? AND a.role='owner' AND a.ended_at IS NULL AND u.is_active=1 UNION SELECT g.user_id FROM role_grants g JOIN users u ON u.id=g.user_id WHERE g.role='manager' AND g.revoked_at IS NULL AND u.is_active=1").bind(case_id).fetch_all(&mut *tx).await?;
     for id in ids {
         // Explicit exclusions still apply to notifications.
-        let actor = crate::auth::Actor::load(tx, id, true).await?;
+        let Some(actor) = crate::auth::Actor::load_recipient(tx, id).await? else { continue };
         if crate::authz::case_access(tx, &actor, case_id).await?.is_staff() {
             notify::send(
                 tx,

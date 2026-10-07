@@ -29,6 +29,9 @@ pub struct Notice {
 /// Inserts the in-app row (if `user_id`) and queues `email` / `sms` rows with a `notify.deliver` job each.
 pub async fn send(conn: &mut SqliteConnection, mut notice: Notice) -> AppResult<()> {
     if let Some(case_id) = notice.case_id {
+        if !recipient_access(conn, notice.user_id, case_id).await? {
+            return Ok(());
+        }
         let confidential: Option<Option<String>> =
             sqlx::query_scalar("SELECT number FROM cases WHERE id=? AND confidential=1")
                 .bind(case_id)
@@ -95,6 +98,8 @@ struct Outbound {
     subject: String,
     body: String,
     status: String,
+    user_id: Option<i64>,
+    case_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -118,14 +123,25 @@ pub async fn handle_job(state: &AppState, kind: &str, payload: &Value) -> AppRes
 /// Sends one queued email/SMS through DemoMail. Permanent gateway rejections (422) mark the
 /// notification `failed`; transient errors return `Err` so the job retries.
 async fn deliver(state: &AppState, id: i64) -> AppResult<()> {
-    let n: Option<Outbound> =
-        sqlx::query_as("SELECT id, channel, to_address, subject, body, status FROM notifications WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&state.db)
-            .await?;
+    let n: Option<Outbound> = sqlx::query_as(
+        "SELECT id, channel, to_address, subject, body, status, user_id, case_id FROM notifications WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?;
     let Some(n) = n else { return Ok(()) };
     if n.status != "queued" {
         return Ok(());
+    }
+    if let Some(cid) = n.case_id {
+        let mut tx = crate::db::write_tx(&state.db).await?;
+        if !recipient_access(&mut tx, n.user_id, cid).await? {
+            sqlx::query("UPDATE notifications SET status='failed',subject='Request update',body='',link=NULL,last_error='Recipient no longer has access' WHERE id=?")
+                .bind(id).execute(&mut *tx).await?;
+            tx.commit().await?;
+            return Ok(());
+        }
+        tx.commit().await?;
     }
     let url = format!("{}/mock/mail/send", state.cfg.internal_base_url);
     let res = state
@@ -183,6 +199,20 @@ async fn record_attempt(state: &AppState, id: i64, msg: &str) -> AppResult<()> {
         .execute(&state.db)
         .await?;
     Ok(())
+}
+
+async fn recipient_access(conn: &mut SqliteConnection, user: Option<i64>, case_id: i64) -> AppResult<bool> {
+    if let Some(id) = user {
+        let Some(actor) = crate::auth::Actor::load_recipient(conn, id).await? else { return Ok(false) };
+        return Ok(crate::authz::case_access(conn, &actor, case_id).await? != crate::authz::CaseAccess::None);
+    }
+    // Assisted intake may have offline contacts; organisation contacts require a live member.
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM cases WHERE id=? AND applicant_user_id IS NULL AND applicant_org_id IS NULL)",
+    )
+    .bind(case_id)
+    .fetch_one(conn)
+    .await?)
 }
 
 #[cfg(test)]

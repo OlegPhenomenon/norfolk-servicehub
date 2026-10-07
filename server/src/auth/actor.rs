@@ -73,6 +73,15 @@ impl Actor {
         self.user_id == SYSTEM_USER_ID
     }
 
+    /// Optional notification recipient; inactive or missing accounts do not abort domain work.
+    pub async fn load_recipient(conn: &mut SqliteConnection, id: i64) -> AppResult<Option<Self>> {
+        let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id=? AND is_active=1)")
+            .bind(id)
+            .fetch_one(&mut *conn)
+            .await?;
+        if active { Ok(Some(Self::load(conn, id, true).await?)) } else { Ok(None) }
+    }
+
     /// Value for `*_by` / `actor_user_id` columns: `None` for the system actor.
     pub fn db_id(&self) -> Option<i64> {
         if self.is_system() { None } else { Some(self.user_id) }

@@ -228,7 +228,7 @@ pub async fn read(state: &AppState, blob_id: i64) -> AppResult<(BlobRow, Vec<u8>
     Ok((row, bytes))
 }
 
-/// Blobs with disposed document references and no other live consumer. Metadata stays intact.
+/// Registered blobs without a live consumer (including disposed-only documents). Metadata stays intact.
 /// Discover blob foreign keys so new slices' consumers are protected automatically.
 pub async fn disposed_orphan_hashes(conn: &mut SqliteConnection) -> AppResult<Vec<String>> {
     let tables: Vec<String> =
@@ -253,17 +253,14 @@ pub async fn disposed_orphan_hashes(conn: &mut SqliteConnection) -> AppResult<Ve
             }
         }
     }
-    let query = format!(
-        "SELECT b.sha256 FROM blobs b WHERE EXISTS(SELECT 1 FROM document_versions v JOIN documents d ON d.id=v.document_id WHERE v.blob_id=b.id AND d.disposed_at IS NOT NULL) AND NOT ({})",
-        live.join(" OR ")
-    );
+    let query = format!("SELECT b.sha256 FROM blobs b WHERE NOT ({})", live.join(" OR "));
     Ok(sqlx::query_scalar(&query).fetch_all(conn).await?)
 }
 
-/// Deletes unregistered files and disposed-only document bytes. Files younger than 10 minutes are kept (they may be
+/// Deletes unregistered, registered-but-unreferenced and disposed-only document bytes. Files younger than one hour are kept (they may be
 /// staged for a transaction that has not committed yet). Returns the number of files removed.
 pub async fn gc(state: &AppState) -> AppResult<u64> {
-    gc_older_than(state, Duration::from_secs(600)).await
+    gc_older_than(state, Duration::from_secs(3600)).await
 }
 
 /// [`gc`] with an explicit grace period (`Duration::ZERO` after a full wipe).
@@ -355,11 +352,40 @@ mod tests {
         let (row, bytes) = read(&state, a.id).await.unwrap();
         assert_eq!((row.id, bytes), (a.id, tiny_pdf()));
 
-        // An orphan file (staged, never registered) is removed by gc; registered ones stay.
+        // Orphan files are collected whether or not registration committed.
         let orphan = stage(&state, PNG, "o.png", AllowList::Image).await.unwrap();
         assert_eq!(gc(&state).await.unwrap(), 0, "young files are kept");
-        assert_eq!(gc_older_than(&state, Duration::ZERO).await.unwrap(), 1);
+        assert_eq!(gc_older_than(&state, Duration::ZERO).await.unwrap(), 2);
         assert!(!blob_path(&state.cfg.blobs_dir(), &orphan.sha256).exists());
-        assert!(blob_path(&state.cfg.blobs_dir(), &a.sha256).exists());
+        assert!(!blob_path(&state.cfg.blobs_dir(), &a.sha256).exists());
+    }
+}
+
+#[cfg(test)]
+mod orphan_tests {
+    use super::*;
+    #[tokio::test]
+    async fn registered_unreferenced_blob_is_collected_after_one_hour() {
+        let (state, _dir) = crate::state::test_support::test_state().await;
+        let blob = put(&state, b"%PDF-1.4\nOrphan\n%%EOF", "orphan.pdf", AllowList::Docs, None).await.unwrap();
+        assert_eq!(gc(&state).await.unwrap(), 0);
+        let path = blob_path(&state.cfg.blobs_dir(), &blob.sha256);
+        let old = SystemTime::now() - Duration::from_secs(3601);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        assert_eq!(gc(&state).await.unwrap(), 1);
+        assert!(!path.exists());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM blobs WHERE id=?")
+                .bind(blob.id)
+                .fetch_one(&state.db)
+                .await
+                .unwrap(),
+            1
+        );
     }
 }

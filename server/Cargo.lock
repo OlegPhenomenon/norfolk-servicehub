@@ -2078,6 +2078,7 @@ dependencies = [
  "hex",
  "hmac",
  "infer",
+ "libc",
  "printpdf",
  "qrcode",
  "rand 0.8.8",

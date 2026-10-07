@@ -23,7 +23,11 @@ pub struct Decision {
 }
 
 pub async fn ready(tx: &mut SqliteConnection, case: i64, now: &str) -> AppResult<bool> {
-    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM bookings WHERE case_id=? AND end_at<=? AND status IN ('confirmed','completed')) AND EXISTS(SELECT 1 FROM tasks WHERE case_id=? AND kind='venue_inspection' AND status='done') AND NOT EXISTS(SELECT 1 FROM tasks WHERE case_id=? AND kind='venue_inspection' AND status NOT IN ('done','cancelled'))").bind(case).bind(now).bind(case).bind(case).fetch_one(&mut *tx).await?)
+    let unused_cancelled: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM bookings b JOIN booking_cancellations x ON x.booking_id=b.id WHERE b.case_id=? AND b.status='cancelled' AND x.unused=1)").bind(case).fetch_one(&mut *tx).await?;
+    if unused_cancelled {
+        return Ok(true);
+    }
+    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM bookings WHERE case_id=? AND end_at<=? AND status IN ('confirmed','completed','cancelled')) AND EXISTS(SELECT 1 FROM tasks WHERE case_id=? AND kind='venue_inspection' AND status='done') AND NOT EXISTS(SELECT 1 FROM tasks WHERE case_id=? AND kind='venue_inspection' AND status NOT IN ('done','cancelled'))").bind(case).bind(now).bind(case).bind(case).fetch_one(&mut *tx).await?)
 }
 /// Unique decision per deposit line plus BEGIN IMMEDIATE reserves the refund atomically.
 pub async fn decide(

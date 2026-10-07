@@ -402,33 +402,44 @@ struct NotificationList {
     unread_count: i64,
 }
 
+fn notification_scope(actor: &Actor) -> crate::authz::ScopeSql {
+    let mut scope = crate::authz::case_scope_sql(actor);
+    scope.sql = format!("(case_id IS NULL OR case_id IN (SELECT c.id FROM cases c WHERE {}))", scope.sql);
+    scope
+}
+
 async fn list_notifications(State(st): State<AppState>, actor: Actor) -> AppResult<Json<NotificationList>> {
     let mut conn = st.db.acquire().await?;
-    let items: Vec<NotificationItem> = sqlx::query_as(
-        "SELECT id, subject, body, link, case_id, created_at, read_at FROM notifications \
-         WHERE user_id = ? AND channel = 'in_app' ORDER BY id DESC LIMIT 50",
-    )
-    .bind(actor.user_id)
-    .fetch_all(&mut *conn)
-    .await?;
-    let unread_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM notifications WHERE user_id = ? AND channel = 'in_app' AND read_at IS NULL",
-    )
-    .bind(actor.user_id)
-    .fetch_one(&mut *conn)
-    .await?;
+    let scope = notification_scope(&actor);
+    let sql = format!(
+        "SELECT id,subject,body,link,case_id,created_at,read_at FROM notifications WHERE {} AND user_id=? AND channel='in_app' ORDER BY id DESC LIMIT 50",
+        scope.sql
+    );
+    let items: Vec<NotificationItem> =
+        crate::db::bind_all_as(sqlx::query_as(&sql), &scope.binds).bind(actor.user_id).fetch_all(&mut *conn).await?;
+    let sql = format!(
+        "SELECT COUNT(*) FROM notifications WHERE {} AND user_id=? AND channel='in_app' AND read_at IS NULL",
+        scope.sql
+    );
+    let unread_count: i64 = crate::db::bind_all_scalar(sqlx::query_scalar(&sql), &scope.binds)
+        .bind(actor.user_id)
+        .fetch_one(&mut *conn)
+        .await?;
     Ok(Json(NotificationList { items, unread_count }))
 }
 
 async fn read_notification(State(st): State<AppState>, actor: Actor, Path(id): Path<i64>) -> AppResult<StatusCode> {
     let mut tx = write_tx(&st.db).await?;
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM notifications WHERE id = ? AND user_id = ? AND channel = 'in_app')",
-    )
-    .bind(id)
-    .bind(actor.user_id)
-    .fetch_one(&mut *tx)
-    .await?;
+    let scope = notification_scope(&actor);
+    let sql = format!(
+        "SELECT EXISTS(SELECT 1 FROM notifications WHERE {} AND id=? AND user_id=? AND channel='in_app')",
+        scope.sql
+    );
+    let exists: bool = crate::db::bind_all_scalar(sqlx::query_scalar(&sql), &scope.binds)
+        .bind(id)
+        .bind(actor.user_id)
+        .fetch_one(&mut *tx)
+        .await?;
     if !exists {
         return Err(AppError::not_found());
     }
@@ -443,13 +454,14 @@ async fn read_notification(State(st): State<AppState>, actor: Actor, Path(id): P
 
 async fn read_all_notifications(State(st): State<AppState>, actor: Actor) -> AppResult<StatusCode> {
     let mut tx = write_tx(&st.db).await?;
-    sqlx::query(
-        "UPDATE notifications SET status = 'read', read_at = ? WHERE user_id = ? AND channel = 'in_app' AND read_at IS NULL",
-    )
-    .bind(time::fmt(st.now()))
-    .bind(actor.user_id)
-    .execute(&mut *tx)
-    .await?;
+    let scope = notification_scope(&actor);
+    let sql = format!(
+        "UPDATE notifications SET status='read',read_at=? WHERE user_id=? AND channel='in_app' AND read_at IS NULL AND {}",
+        scope.sql
+    );
+    crate::db::bind_all(sqlx::query(&sql).bind(time::fmt(st.now())).bind(actor.user_id), &scope.binds)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }

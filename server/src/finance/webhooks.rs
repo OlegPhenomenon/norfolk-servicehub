@@ -197,11 +197,12 @@ pub async fn process(tx: &mut SqliteConnection, e: &Event, body: &str) -> AppRes
 }
 pub async fn handler(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> AppResult<Response> {
     let header = headers.get("DemoPay-Signature").and_then(|v| v.to_str().ok()).unwrap_or_default();
+    let _permit = acquire(&WEBHOOKS)?;
+    if body.len() > MAX_WEBHOOK_BYTES {
+        return Ok(StatusCode::PAYLOAD_TOO_LARGE.into_response());
+    }
     let text = String::from_utf8_lossy(&body);
-    let mut tx = db::write_tx(&state.db).await?;
     if !verify(&state.cfg.webhook_secret, header, &body, state.now().timestamp()) {
-        sqlx::query("INSERT INTO provider_events(event_id,type,payload_json,signature_valid,received_at,result) VALUES(?,'invalid',?,0,?,'rejected') ON CONFLICT(event_id) DO NOTHING").bind(format!("invalid:{}",crate::idempotency::request_hash(format!("{header}.{text}").as_bytes()))).bind(text.as_ref()).bind(time::fmt(state.now())).execute(&mut *tx).await?;
-        tx.commit().await?;
         return Ok((
             StatusCode::BAD_REQUEST,
             axum::Json(json!({"error":{"code":"validation","message":"Invalid DemoPay signature."}})),
@@ -210,6 +211,7 @@ pub async fn handler(State(state): State<AppState>, headers: HeaderMap, body: By
     }
     let e: Event =
         serde_json::from_slice(&body).map_err(|_| AppError::validation_msg("Invalid payment event JSON."))?;
+    let mut tx = db::write_tx(&state.db).await?;
     if let Some((case, payment)) = process(&mut tx, &e, &text).await? {
         if let Some(p) = payment {
             crate::records::api::on_payment_confirmed(&mut tx, p).await?;
@@ -218,4 +220,22 @@ pub async fn handler(State(state): State<AppState>, headers: HeaderMap, body: By
     }
     tx.commit().await?;
     Ok(StatusCode::OK.into_response())
+}
+
+pub const MAX_WEBHOOK_BYTES: usize = 16 * 1024;
+static WEBHOOKS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+fn acquire(semaphore: &tokio::sync::Semaphore) -> AppResult<tokio::sync::SemaphorePermit<'_>> {
+    semaphore.try_acquire().map_err(|_| AppError::rate_limited())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn webhook_concurrency_is_bounded_before_writer() {
+        let semaphore = tokio::sync::Semaphore::new(2);
+        let permits = semaphore.acquire_many(2).await.unwrap();
+        assert_eq!(acquire(&semaphore).unwrap_err().code, crate::error::ErrorCode::RateLimited);
+        drop(permits);
+    }
 }

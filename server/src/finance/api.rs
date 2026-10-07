@@ -352,10 +352,7 @@ pub(super) async fn reprice_entries(
     mut new_lines: Vec<QuoteLine>,
     note: &str,
 ) -> AppResult<Vec<i64>> {
-    let consumed:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM deposit_decisions WHERE case_id=?) OR EXISTS(SELECT 1 FROM bookings WHERE case_id=? AND (status='completed' OR end_at<=?)) OR EXISTS(SELECT 1 FROM equipment_usage u JOIN equipment_requests r ON r.id=u.equipment_request_id WHERE r.case_id=? AND u.approved_at IS NOT NULL)").bind(case_id).bind(case_id).bind(time::fmt(state.now())).bind(case_id).fetch_one(&mut *tx).await?;
-    if consumed {
-        return Err(AppError::conflict("Consumed hire charges and decided bonds cannot be repriced."));
-    }
+    require_unconsumed(tx, state, case_id).await?;
     let old: Vec<i64> =
         sqlx::query_scalar("SELECT id FROM invoices WHERE case_id=? AND kind='invoice' AND status='issued'")
             .bind(case_id)
@@ -427,4 +424,12 @@ pub(super) async fn reprice_entries(
     }
     core::bump_revision(tx, case_id, None).await?;
     Ok(issued_ids)
+}
+
+pub async fn require_unconsumed(tx: &mut SqliteConnection, state: &AppState, case_id: i64) -> AppResult<()> {
+    let consumed:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM deposit_decisions WHERE case_id=?) OR EXISTS(SELECT 1 FROM bookings WHERE case_id=? AND (status='completed' OR end_at<=?)) OR EXISTS(SELECT 1 FROM equipment_usage u JOIN equipment_requests r ON r.id=u.equipment_request_id WHERE r.case_id=? AND u.approved_at IS NOT NULL)").bind(case_id).bind(case_id).bind(time::fmt(state.now())).bind(case_id).fetch_one(&mut *tx).await?;
+    if consumed {
+        return Err(AppError::conflict("Consumed hire charges and decided bonds cannot be repriced."));
+    }
+    Ok(())
 }

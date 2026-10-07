@@ -333,10 +333,26 @@ impl Drop for WorkDir {
 async fn command(name: &str, args: &[String]) -> AppResult<std::process::Output> {
     let mut c = tokio::process::Command::new(name);
     c.args(args).kill_on_drop(true);
+    #[cfg(unix)]
+    unsafe {
+        c.pre_exec(|| {
+            let mut budgets = vec![(libc::RLIMIT_FSIZE, 64 * 1024 * 1024), (libc::RLIMIT_CPU, 30)];
+            // macOS rejects memory rlimits; dimensions/pixels and the semaphore apply everywhere.
+            #[cfg(target_os = "linux")]
+            budgets.push((libc::RLIMIT_AS, 768 * 1024 * 1024));
+            for (resource, bytes) in budgets.drain(..) {
+                let limit = libc::rlimit { rlim_cur: bytes, rlim_max: bytes };
+                if libc::setrlimit(resource, &limit) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
     let output = tokio::time::timeout(Duration::from_secs(30), c.output())
         .await
         .map_err(|_| AppError::field("file", "Page rendering exceeded 30 seconds."))?
-        .map_err(|_| AppError::field("file", format!("{name} is required to render exhibition PDFs.")))?;
+        .map_err(|e| AppError::field("file", format!("{name} is required to render exhibition PDFs: {e}")))?;
     if !output.status.success() {
         return Err(AppError::field("file", "The file could not be rendered safely."));
     }
@@ -354,12 +370,31 @@ async fn render_pages(source: &FsPath, dir: &FsPath, preview: Option<u32>) -> Ap
     if preview.is_some_and(|p| p == 0 || p > count) {
         return Err(AppError::not_found());
     }
-    let mut args = vec!["-r".into(), "110".into(), "-png".into()];
-    if let Some(p) = preview {
-        args.extend(["-f".into(), p.to_string(), "-l".into(), p.to_string()]);
+    let mut total_pixels = 0u64;
+    let mut total_bytes = 0u64;
+    for page in preview.map(|p| p..=p).unwrap_or(1..=count) {
+        let args = vec![
+            "-scale-to".into(),
+            "1800".into(),
+            "-png".into(),
+            "-singlefile".into(),
+            "-f".into(),
+            page.to_string(),
+            "-l".into(),
+            page.to_string(),
+            source.display().to_string(),
+            dir.join(format!("page-{page}")).display().to_string(),
+        ];
+        command("pdftoppm", &args).await?;
+        let output = dir.join(format!("page-{page}.png"));
+        let (width, height) =
+            image::image_dimensions(&output).map_err(|_| AppError::field("file", "Invalid rendered page."))?;
+        total_pixels += u64::from(width) * u64::from(height);
+        total_bytes += std::fs::metadata(&output)?.len();
+        if width > 1800 || height > 1800 || total_pixels > 40_000_000 || total_bytes > 40 * 1024 * 1024 {
+            return Err(AppError::field("file", "PDF exceeds the rendering budget."));
+        }
     }
-    args.extend([source.display().to_string(), dir.join("page").display().to_string()]);
-    command("pdftoppm", &args).await?;
     let mut pages: Vec<_> = std::fs::read_dir(dir)?
         .filter_map(Result::ok)
         .map(|e| e.path())
@@ -391,17 +426,32 @@ fn burn(img: &mut image::RgbImage, rects: &[Rect], page: u32) {
         }
     }
 }
-fn images_pdf(pages: Vec<image::RgbImage>) -> AppResult<Vec<u8>> {
+fn images_pdf(pages: Vec<PathBuf>, rects: &[Rect]) -> AppResult<Vec<u8>> {
     use printpdf::{ColorBits, ColorSpace, Image, ImageTransform, ImageXObject, Mm, PdfDocument, Px};
-    let first = pages.first().ok_or_else(|| AppError::field("file", "No pages were rendered."))?;
+    let first =
+        decode(&std::fs::read(pages.first().ok_or_else(|| AppError::field("file", "No pages were rendered."))?)?)?;
     let (doc, p, l) = PdfDocument::new(
         "",
         Mm(first.width() as f32 * 25.4 / 110.0),
         Mm(first.height() as f32 * 25.4 / 110.0),
         "Raster",
     );
-    for (i, img) in pages.into_iter().enumerate() {
+    drop(first);
+    let mut encoded_bytes = 0usize;
+    for (i, path) in pages.into_iter().enumerate() {
+        let mut img = decode(&std::fs::read(&path)?)?;
+        burn(&mut img, rects, i as u32 + 1);
         let (w, h) = img.dimensions();
+        let mut encoded = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, 95)
+            .encode_image(&img)
+            .map_err(|_| AppError::field("file", "Could not encode the rendered page."))?;
+        drop(img);
+        std::fs::remove_file(path)?;
+        encoded_bytes += encoded.len();
+        if encoded_bytes > storage::MAX_BYTES {
+            return Err(AppError::field("file", "Public PDF exceeds the output budget."));
+        }
         let (p, l) = if i == 0 {
             (p, l)
         } else {
@@ -413,8 +463,8 @@ fn images_pdf(pages: Vec<image::RgbImage>) -> AppResult<Vec<u8>> {
             color_space: ColorSpace::Rgb,
             bits_per_component: ColorBits::Bit8,
             interpolate: false,
-            image_data: img.into_raw(),
-            image_filter: None,
+            image_data: encoded,
+            image_filter: Some(printpdf::ImageFilter::DCT),
             clipping_bbox: None,
             smask: None,
         })
@@ -436,6 +486,7 @@ fn images_pdf(pages: Vec<image::RgbImage>) -> AppResult<Vec<u8>> {
     Ok(out)
 }
 pub(crate) async fn redacted(source: &[u8], mime: &str, rects: &[Rect]) -> AppResult<(Vec<u8>, &'static str)> {
+    let _permit = RENDERS.acquire().await.map_err(|_| AppError::internal("Rendering stopped"))?;
     validate_rectangles(rects)?;
     let dir = WorkDir::new()?;
     if mime == "application/pdf" {
@@ -446,17 +497,9 @@ pub(crate) async fn redacted(source: &[u8], mime: &str, rects: &[Rect]) -> AppRe
             return Err(AppError::field("redactions", "A rectangle refers to a page that does not exist."));
         }
         let rects = rects.to_vec();
-        let bytes = tokio::task::spawn_blocking(move || {
-            let mut out = vec![];
-            for (i, p) in pages.iter().enumerate() {
-                let mut img = decode(&std::fs::read(p)?)?;
-                burn(&mut img, &rects, i as u32 + 1);
-                out.push(img);
-            }
-            images_pdf(out)
-        })
-        .await
-        .map_err(|e| AppError::internal(e.to_string()))??;
+        let bytes = tokio::task::spawn_blocking(move || images_pdf(pages, &rects))
+            .await
+            .map_err(|e| AppError::internal(e.to_string()))??;
         Ok((bytes, "public-copy.pdf"))
     } else {
         if rects.iter().any(|r| r.page != 1) {
@@ -505,6 +548,7 @@ pub async fn preview(
     let (_, _, _, blob, _) = super::uploads::version_access(&mut c, &actor, i.source_document_version_id).await?;
     drop(c);
     let (row, bytes) = storage::read(&state, blob).await?;
+    let _permit = RENDERS.acquire().await.map_err(|_| AppError::internal("Rendering stopped"))?;
     let png = if row.mime == "application/pdf" {
         let dir = WorkDir::new()?;
         let src = dir.0.join("source.pdf");
@@ -749,3 +793,5 @@ pub async fn consider(
     tx.commit().await?;
     Ok(Json(json!({"id":sid})))
 }
+
+static RENDERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);

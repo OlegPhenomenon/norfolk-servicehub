@@ -22,7 +22,7 @@ async fn fixture() -> (crate::state::AppState, tempfile::TempDir) {
         .await
         .unwrap();
     sqlx::query("INSERT INTO services(id,slug,name,category,module,department,created_at) VALUES (1,'rawson-hall-hire','Hall','Venues','venue_booking','Customer Care','2026-10-07')").execute(&mut *tx).await.unwrap();
-    sqlx::query("INSERT INTO service_versions(id,service_id,version,status,definition_json,created_at) VALUES (1,1,1,'published','{}','2026-10-07')").execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO service_versions(id,service_id,version,status,definition_json,created_at) VALUES (1,1,1,'published','{\"summary\":\"Test\",\"outcome\":\"Test\",\"workflow\":{\"steps\":[]}}' ,'2026-10-07')").execute(&mut *tx).await.unwrap();
     tx.commit().await.unwrap();
     (st, dir)
 }
@@ -248,4 +248,220 @@ async fn public_road_projection_never_contains_reporter_text_or_names() {
     assert!(row["location"]["description"].is_null());
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM resources").fetch_one(&mut *tx).await.unwrap();
     assert_eq!(count, 6);
+}
+
+#[tokio::test]
+async fn confirmation_requires_workflow_and_issued_hire_and_bond_coverage() {
+    use crate::{
+        auth::StaffActor,
+        web::{Json, Path},
+    };
+    use axum::extract::State;
+    let (st, _dir) = fixture().await;
+    let mut tx = db::write_tx(&st.db).await.unwrap();
+    crate::finance::seed(&mut tx, &st).await.unwrap();
+    let id = make_case(&mut tx, "rawson-main").await;
+    tx.commit().await.unwrap();
+    let mut intake = worker();
+    intake.roles.push(RoleGrant { role: Role::Intake, scope_service_id: None });
+    let input = || serde_json::from_value(json!({"expected_revision":1})).unwrap();
+    let err =
+        bookings::confirm(State(st.clone()), StaffActor(intake.clone()), Path(id), Json(input())).await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::Conflict);
+    sqlx::query("UPDATE cases SET current_step='confirm' WHERE id=?").bind(id).execute(&st.db).await.unwrap();
+    let err =
+        bookings::confirm(State(st.clone()), StaffActor(intake.clone()), Path(id), Json(input())).await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::Conflict);
+    assert!(err.message.contains("Issued invoices"));
+    let mut tx = db::write_tx(&st.db).await.unwrap();
+    let b = model::booking(&mut tx, id).await.unwrap();
+    let u = model::unit(&mut tx, "rawson-main").await.unwrap();
+    let (date, mut lines) = hooks::venue_lines(&mut tx, &u, &b.start_at, &b.end_at).await.unwrap();
+    lines.retain(|l| l.kind != "deposit");
+    crate::finance::api::issue_invoice(&mut tx, &st, &intake, id, "invoice", date, lines, None).await.unwrap();
+    tx.commit().await.unwrap();
+    let err = bookings::confirm(State(st.clone()), StaffActor(intake), Path(id), Json(input())).await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::Conflict);
+    assert!(err.message.contains("Issued invoices"));
+    let mut conn = st.db.acquire().await.unwrap();
+    assert_eq!(model::booking(&mut conn, id).await.unwrap().status, "requested");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM occupancies WHERE case_id=?")
+            .bind(id)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn reschedule_rejects_consumed_original_booking_before_mutation() {
+    let (st, _dir) = fixture().await;
+    let mut tx = db::write_tx(&st.db).await.unwrap();
+    crate::finance::seed(&mut tx, &st).await.unwrap();
+    let id = make_case(&mut tx, "rawson-main").await;
+    bookings::confirm_allocation(&mut tx, id, 1, None, "Original").await.unwrap();
+    sqlx::query("UPDATE bookings SET start_at='2026-10-01T01:00:00Z',end_at='2026-10-01T03:00:00Z' WHERE case_id=?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let mut intake = worker();
+    intake.roles.push(RoleGrant { role: Role::Intake, scope_service_id: None });
+    let input=serde_json::from_value(json!({"expected_revision":2,"unit_code":"rawson-whole","start":"2030-11-15T06:00:00Z","end":"2030-11-15T11:00:00Z","reason":"Subsequent hire"})).unwrap();
+    let err = bookings::reschedule(
+        axum::extract::State(st.clone()),
+        crate::auth::StaffActor(intake),
+        crate::web::Path(id),
+        crate::web::Json(input),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Conflict);
+    assert!(err.message.contains("Consumed"));
+    let mut c = st.db.acquire().await.unwrap();
+    let b = model::booking(&mut c, id).await.unwrap();
+    assert_eq!(b.revision, 2);
+    assert_eq!(b.end_at, "2026-10-01T03:00:00Z");
+}
+
+#[tokio::test]
+async fn withdrawn_case_releases_booking_and_equipment_and_cancels_open_tasks() {
+    let (st, _dir) = fixture().await;
+    let mut tx = db::write_tx(&st.db).await.unwrap();
+    let id = make_case(&mut tx, "rawson-main").await;
+    bookings::confirm_allocation(&mut tx, id, 1, None, "Private booking").await.unwrap();
+    sqlx::query("INSERT INTO tasks(case_id,kind,title,instructions,status,created_at) VALUES(?,'venue_inspection','Inspect','Inspect','open','2026-10-07')").bind(id).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO equipment_requests(case_id,description,created_at) VALUES(?,'Plant','2026-10-07')")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    crate::cases::workflow::close(&mut tx, &st, &worker(), id, "withdrawn", "Applicant withdrew").await.unwrap();
+    assert_eq!(model::booking(&mut tx, id).await.unwrap().status, "cancelled");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM occupancies WHERE case_id=? AND active=1")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM tasks WHERE case_id=?")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap(),
+        "cancelled"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM equipment_requests WHERE case_id=?")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap(),
+        "cancelled"
+    );
+}
+
+#[tokio::test]
+async fn maintenance_conflict_hides_case_number_and_label_without_access() {
+    let (st, _dir) = fixture().await;
+    let mut tx = db::write_tx(&st.db).await.unwrap();
+    let id = make_case(&mut tx, "rawson-main").await;
+    bookings::confirm_allocation(&mut tx, id, 1, None, "Secret case title").await.unwrap();
+    tx.commit().await.unwrap();
+    let mut admin = worker();
+    admin.roles = vec![RoleGrant { role: Role::Sysadmin, scope_service_id: None }];
+    let input=serde_json::from_value(json!({"resource_code":"RAWSON_MAIN","start":"2030-11-14T06:00:00Z","end":"2030-11-14T11:00:00Z","label":"Maintenance"})).unwrap();
+    let err = calendar::maintenance(axum::extract::State(st), crate::auth::StaffActor(admin), crate::web::Json(input))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Conflict);
+    assert!(!err.message.contains("NSH-"));
+    assert!(!err.message.contains("Secret"));
+}
+
+#[tokio::test]
+async fn confirmation_download_requires_recorded_issuance_version() {
+    let (st, _dir) = fixture().await;
+    let mut tx = db::write_tx(&st.db).await.unwrap();
+    let cid = make_case(&mut tx, "rawson-main").await;
+    let b = model::booking(&mut tx, cid).await.unwrap();
+    let (_, version) = crate::documents::api::attach_generated(
+        &mut tx,
+        &st,
+        cid,
+        "booking_confirmation",
+        "Unrecorded confirmation",
+        core::Visibility::Applicant,
+        crate::pdf::simple_document("Unrecorded", &[], &[]),
+        None,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let mut applicant = worker();
+    applicant.user_id = 1;
+    applicant.kind = UserKind::Resident;
+    applicant.roles.clear();
+    assert!(
+        bookings::download_confirmation(
+            axum::extract::State(st.clone()),
+            applicant.clone(),
+            crate::web::Path((cid, version))
+        )
+        .await
+        .is_err()
+    );
+    sqlx::query(
+        "INSERT INTO booking_confirmations(case_id,booking_id,booking_revision,document_version_id) VALUES(?,?,?,?)",
+    )
+    .bind(cid)
+    .bind(b.id)
+    .bind(b.revision)
+    .bind(version)
+    .execute(&st.db)
+    .await
+    .unwrap();
+    assert!(
+        bookings::download_confirmation(axum::extract::State(st), applicant, crate::web::Path((cid, version)))
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn zero_rated_booking_still_requires_an_issued_invoice() {
+    let (st, _dir) = fixture().await;
+    let mut tx = db::write_tx(&st.db).await.unwrap();
+    crate::finance::seed(&mut tx, &st).await.unwrap();
+    sqlx::query("UPDATE price_versions SET amount_cents=0").execute(&mut *tx).await.unwrap();
+    let id = make_case(&mut tx, "rawson-main").await;
+    sqlx::query("UPDATE cases SET current_step='confirm' WHERE id=?").bind(id).execute(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+    let mut intake = worker();
+    intake.roles.push(RoleGrant { role: Role::Intake, scope_service_id: None });
+    let input = serde_json::from_value(json!({"expected_revision":1})).unwrap();
+    let err = bookings::confirm(
+        axum::extract::State(st.clone()),
+        crate::auth::StaffActor(intake),
+        crate::web::Path(id),
+        crate::web::Json(input),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Conflict);
+    assert!(err.message.contains("Issued invoices"));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM bookings WHERE case_id=?")
+            .bind(id)
+            .fetch_one(&st.db)
+            .await
+            .unwrap(),
+        "requested"
+    );
 }

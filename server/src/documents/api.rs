@@ -32,7 +32,9 @@ pub async fn attach_generated(
 ) -> AppResult<(DocumentId, DocumentVersionId)> {
     let staged = storage::stage(state, &pdf_bytes, "document.pdf", storage::AllowList::Docs).await?;
     let blob = storage::register(tx, staged, actor).await?;
-    insert(tx, case_id, category, title, visibility, None, blob.id, actor).await
+    let result = insert(tx, case_id, category, title, visibility, None, blob.id, actor).await?;
+    sqlx::query("UPDATE documents SET generated=1 WHERE id=?").bind(result.0).execute(tx).await?;
+    Ok(result)
 }
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn insert(

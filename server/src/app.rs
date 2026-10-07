@@ -140,7 +140,8 @@ async fn security_headers(req: Request, next: Next) -> Response {
 /// Per-IP token bucket for `/api/auth/**`, `/api/public/**` POSTs and `/api/demo/login`.
 async fn rate_limit_middleware(State(st): State<AppState>, req: Request, next: Next) -> Response {
     let path = req.uri().path();
-    let limited = path.starts_with("/api/auth/")
+    let limited = path == "/api/webhooks/demopay"
+        || path.starts_with("/api/auth/")
         || path == "/api/demo/login"
         || (path.starts_with("/api/public/") && req.method() == Method::POST);
     if limited {

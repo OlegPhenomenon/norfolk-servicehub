@@ -176,7 +176,7 @@ fn signature_and_tolerance() {
     assert!(!webhooks::verify("secret", &format!("{header},t=1000"), body.as_bytes(), 1000));
 }
 #[tokio::test]
-async fn invalid_signature_stored_but_no_money_or_poisoning() {
+async fn invalid_signature_stores_nothing_and_cannot_poison_money() {
     let (s, _dir, a, c) = fixture().await;
     let mut tx = db::write_tx(&s.db).await.unwrap();
     let i = invoice(&mut tx, &a, c, &[line("fee", 100)]).await;
@@ -198,7 +198,7 @@ async fn invalid_signature_stored_but_no_money_or_poisoning() {
         .fetch_one(&mut *tx)
         .await
         .unwrap();
-    assert_eq!(invalid, 1);
+    assert_eq!(invalid, 0);
     let event: webhooks::Event = serde_json::from_str(&body).unwrap();
     assert!(webhooks::process(&mut tx, &event, &body).await.unwrap().is_some());
     balanced(&mut tx).await;
@@ -777,4 +777,76 @@ async fn late_provider_receipt_after_counter_settlement_becomes_credit() {
     assert_eq!(credit, 1000);
     assert!(api::case_settled(&mut tx, c).await.unwrap());
     balanced(&mut tx).await;
+}
+
+#[tokio::test]
+async fn cancelled_unused_paid_booking_bond_refunds_without_inspection() {
+    let (s, _dir, a, c) = fixture().await;
+    let mut tx = db::write_tx(&s.db).await.unwrap();
+    let i = invoice(&mut tx, &a, c, &[line("deposit", 25000)]).await;
+    payments::receive(&mut tx, &a, "bank_transfer", "cancelled-bond", 25000, Some(c), Some(i), None, None)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO bookable_units(id,code,name,venue) VALUES(1,'test','Test hall','Test')")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let booking:i64=sqlx::query_scalar("INSERT INTO bookings(case_id,unit_id,status,start_at,end_at,created_at,updated_at) VALUES(?,1,'cancelled','2030-10-01T01:00:00Z','2030-10-01T03:00:00Z','2026-10-01','2026-10-01') RETURNING id").bind(c).fetch_one(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO booking_cancellations(booking_id,cancelled_at,unused,reason) VALUES(?,'2026-10-07',1,'Unused hire cancelled')").bind(booking).execute(&mut *tx).await.unwrap();
+    assert!(deposits::ready(&mut tx, c, &time::fmt(s.now())).await.unwrap());
+    assert_eq!(views::queue(&mut tx, &a, "deposits", &time::fmt(s.now())).await.unwrap().len(), 1);
+    let lid = sqlx::query_scalar("SELECT id FROM invoice_lines WHERE invoice_id=?")
+        .bind(i)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    let decision = deposits::Decision {
+        invoice_line_id: lid,
+        refund_cents: 25000,
+        retain_items: vec![],
+        reason: "Full unused bond return".into(),
+    };
+    let d = deposits::decide(&mut tx, &s, &a, c, &decision).await.unwrap();
+    assert!(deposits::decide(&mut tx, &s, &a, c, &decision).await.is_err());
+    assert!(!api::deposits_settled(&mut tx, c).await.unwrap());
+    let r = sqlx::query_scalar("SELECT id FROM refunds WHERE deposit_decision_id=?")
+        .bind(d)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    deposits::complete(&mut tx, &a, r, Some("Cancellation return")).await.unwrap();
+    assert!(api::deposits_settled(&mut tx, c).await.unwrap());
+    balanced(&mut tx).await;
+}
+
+#[tokio::test]
+async fn webhook_rejections_are_size_rate_and_concurrency_limited_without_storage() {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+    let (s, _dir) = crate::state::test_support::test_state().await;
+    let app = crate::app::build_router(s.clone());
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/api/webhooks/demopay")
+                .body(Body::from(vec![b'x'; webhooks::MAX_WEBHOOK_BYTES + 1]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let mut limited = false;
+    for _ in 0..35 {
+        let response = app
+            .clone()
+            .oneshot(Request::post("/api/webhooks/demopay").body(Body::from("unsigned")).unwrap())
+            .await
+            .unwrap();
+        limited |= response.status() == StatusCode::TOO_MANY_REQUESTS;
+    }
+    assert!(limited);
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM provider_events").fetch_one(&s.db).await.unwrap(), 0);
 }

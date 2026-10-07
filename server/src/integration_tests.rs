@@ -404,3 +404,138 @@ async fn seeded_module_handlers_and_task_kinds_reach_their_owner_implementations
     assert_eq!(handlers.len(), 7);
     tx.rollback().await.unwrap();
 }
+
+async fn authenticated_request(
+    state: &AppState,
+    credentials: &(String, String),
+    method: &str,
+    path: &str,
+) -> (u16, serde_json::Value) {
+    use tower::ServiceExt;
+    let req = axum::http::Request::builder()
+        .method(method)
+        .uri(path)
+        .header("Cookie", format!("nsh_session={}", credentials.0))
+        .header("X-CSRF-Token", &credentials.1)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let response = crate::app::build_router(state.clone()).oneshot(req).await.unwrap();
+    let status = response.status().as_u16();
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    (status, serde_json::from_slice(&body).unwrap_or_default())
+}
+
+#[tokio::test]
+async fn revoked_org_notifications_recheck_enqueue_delivery_lists_counts_and_reads() {
+    let (state, _dir) = fixture().await;
+    let mut tx = write_tx(&state.db).await.unwrap();
+    let resident = persona(&mut tx, "alexey").await;
+    let staff = persona(&mut tx, "olga").await;
+    let org: i64 = sqlx::query_scalar(
+        "INSERT INTO organisations(name,created_at) VALUES('Notification org','2026-10-07') RETURNING id",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO memberships(organisation_id,user_id,invite_email,role,status,created_at) VALUES(?,?,'org@example.test','member','active','2026-10-07')").bind(org).bind(resident.user_id).execute(&mut *tx).await.unwrap();
+    let case = cases::drafts::create_draft(
+        &mut tx,
+        &resident,
+        "rawson-hall-hire",
+        cases::drafts::Applicant { applicant_org_id: Some(org), ..Default::default() },
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE cases SET status='in_progress' WHERE id=?").bind(case.id).execute(&mut *tx).await.unwrap();
+    cases::messages::post_staff_message(&mut tx, &staff, case.id, "Private BEFORE body", None, false).await.unwrap();
+    let (in_app,outbound):(i64,i64)=sqlx::query_as("SELECT (SELECT id FROM notifications WHERE case_id=? AND channel='in_app'),(SELECT id FROM notifications WHERE case_id=? AND channel='email')").bind(case.id).bind(case.id).fetch_one(&mut *tx).await.unwrap();
+    let credentials = session::create(&mut tx, resident.user_id, true, state.now()).await.unwrap();
+    tx.commit().await.unwrap();
+    let (_, before) = authenticated_request(&state, &credentials, "GET", "/api/notifications").await;
+    assert_eq!(before["unread_count"], 1);
+    let mut tx = write_tx(&state.db).await.unwrap();
+    sqlx::query("UPDATE memberships SET status='revoked' WHERE organisation_id=? AND user_id=?")
+        .bind(org)
+        .bind(resident.user_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    cases::messages::post_staff_message(&mut tx, &staff, case.id, "Private AFTER body", None, false).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM notifications WHERE case_id=?")
+            .bind(case.id)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap(),
+        3
+    );
+    tx.commit().await.unwrap();
+    notify::handle_job(&state, "notify.deliver", &json!({"notification_id":outbound})).await.unwrap();
+    let body: String = sqlx::query_scalar("SELECT body FROM notifications WHERE id=?")
+        .bind(outbound)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert!(body.is_empty());
+    let (status, list) = authenticated_request(&state, &credentials, "GET", "/api/notifications").await;
+    assert_eq!(status, 200);
+    assert_eq!(list["unread_count"], 0);
+    assert!(list["items"].as_array().unwrap().is_empty());
+    assert_eq!(
+        authenticated_request(&state, &credentials, "POST", &format!("/api/notifications/{in_app}/read")).await.0,
+        404
+    );
+    assert_eq!(authenticated_request(&state, &credentials, "POST", "/api/notifications/read-all").await.0, 204);
+    assert!(
+        sqlx::query_scalar::<_, Option<String>>("SELECT read_at FROM notifications WHERE id=?")
+            .bind(in_app)
+            .fetch_one(&state.db)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn inactive_manager_and_owner_do_not_rollback_deadline_sweep_or_applicant_reply() {
+    let (state, _dir) = fixture().await;
+    let mut tx = write_tx(&state.db).await.unwrap();
+    let resident = persona(&mut tx, "alexey").await;
+    let manager_id: i64 =
+        sqlx::query_scalar("SELECT user_id FROM role_grants WHERE role='manager' AND revoked_at IS NULL LIMIT 1")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    let case = cases::drafts::create_draft(&mut tx, &resident, "rawson-hall-hire", Default::default()).await.unwrap();
+    sqlx::query("UPDATE cases SET status='in_progress' WHERE id=?").bind(case.id).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO case_assignments(case_id,user_id,role,assigned_at) VALUES(?,?,'owner','2026-10-07')")
+        .bind(case.id)
+        .bind(manager_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO deadlines(case_id,kind,label,basis,duration_days,pausable,started_at,due_at,status,policy_json) VALUES(?,'response','Response','calendar',1,0,'2000-01-01T00:00:00Z','2000-01-02T00:00:00Z','running','{}')").bind(case.id).execute(&mut *tx).await.unwrap();
+    // Legacy deactivation left active grants/assignments behind.
+    sqlx::query("UPDATE users SET is_active=0 WHERE id=?").bind(manager_id).execute(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+    crate::deadlines::handle_job(&state, "deadline.sweep", &json!({})).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM deadlines WHERE case_id=?")
+            .bind(case.id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap(),
+        "breached"
+    );
+    let mut tx = write_tx(&state.db).await.unwrap();
+    cases::messages::applicant_reply(&mut tx, &state, &resident, case.id, "Applicant reply", None).await.unwrap();
+    users::deactivate_user(&mut tx, manager_id).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM case_assignments WHERE user_id=? AND ended_at IS NULL")
+            .bind(manager_id)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap(),
+        0
+    );
+}

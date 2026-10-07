@@ -43,6 +43,8 @@ async fn intake(
     let key = key.ok_or_else(|| AppError::field("idempotency_key", "Send an Idempotency-Key for intake."))?;
     let hash = idempotency::json_hash(&raw);
     if let Some(previous) = idempotency::lookup(&mut tx, actor.user_id, "case.intake", &key, &hash).await? {
+        let id = previous.body["id"].as_i64().ok_or_else(|| AppError::internal("Intake replay has no case ID"))?;
+        crate::authz::require_staff_case(&mut tx, &actor, id).await?;
         return Ok(Json(previous.body));
     }
     let case = if let Some(id) = input.case_id {
@@ -70,4 +72,42 @@ async fn intake(
     idempotency::store(&mut tx, actor.user_id, "case.intake", &key, &hash, StatusCode::OK, &result).await?;
     tx.commit().await?;
     Ok(Json(result))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn idempotent_intake_replay_rechecks_current_case_access() {
+        let (state, _dir) = crate::state::test_support::test_state().await;
+        crate::seed::seed_demo(&state).await.unwrap();
+        let mut c = state.db.acquire().await.unwrap();
+        let uid = sqlx::query_scalar("SELECT id FROM users WHERE persona_key='olga'").fetch_one(&mut *c).await.unwrap();
+        let actor = crate::auth::Actor::load(&mut c, uid, true).await.unwrap();
+        drop(c);
+        let input = json!({"service":"planning-certificate","channel":"phone","applicant_name":"Offline applicant","applicant_email":"offline@example.test","draft_only":true,"answers":{}});
+        let Json(first) = intake(
+            State(state.clone()),
+            StaffActor(actor.clone()),
+            IdempotencyKey(Some("intake-replay".into())),
+            Json(input.clone()),
+        )
+        .await
+        .unwrap();
+        let id = first["id"].as_i64().unwrap();
+        let Json(replay) = intake(
+            State(state.clone()),
+            StaffActor(actor.clone()),
+            IdempotencyKey(Some("intake-replay".into())),
+            Json(input.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first, replay);
+        sqlx::query("INSERT INTO case_access_denials(case_id,user_id,reason,created_at) VALUES(?,?,'Access withdrawn','2026-10-07')").bind(id).bind(uid).execute(&state.db).await.unwrap();
+        let err = intake(State(state), StaffActor(actor), IdempotencyKey(Some("intake-replay".into())), Json(input))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, crate::error::ErrorCode::NotFound);
+    }
 }

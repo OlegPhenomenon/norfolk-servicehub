@@ -235,6 +235,9 @@ pub async fn close(
     .bind(case_id)
     .execute(&mut *tx)
     .await?;
+    if matches!(outcome, "withdrawn" | "cancelled" | "closed_duplicate" | "refused") {
+        crate::operations::hooks::on_case_cancelled(tx, state, actor, case_id, reason).await?;
+    }
     deadlines::api::on_trigger_at(tx, case_id, "closed", state.now()).await?;
     let case = core::load_case(tx, case_id).await?;
     crate::records::api::on_case_closed(tx, &case).await?;
