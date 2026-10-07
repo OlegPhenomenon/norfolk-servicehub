@@ -57,7 +57,7 @@ pub async fn post_staff_message(
     document_version_id: Option<i64>,
     requires_response: bool,
 ) -> AppResult<i64> {
-    post_staff_message_at(tx, actor, case_id, body, document_version_id, requires_response, chrono::Utc::now()).await
+    post_staff_message_at(tx, actor, case_id, body, document_version_id, requires_response, crate::clock::now()).await
 }
 pub async fn post_staff_message_at(
     tx: &mut SqliteConnection,

@@ -48,3 +48,18 @@ impl Clock for FixedClock {
         *self.now.lock().expect("clock mutex")
     }
 }
+
+// Restricted to an explicitly scoped seed/test future; concurrent requests keep their own clock.
+tokio::task_local! {
+    static OVERRIDE: std::sync::Arc<dyn Clock>;
+}
+
+/// Current time for domain APIs that have no AppState parameter.
+pub fn now() -> DateTime<Utc> {
+    OVERRIDE.try_with(|clock| clock.now()).unwrap_or_else(|_| Utc::now())
+}
+
+/// Run endpoint/domain commands with an explicit clock without changing process-global time.
+pub async fn scope<F: std::future::Future>(clock: std::sync::Arc<dyn Clock>, future: F) -> F::Output {
+    OVERRIDE.scope(clock, future).await
+}

@@ -346,6 +346,19 @@ pub async fn action(
             .await?;
         }
         "issue" => {
+            if d.decision_type == "planning_certificate" {
+                let definition = crate::services::definition::load_for_case(&mut tx, &case).await?;
+                let at_decision = case
+                    .current_step
+                    .as_deref()
+                    .and_then(|key| definition.step(key))
+                    .is_some_and(|step| step.kind == crate::services::definition::StepKind::Decision);
+                if !at_decision || !crate::finance::api::case_settled(&mut tx, case.id).await? {
+                    return Err(AppError::conflict(
+                        "Complete payment and specialist preparation before issuing the planning certificate.",
+                    ));
+                }
+            }
             issue_document(&mut tx, &state, &actor, &case, d).await?;
             crate::deadlines::api::on_trigger(&mut tx, case.id, "decision_issued").await?;
             crate::records::api::on_decision_issued(&mut tx, case.id, id).await?;

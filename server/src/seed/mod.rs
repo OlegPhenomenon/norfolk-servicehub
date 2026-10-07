@@ -5,6 +5,8 @@
 //! `storage::stage` — it does not use the database). `scenarios::run` runs after commit and opens its own
 //! transactions through the same domain functions as live actions.
 
+#[doc(hidden)]
+pub mod driver;
 pub mod scenarios;
 
 use std::path::Path;
@@ -56,6 +58,14 @@ pub async fn wipe(state: &AppState) -> AppResult<()> {
 
 /// Seeds the base demo data and then every module's seed and the scenarios. Expects an empty database.
 pub async fn seed_demo(state: &AppState) -> AppResult<()> {
+    seed_base(state).await?;
+    Box::pin(scenarios::run(state)).await?;
+    Ok(())
+}
+
+/// Platform and catalogue only, for isolated acceptance fixtures.
+#[doc(hidden)]
+pub async fn seed_base(state: &AppState) -> AppResult<()> {
     let mut tx = write_tx(&state.db).await?;
     seed_platform(&mut tx, state).await?;
     crate::services::seed(&mut tx, state).await?;
@@ -64,7 +74,6 @@ pub async fn seed_demo(state: &AppState) -> AppResult<()> {
     crate::finance::seed(&mut tx, state).await?;
     crate::records::seed(&mut tx, state).await?;
     tx.commit().await?;
-    scenarios::run(state).await?;
     Ok(())
 }
 

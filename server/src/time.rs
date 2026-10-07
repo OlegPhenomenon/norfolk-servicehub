@@ -16,7 +16,7 @@ pub fn fmt(dt: DateTime<Utc>) -> String {
 
 /// Current wall-clock time in the storage format. Prefer `fmt(state.clock.now())` when a state is at hand.
 pub fn now_str() -> String {
-    fmt(Utc::now())
+    fmt(crate::clock::now())
 }
 
 /// Parses any RFC 3339 timestamp into UTC.

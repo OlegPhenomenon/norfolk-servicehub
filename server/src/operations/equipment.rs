@@ -293,14 +293,17 @@ pub async fn approve(
         expense.calc = json!({"usage_id":uid,"expenses_cents":u.expenses_cents,"expenses_note":u.expenses_note});
         lines.push(expense);
     }
+    let elapsed_minutes = (time::parse(&u.ended_at)? - time::parse(&u.started_at)?).num_minutes();
     let basis = format!(
-        "Requested {} h; actual {} h {} min on job card ({}–{}, {} min downtime)",
+        "Requested {} h; actual {} h {} min elapsed on job card ({}–{}, {} min downtime); billable {} h {} min",
         e.requested_hours.unwrap_or(0),
-        u.billable_minutes / 60,
-        u.billable_minutes % 60,
+        elapsed_minutes / 60,
+        elapsed_minutes % 60,
         time::to_local(time::parse(&u.started_at)?).format("%H:%M"),
         time::to_local(time::parse(&u.ended_at)?).format("%H:%M"),
-        u.downtime_minutes
+        u.downtime_minutes,
+        u.billable_minutes / 60,
+        u.billable_minutes % 60
     );
     let invoice =
         finance::api::issue_invoice(&mut tx, &st, &a, id, "invoice", date, lines, Some(basis.clone())).await?;

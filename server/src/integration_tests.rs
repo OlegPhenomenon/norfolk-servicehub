@@ -18,7 +18,7 @@ use std::time::Duration;
 
 async fn fixture() -> (AppState, tempfile::TempDir) {
     let (state, dir) = test_support::test_state().await;
-    crate::seed::seed_demo(&state).await.unwrap();
+    crate::seed::seed_base(&state).await.unwrap();
     (state, dir)
 }
 async fn persona(tx: &mut sqlx::SqliteConnection, key: &str) -> Actor {

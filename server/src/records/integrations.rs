@@ -67,7 +67,7 @@ pub async fn enqueue(
             "integration.deliver",
             json!({"delivery_id":id}),
             Some(format!("integration.deliver:{id}")),
-            chrono::Utc::now(),
+            crate::clock::now(),
         )
         .await?;
         crate::audit::record(

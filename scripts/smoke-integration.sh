@@ -37,7 +37,7 @@ for _ in $(seq 1 100); do
   sleep 0.1
 done
 python3 -u - <<'PY'
-import collections, concurrent.futures, datetime, html.parser, json, os, pathlib, sqlite3, subprocess, threading, time, uuid
+import collections, concurrent.futures, csv as csv_module, datetime, html.parser, json, os, pathlib, sqlite3, subprocess, threading, time, uuid
 from zoneinfo import ZoneInfo
 base=os.environ['PUBLIC_BASE_URL']; data=pathlib.Path(os.environ['DATA_DIR'])
 tokens={}; identities={}
@@ -183,13 +183,15 @@ try:
         assert name in item['name'] and item['versions'][0]['amount_cents']==rate
     print('ok   Tom can manage prices; all four fleet codes/names/rates agree')
 
-    # Build the two awaiting-payment requests named in the unchanged seeded CSV via HTTP.
+    # Create isolated payment fixtures and bind the sample CSV to their allocated case numbers.
     first,_=submit('rawson-hall-hire',hall_slot('rawson-main',10))
     second,_=submit('rawson-hall-hire',hall_slot('rawson-main',11),persona='ben')
-    assert detail('olga',first)['case']['number']=='NSH-2026-000001'
-    assert detail('olga',second)['case']['number']=='NSH-2026-000002'
+    first_number=detail('olga',first)['case']['number']
+    second_number=detail('olga',second)['case']['number']
     action('olga',first,'advance'); action('olga',second,'advance')
     csv=pathlib.Path(os.environ['SEED_DATA_DIR'],'statements/demo-statement.csv').read_text()
+    sample_rows=list(csv_module.DictReader(csv.splitlines()))
+    csv=csv.replace(sample_rows[0]['reference'],first_number).replace(sample_rows[1]['reference'],second_number)
     report=req('tom','POST','/api/finance/statements',{'filename':'demo-statement.csv','csv':csv})
     assert collections.Counter(r['status'] for r in report['rows'])=={'matched':1,'unmatched':2,'duplicate':1}, report
     assert detail('alexey',first)['case']['current_step']=='confirm'
@@ -319,7 +321,7 @@ try:
         final=invoices[0]
         assert final['total_cents']==(330*rate+30)//60+1234
         assert final['lines'][0]['quantity_minutes']==330
-        assert all(text in final['basis_note'] for text in ['Requested 4 h','actual 5 h 30 min','07:30','13:30','30 min downtime'])
+        assert all(text in final['basis_note'] for text in ['Requested 4 h','actual 6 h 0 min','billable 5 h 30 min','07:30','13:30','30 min downtime'])
         assert req('alexey','GET',f'/api/document-versions/{final["document_version_id"]}/download',binary=True).startswith(b'%PDF-')
         pay_invoice('alexey',e)
         assert detail('alexey',e)['case']['status']=='completed'

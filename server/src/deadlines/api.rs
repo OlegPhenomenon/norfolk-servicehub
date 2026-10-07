@@ -25,7 +25,7 @@ pub async fn due_at(
     Ok(time::local_to_utc(due, NaiveTime::from_hms_opt(17, 0, 0).expect("17:00")))
 }
 pub async fn on_trigger(tx: &mut SqliteConnection, case_id: i64, trigger: &str) -> AppResult<()> {
-    on_trigger_at(tx, case_id, trigger, Utc::now()).await
+    on_trigger_at(tx, case_id, trigger, crate::clock::now()).await
 }
 pub async fn on_trigger_at(
     tx: &mut SqliteConnection,
@@ -92,7 +92,7 @@ pub async fn pause_for_applicant(
     message_id: i64,
     reason: &str,
 ) -> AppResult<()> {
-    pause_at(tx, case_id, message_id, reason, Utc::now()).await
+    pause_at(tx, case_id, message_id, reason, crate::clock::now()).await
 }
 pub async fn pause_at(
     tx: &mut SqliteConnection,
@@ -146,7 +146,7 @@ pub async fn used_pause_days(tx: &mut SqliteConnection, id: i64, now: DateTime<U
     Ok(days)
 }
 pub async fn resume(tx: &mut SqliteConnection, case_id: i64, why: &str) -> AppResult<()> {
-    resume_at(tx, case_id, why, Utc::now()).await
+    resume_at(tx, case_id, why, crate::clock::now()).await
 }
 pub async fn resume_at(tx: &mut SqliteConnection, case_id: i64, why: &str, now: DateTime<Utc>) -> AppResult<()> {
     let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM deadlines WHERE case_id = ? AND status = 'paused'")

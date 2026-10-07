@@ -188,7 +188,7 @@ pub async fn assign_number(conn: &mut SqliteConnection, case_id: i64) -> AppResu
         Some(Some(n)) => return Ok(n),
         Some(None) => {}
     }
-    let year = time::to_local(chrono::Utc::now()).format("%Y").to_string();
+    let year = time::to_local(crate::clock::now()).format("%Y").to_string();
     let prefix = format!("NSH-{year}-");
     let last: Option<String> =
         sqlx::query_scalar("SELECT number FROM cases WHERE number LIKE ? ORDER BY number DESC LIMIT 1")

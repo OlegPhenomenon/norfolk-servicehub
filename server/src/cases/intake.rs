@@ -80,7 +80,7 @@ mod tests {
     #[tokio::test]
     async fn idempotent_intake_replay_rechecks_current_case_access() {
         let (state, _dir) = crate::state::test_support::test_state().await;
-        crate::seed::seed_demo(&state).await.unwrap();
+        crate::seed::seed_base(&state).await.unwrap();
         let mut c = state.db.acquire().await.unwrap();
         let uid = sqlx::query_scalar("SELECT id FROM users WHERE persona_key='olga'").fetch_one(&mut *c).await.unwrap();
         let actor = crate::auth::Actor::load(&mut c, uid, true).await.unwrap();

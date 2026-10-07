@@ -75,7 +75,7 @@ pub(super) async fn confirm_allocation(
     }
     let u: Unit = sqlx::query_as("SELECT * FROM bookable_units WHERE id=?").bind(b.unit_id).fetch_one(&mut *tx).await?;
     model::unit(tx, &u.code).await?;
-    if time::parse(&b.start_at)? <= chrono::Utc::now() {
+    if time::parse(&b.start_at)? <= crate::clock::now() {
         return Err(AppError::conflict("The booking start time has passed."));
     }
     model::occupy_booking(tx, &b, &u, label).await?;

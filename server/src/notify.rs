@@ -55,7 +55,7 @@ pub async fn send(conn: &mut SqliteConnection, mut notice: Notice) -> AppResult<
             "notify.deliver",
             json!({ "notification_id": id }),
             Some(format!("notify.deliver:{id}")),
-            chrono::Utc::now(),
+            crate::clock::now(),
         )
         .await?;
     }

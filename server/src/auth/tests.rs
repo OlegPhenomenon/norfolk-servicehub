@@ -62,7 +62,7 @@ impl Client {
 
 async fn seeded() -> (AppState, tempfile::TempDir) {
     let (state, dir) = crate::state::test_support::test_state().await;
-    crate::seed::seed_demo(&state).await.unwrap();
+    crate::seed::seed_base(&state).await.unwrap();
     (state, dir)
 }
 

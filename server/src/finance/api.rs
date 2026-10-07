@@ -114,7 +114,7 @@ pub(super) async fn persist_invoice(
         }
         total = total.checked_add(l.amount_cents).ok_or_else(|| AppError::field("lines", "Total is too large."))?;
     }
-    let year = time::to_local(chrono::Utc::now()).format("%Y");
+    let year = time::to_local(crate::clock::now()).format("%Y");
     let stem = format!("{prefix}-{year}-");
     let seq: i64 = sqlx::query_scalar(
         "SELECT COALESCE(MAX(CAST(substr(number,-5) AS INTEGER)),0)+1 FROM invoices WHERE number LIKE ?",

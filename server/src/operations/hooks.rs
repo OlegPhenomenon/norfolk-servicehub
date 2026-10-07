@@ -9,7 +9,7 @@ use crate::{
     state::AppState,
     time,
 };
-use chrono::{NaiveDate, Utc};
+use chrono::NaiveDate;
 use serde_json::{Value, json};
 use sqlx::SqliteConnection;
 
@@ -21,7 +21,7 @@ pub async fn validate_field(
 ) -> AppResult<Option<String>> {
     let result = match field.field_type {
         FieldType::BookingSlot => match serde_json::from_value::<Slot>(value.clone()) {
-            Ok(s) => model::validate_slot(tx, &s, Utc::now()).await.map(|_| ()),
+            Ok(s) => model::validate_slot(tx, &s, crate::clock::now()).await.map(|_| ()),
             Err(_) => Err(AppError::validation_msg("Choose a space, future date, start/end times and guest count.")),
         },
         FieldType::EquipmentRequest => validate_equipment(value).map(|_| ()),
@@ -47,7 +47,7 @@ pub fn validate_equipment(v: &Value) -> AppResult<(i64, NaiveDate)> {
         .ok_or_else(|| AppError::field("requested_hours", "Enter whole hours between 1 and 240."))?;
     let date = time::parse_date(v["preferred_date"].as_str().unwrap_or(""))
         .map_err(|_| AppError::field("preferred_date", "Choose a valid preferred date."))?;
-    if date < time::local_date(Utc::now()) {
+    if date < time::local_date(crate::clock::now()) {
         return Err(AppError::field("preferred_date", "Choose today or a future date."));
     }
     Ok((hours, date))
