@@ -328,9 +328,17 @@ function StaffTask({
   return (
     <Card title={t.title}>
       <StatusPill status={t.status} />
-      <p>
-        <DateTime value={t.scheduled_start} />
+      <p className="mt-2">
+        Assigned to:{' '}
+        {t.assigned_to === null
+          ? 'Not assigned yet'
+          : (workers.find((w) => w.id === t.assigned_to)?.name ?? `Staff member #${t.assigned_to}`)}
       </p>
+      {t.scheduled_start && (
+        <p>
+          Scheduled start: <DateTime value={t.scheduled_start} />
+        </p>
+      )}
       <p className="whitespace-pre-line">{t.instructions}</p>
       <Link className="link" to={`/staff/field/${t.id}`}>
         Open task

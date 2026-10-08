@@ -337,6 +337,10 @@ pub async fn record(
     if !crate::cases::workflow::is_open(case) {
         return Err(AppError::conflict("Reopen the request before assessing fees."));
     }
+    // Decisions are only issued once the fee is settled; re-assessing afterwards would bill an approved request.
+    if !crate::documents::api::issued_decisions(tx, case.id).await?.is_empty() {
+        return Err(AppError::conflict("The fee can no longer be re-assessed: a decision has been issued."));
+    }
     let kind = building::approval_role(tx, case).await?;
     let a = answers(tx, case.id).await?;
     let applied_cost = cost_cents(a.get("estimated_cost").unwrap_or(&Value::Null))?;
@@ -588,7 +592,8 @@ pub async fn view(tx: &mut SqliteConnection, actor: &Actor, case: &CaseRow, acce
     let roles = actor.roles_for_service(case.service_id);
     let can_assess = access.can_manage()
         && crate::cases::workflow::is_open(case)
-        && roles.iter().any(|r| matches!(r, Role::Intake | Role::Specialist | Role::Finance | Role::Manager));
+        && roles.iter().any(|r| matches!(r, Role::Intake | Role::Specialist | Role::Finance | Role::Manager))
+        && crate::documents::api::issued_decisions(tx, case.id).await?.is_empty();
     Ok(
         json!({"applies":true,"route":kind.map(BuildingRole::as_str),"schedule_note":NOTE,"application":{"estimated_cost_cents":cost,"modification_types":types},"proposal":proposal,"proposal_error":proposal_error,"assessments":assessments,"invoiced":has_invoice(tx,case.id).await?,"settled":api::case_settled(tx,case.id).await?,"waivers":waivers.into_iter().map(|(c,a,r,n)|json!({"item_code":c,"amount_cents":a,"reason":r,"approved_by":n})).collect::<Vec<_>>(),"can_assess":can_assess}),
     )

@@ -82,7 +82,7 @@ async fn upload(State(state): State<AppState>, actor: Actor, mut form: Multipart
     let mut slugs = std::collections::HashSet::new();
     for (index, item) in raw.into_iter().enumerate() {
         let mut issues = match serde_json::from_value::<Item>(item.clone()) {
-            Ok(i) => admin::issues(&mut tx, &i.definition, &i.module).await?,
+            Ok(i) => admin::issues(&mut tx, &i.definition, &i.module, &i.slug).await?,
             Err(e) => json!([{"path":"item","message":e.to_string()}]),
         };
         if let Some(slug) = item["slug"].as_str()
@@ -149,7 +149,7 @@ async fn apply(State(state): State<AppState>, actor: Actor, Path(id): Path<i64>)
         .filter(|r| r["valid"] == true)
     {
         let item: Item = serde_json::from_value(row["item"].clone())?;
-        let issues = admin::issues(&mut tx, &item.definition, &item.module).await?;
+        let issues = admin::issues(&mut tx, &item.definition, &item.module, &item.slug).await?;
         if !issues.as_array().is_some_and(Vec::is_empty) {
             row["valid"] = json!(false);
             row["issues"] = issues;

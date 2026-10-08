@@ -169,6 +169,11 @@ pub async fn upload(
         return Err(AppError::forbidden());
     }
     revision(&mut tx, id, a, &u.fields).await?;
+    // A draft started on a retired version uploads against the form it now shows: the current published version.
+    let case = match crate::cases::drafts::rebind(&mut tx, &actor, &case).await? {
+        crate::cases::drafts::Pinned::Replaced { .. } => crate::cases::core::load_case(&mut tx, id).await?,
+        crate::cases::drafts::Pinned::Current | crate::cases::drafts::Pinned::Unavailable => case,
+    };
     let requirement = u.fields.get("requirement_key").map(String::as_str).filter(|s| !s.is_empty());
     if let Some(key) = requirement {
         let definition: String = sqlx::query_scalar("SELECT definition_json FROM service_versions WHERE id=?")

@@ -31,7 +31,9 @@ function ActionBar({ detail: d }: { detail: CaseDetail }) {
       <Button variant="secondary" onClick={() => setAction('')} disabled={command.isPending}>Back</Button>
       <Button variant={destructive ? 'danger' : 'primary'} disabled={action !== 'advance' && (!reason.trim() || (action === 'close-duplicate' && !target))} loading={command.isPending} onClick={() => command.mutate()}>{destructive ? LABELS[action] : 'Confirm action'}</Button>
     </>}>
-      {command.error && <ErrorAlert error={command.error} />}
+      {command.error && (isApiError(command.error, 'conflict')
+        ? <Alert tone="warning" title={action === 'advance' ? "This step can't be completed yet" : "This action can't be taken yet"}><p>{command.error.message}</p></Alert>
+        : <ErrorAlert error={command.error} />)}
       <Field label={action === 'request-info' ? 'Information the applicant needs to provide' : destructive ? 'Reason' : 'Reason or completion note'} required={action !== 'advance'} error={errors.reason || errors.body}><Textarea autoFocus value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
       {action === 'close-duplicate' && <Field label="Original request ID" required error={errors.of_case}><TextInput type="number" min={1} value={target} onChange={(e) => setTarget(e.target.value)} /></Field>}
     </Dialog>

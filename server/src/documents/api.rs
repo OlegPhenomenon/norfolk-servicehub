@@ -164,6 +164,29 @@ pub async fn letter_issued(tx: &mut SqliteConnection, case_id: i64, letter_type:
     .fetch_one(tx)
     .await?)
 }
+/// A letter issued before letters were tied to step runs (`step_run_id IS NULL`, migration 0805) was issued
+/// ahead of its step under the old rules. It belongs to the first run of a step waiting for that letter type
+/// entered after it: link it to `step_run_id` (called when such a step is entered), once only.
+pub async fn adopt_unlinked_letter(
+    tx: &mut SqliteConnection,
+    case_id: i64,
+    letter_type: &str,
+    step_run_id: i64,
+) -> AppResult<()> {
+    sqlx::query(
+        "UPDATE issued_letters SET step_run_id=? WHERE id=(SELECT id FROM issued_letters WHERE case_id=? AND letter_type=? \
+         AND step_run_id IS NULL ORDER BY id LIMIT 1) \
+         AND NOT EXISTS(SELECT 1 FROM issued_letters WHERE step_run_id=? AND letter_type=?)",
+    )
+    .bind(step_run_id)
+    .bind(case_id)
+    .bind(letter_type)
+    .bind(step_run_id)
+    .bind(letter_type)
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
+}
 /// Whether the open case sits at a step waiting for a `letter_type` letter not yet issued for that step's run,
 /// i.e. whether [`issue_letter`] would accept that letter now (role checks aside).
 pub async fn letter_due(tx: &mut SqliteConnection, case: &CaseRow, letter_type: &str) -> AppResult<bool> {

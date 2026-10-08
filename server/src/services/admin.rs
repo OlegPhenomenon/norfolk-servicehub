@@ -190,22 +190,29 @@ async fn save(
     tx.commit().await?;
     Ok(Json(json!({"saved":true})))
 }
-pub async fn issues(tx: &mut SqliteConnection, raw: &Value, module: &str) -> AppResult<Value> {
+/// Validation issues of a stored definition of service `slug`, checked with the building role it will run as
+/// (`documents::building::effective_role`; a non-building definition keeps its declared role so a misplaced one is
+/// reported).
+pub async fn issues(tx: &mut SqliteConnection, raw: &Value, module: &str, slug: &str) -> AppResult<Value> {
     match serde_json::from_value::<ServiceDefinition>(raw.clone()) {
-        Ok(def) => Ok(json!(validation::validate_for_module(tx, &def, module).await?)),
+        Ok(mut def) => {
+            def.building_role =
+                crate::documents::building::effective_role(module, slug, def.building_role).or(def.building_role);
+            Ok(json!(validation::validate_for_module(tx, &def, module).await?))
+        }
         Err(e) => Ok(json!([{"path":"definition","message":e.to_string()}])),
     }
 }
 pub async fn publish(tx: &mut SqliteConnection, actor: &Actor, id: i64, v: i64) -> AppResult<()> {
     require_admin(actor)?;
     editable(tx, id, v).await?;
-    let module: String =
-        sqlx::query_scalar("SELECT module FROM services WHERE id=?").bind(id).fetch_one(&mut *tx).await?;
+    let (module, slug): (String, String) =
+        sqlx::query_as("SELECT module,slug FROM services WHERE id=?").bind(id).fetch_one(&mut *tx).await?;
     let raw: String = sqlx::query_scalar("SELECT definition_json FROM service_versions WHERE id=?")
         .bind(v)
         .fetch_one(&mut *tx)
         .await?;
-    let report = issues(tx, &serde_json::from_str(&raw)?, &module).await?;
+    let report = issues(tx, &serde_json::from_str(&raw)?, &module, &slug).await?;
     let issues = report.as_array().expect("issue array");
     if !issues.is_empty() {
         return Err(AppError::validation(issues.iter().map(|i| {
@@ -236,10 +243,10 @@ async fn action(
 ) -> AppResult<Json<Value>> {
     require_admin(&actor)?;
     let mut tx = db::write_tx(&state.db).await?;
-    let (raw,module):(String,String)=sqlx::query_as("SELECT v.definition_json,s.module FROM service_versions v JOIN services s ON s.id=v.service_id WHERE v.id=? AND s.id=?").bind(v).bind(id).fetch_one(&mut *tx).await?;
+    let (raw,module,slug):(String,String,String)=sqlx::query_as("SELECT v.definition_json,s.module,s.slug FROM service_versions v JOIN services s ON s.id=v.service_id WHERE v.id=? AND s.id=?").bind(v).bind(id).fetch_one(&mut *tx).await?;
     let definition: Value = serde_json::from_str(&raw)?;
     let result = match action.as_str() {
-        "validate" => json!({"issues":issues(&mut tx,&definition,&module).await?}),
+        "validate" => json!({"issues":issues(&mut tx,&definition,&module,&slug).await?}),
         "preview-answers" => {
             let def = ServiceDefinition::parse(&raw)?;
             match validation::validate_answers(&mut tx, &module, &def, &input["answers"]).await {

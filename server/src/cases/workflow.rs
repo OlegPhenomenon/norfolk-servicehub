@@ -394,7 +394,8 @@ pub async fn projection(tx: &mut SqliteConnection, state: &AppState, actor: &Act
         .await?;
     let mut result = json!({"case":super::search::summary(tx,&case).await?,"access":access,"step":step,"steps":steps,"allowed_actions":allowed_actions(actor,&case,access,&def),"required_action":required.map(|(id,body,v)|json!({"message_id":id,"body":body,"document_version_id":v})),"definition":def,"answers":answers.map(|a|serde_json::from_str::<Value>(&a)).transpose()?.unwrap_or(json!({})),"timeline":events.into_iter().map(|(id,at,summary,actor)|json!({"id":id,"at":at,"summary":summary,"actor_name":actor})).collect::<Vec<_>>(),"applicant_status_text":super::search::status_text(&case,&def)});
     // `decision_ref` answers hold decision ids; staff and applicant see the approval type and case number.
-    result["decision_refs"] = crate::documents::building::original_labels(tx, id).await?;
+    let decision_refs = crate::documents::building::decision_ref_labels(tx, &def, &result["answers"]).await?;
+    result["decision_refs"] = decision_refs;
     if access.is_staff() {
         result["guard_reason"] = if let Some(i) = current {
             json!(hooks::step_guard(tx, &case, &def.workflow.steps[i]).await?)

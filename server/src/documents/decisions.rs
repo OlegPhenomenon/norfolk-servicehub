@@ -116,8 +116,16 @@ pub async fn list(
     let can_prepare = a.can_manage() && roles.iter().any(|r| matches!(r, Role::Specialist | Role::Manager));
     let can_comment = a.can_manage()
         && roles.iter().any(|r| matches!(r, Role::Intake | Role::Specialist | Role::Manager | Role::ComplaintsOfficer));
+    // A draft on a retired version lists the requirements of the form it now shows (the next write rebinds it).
+    let version = match case.status.as_str() {
+        "draft" => match crate::cases::drafts::pinned(&mut c, &case).await? {
+            crate::cases::drafts::Pinned::Replaced { id, .. } => id,
+            _ => case.service_version_id,
+        },
+        _ => case.service_version_id,
+    };
     let requirements: String = sqlx::query_scalar("SELECT definition_json FROM service_versions WHERE id=?")
-        .bind(case.service_version_id)
+        .bind(version)
         .fetch_one(&mut *c)
         .await?;
     let definition: serde_json::Value = serde_json::from_str(&requirements)?;

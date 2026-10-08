@@ -69,6 +69,10 @@ pub fn local_to_utc(date: NaiveDate, time: NaiveTime) -> DateTime<Utc> {
 pub fn display_local(dt: DateTime<Utc>) -> String {
     to_local(dt).format("%-d %b %Y, %H:%M").to_string()
 }
+/// Local rendering matching the web `DateTime` component, e.g. `8 Oct 2026, 10:03 pm` (for on-screen messages).
+pub fn display_local_clock(dt: DateTime<Utc>) -> String {
+    to_local(dt).format("%-d %b %Y, %-I:%M %P").to_string()
+}
 
 #[cfg(test)]
 mod tests {

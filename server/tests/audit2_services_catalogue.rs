@@ -487,3 +487,48 @@ async fn draft_on_retired_version_is_rebound_before_submission() {
         1
     );
 }
+
+/// A draft reopened after a deploy shows the new form; uploading into a document slot that exists only in the new
+/// version works straight away (the upload moves the draft onto the published version first).
+#[tokio::test]
+async fn stale_draft_accepts_uploads_for_the_new_versions_documents() {
+    let (mut d, _dir) = support::fixture().await;
+    let org = ben_org(&d).await;
+    let (service, old_version, current): (i64, i64, String) = sqlx::query_as("SELECT s.id,v.id,v.definition_json FROM services s JOIN service_versions v ON v.service_id=s.id AND v.status='published' WHERE s.slug='development-application'")
+        .fetch_one(&d.state.db)
+        .await
+        .unwrap();
+    let (def, answers) = d.answers("ben", "development-application").await.unwrap();
+    let draft = da_draft(&mut d, org, &def, &answers).await;
+    let mut next: Value = serde_json::from_str(&current).unwrap();
+    next["documents"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"key":"upgrade_plans","label":"Fictional plans required by the upgrade","required":true}));
+    let new_version = publish_next(&d, service, &next).await;
+    let loaded = d.req("ben", "GET", &format!("/api/cases/{draft}/draft"), json!({})).await.unwrap();
+    assert_eq!(loaded["form_updated"], true);
+    assert!(loaded["definition"]["documents"].as_array().unwrap().iter().any(|doc| doc["key"] == "upgrade_plans"));
+    // The staff/applicant document list of the draft already shows the new requirement.
+    let listed = d.req("ben", "GET", &format!("/api/cases/{draft}/decisions"), json!({})).await.unwrap();
+    assert!(
+        listed["document_requirements"].as_array().unwrap().iter().any(|doc| doc["key"] == "upgrade_plans"),
+        "{}",
+        listed["document_requirements"]
+    );
+    assert_eq!(scalar(&d, &format!("SELECT service_version_id FROM cases WHERE id={draft}")).await, old_version);
+    let pdf = servicehub::pdf::simple_document("Fictional plans", &[], &[]);
+    let fields = [("requirement_key", "upgrade_plans".to_string()), ("title", "Fictional plans".to_string())];
+    d.upload("ben", &format!("/api/cases/{draft}/documents"), &fields, &pdf).await.unwrap();
+    assert_eq!(scalar(&d, &format!("SELECT service_version_id FROM cases WHERE id={draft}")).await, new_version);
+    assert_eq!(
+        scalar(&d, &format!("SELECT COUNT(*) FROM case_events WHERE case_id={draft} AND kind='draft.version_updated'"))
+            .await,
+        1
+    );
+    d.req("ben", "POST", &format!("/api/cases/{draft}/submit"), json!({})).await.unwrap();
+    assert_eq!(
+        scalar(&d, &format!("SELECT service_version_id FROM submissions WHERE case_id={draft}")).await,
+        new_version
+    );
+}

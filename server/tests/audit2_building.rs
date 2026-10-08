@@ -327,7 +327,9 @@ async fn public_exhibition_blocks_skip_and_decisions_until_closed_and_considered
     scenarios::public_comment(&mut d, exhibit, "Fictional concern about stormwater.").await.unwrap();
     let detail = d.detail("priya", a).await.unwrap();
     assert!(!detail["allowed_actions"].as_array().unwrap().iter().any(|v| v == "skip"));
-    assert!(detail["guard_reason"].as_str().unwrap().contains("open until"));
+    let guard = detail["guard_reason"].as_str().unwrap();
+    assert!(guard.contains("open until") && guard.contains("(Norfolk Island time)"), "{guard}");
+    assert!(!guard.contains("+00:00") && !guard.contains('Z'), "local time, not raw UTC: {guard}");
     let r = revision(&mut d, "priya", a).await;
     d.expect(
         "priya",
@@ -778,4 +780,222 @@ async fn staff_published_pre_upgrade_building_versions_keep_their_role() {
     to_decision(&mut d, modification, json!({"originals":[da]})).await;
     d.decision(modification, "modification_approval", None).await.unwrap();
     assert_eq!(status(&mut d, modification).await, "completed");
+}
+
+/// A Builder edit of a seeded building service that leaves `building_role` empty is validated with the role the
+/// service runs as (its slug's role), so the approval route rules still apply.
+#[tokio::test]
+async fn role_less_edit_of_a_seeded_building_service_is_validated_with_its_slug_role() {
+    let (mut d, _dir) = support::fixture().await;
+    let service: i64 = sqlx::query_scalar("SELECT id FROM services WHERE slug='development-application'")
+        .fetch_one(&d.state.db)
+        .await
+        .unwrap();
+    let version =
+        d.req("mark", "POST", &format!("/api/admin/services/{service}/versions"), json!({})).await.unwrap()["id"]
+            .as_i64()
+            .unwrap();
+    let path = format!("/api/admin/services/{service}/versions/{version}");
+    let mut def =
+        d.req("mark", "GET", "/api/public/services/development-application", json!({})).await.unwrap()["definition"]
+            .clone();
+    def.as_object_mut().unwrap().remove("building_role");
+    let validate = async |d: &mut Driver, def: &Value| -> Vec<(String, String)> {
+        d.req("mark", "PUT", &path, def.clone()).await.unwrap();
+        d.req("mark", "POST", &format!("{path}/validate"), json!({})).await.unwrap()["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| (i["path"].as_str().unwrap().to_owned(), i["message"].as_str().unwrap().to_owned()))
+            .collect()
+    };
+    assert_eq!(validate(&mut d, &def).await, vec![], "unchanged route without the role field is valid");
+    let steps = def["workflow"]["steps"].as_array().unwrap().clone();
+    let at = |key: &str| steps.iter().position(|s| s["key"] == key).unwrap();
+    let mut wrong = def.clone();
+    wrong["workflow"]["steps"][at("decision")]["decision_types"] = json!(["service_response"]);
+    let issues = validate(&mut d, &wrong).await;
+    assert!(
+        issues.iter().any(|(p, _)| p == &format!("workflow.steps.{}.decision_types", at("decision"))),
+        "{issues:?}"
+    );
+    let mut no_gate = def.clone();
+    no_gate["workflow"]["steps"].as_array_mut().unwrap().remove(at("exhibition"));
+    let issues = validate(&mut d, &no_gate).await;
+    assert!(issues.iter().any(|(_, m)| m == "This module requires the exhibition step."), "{issues:?}");
+    let r = d.expect("mark", "POST", &format!("{path}/publish"), json!({}), 422).await.unwrap();
+    assert!(r["error"]["fields"].is_object(), "{r}");
+}
+
+/// Every `decision_ref` answer is shown as approval type and case number, also on services whose role does not
+/// record originals (here a Builder-made building service without a role).
+#[tokio::test]
+async fn decision_ref_answers_of_any_service_read_as_case_numbers() {
+    let (mut d, _dir) = support::fixture().await;
+    let project = submit_da(&mut d, &["development_approval"], 50_000).await;
+    to_decision(&mut d, project, json!({"approvals":["development_approval"]})).await;
+    let da = d.decision(project, "development_approval", None).await.unwrap();
+    let number = d.detail("olga", project).await.unwrap()["case"]["number"].clone();
+    let def = json!({"module":"building","summary":"Fictional approval enquiry","outcome":"A response","fields":[
+        {"key":"related_approval","type":"decision_ref","label":"Approval this enquiry is about","required":true}],
+        "documents":[],"workflow":{"steps":[
+        {"key":"intake","kind":"review","role":"intake","label":"Check","applicant_label":"Checking"},
+        {"key":"assessment","kind":"review","role":"specialist","label":"Assess","applicant_label":"Assessing"},
+        {"key":"decision","kind":"decision","role":"specialist","label":"Respond","applicant_label":"Responding","decision_types":["service_response"]},
+        {"key":"done","kind":"complete","label":"Done","applicant_label":"Done"}]},"deadlines":[],"pricing":[]});
+    let created = d
+        .req("mark","POST","/api/admin/services",json!({"slug":"approval-enquiry","name":"Approval enquiry","category":"Testing","department":"Planning","module":"building"}))
+        .await
+        .unwrap();
+    let path = format!("/api/admin/services/{}/versions/{}", created["id"], created["version_id"]);
+    d.req("mark", "PUT", &path, def).await.unwrap();
+    d.req("mark", "POST", &format!("{path}/publish"), json!({})).await.unwrap();
+    let (c, _) =
+        d.submit("alexey", "approval-enquiry", json!({"related_approval":{"decision_id":da}}), None).await.unwrap();
+    for who in ["olga", "alexey"] {
+        let refs = d.detail(who, c).await.unwrap()["decision_refs"].clone();
+        assert_eq!(refs[da.to_string()]["case_number"], number, "{who}: {refs}");
+        assert_eq!(refs[da.to_string()]["approval_type"], "development_approval");
+    }
+}
+
+/// An exhibition withdrawn before withdrawal reasons were recorded does not finish the exhibition step and blocks
+/// the decision until a manager records the reason; then it counts like a formal termination.
+#[tokio::test]
+async fn legacy_reasonless_withdrawal_blocks_until_a_manager_records_the_reason() {
+    let (mut d, _dir) = support::fixture().await;
+    // Case A at the exhibition step: the reasonless withdrawal does not finish the step.
+    let a = submit_da(&mut d, &["development_approval"], 60_000).await;
+    scenarios::assess_fee(&mut d, a).await.unwrap();
+    d.pay("alexey", a, false).await.unwrap();
+    scenarios::confirm_scope(&mut d, a, json!({"approvals":["development_approval"]})).await.unwrap();
+    d.action("priya", a, "advance").await.unwrap();
+    let exhibition = legacy_withdrawn_exhibition(&mut d, a).await;
+    let held = prepare(&mut d, a, "development_approval", None).await;
+    let r = revision(&mut d, "priya", a).await;
+    let blocked = d
+        .expect("priya", "POST", &format!("/api/cases/{a}/actions/advance"), json!({"expected_revision":r}), 409)
+        .await
+        .unwrap();
+    assert!(blocked["error"]["message"].as_str().unwrap().contains("without a recorded reason"), "{blocked}");
+    issue(&mut d, a, held, 409).await;
+    let reason = |r: i64| json!({"reason":"Fictional: withdrawn because the notice showed the wrong lot.","expected_revision":r});
+    let r = revision(&mut d, "priya", a).await;
+    d.expect("priya", "POST", &format!("/api/exhibitions/{exhibition}/withdrawal-reason"), reason(r), 403)
+        .await
+        .unwrap();
+    let r = revision(&mut d, "helen", a).await;
+    d.expect(
+        "helen",
+        "POST",
+        &format!("/api/exhibitions/{exhibition}/withdrawal-reason"),
+        json!({"reason":" ","expected_revision":r}),
+        422,
+    )
+    .await
+    .unwrap();
+    d.req("helen", "POST", &format!("/api/exhibitions/{exhibition}/withdrawal-reason"), reason(r)).await.unwrap();
+    let r = revision(&mut d, "helen", a).await;
+    d.expect("helen", "POST", &format!("/api/exhibitions/{exhibition}/withdrawal-reason"), reason(r), 409)
+        .await
+        .unwrap();
+    assert!(
+        d.detail("alexey", a).await.unwrap()["timeline"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["summary"].as_str().unwrap_or_default().contains("wrong lot"))
+    );
+    d.action("priya", a, "advance").await.unwrap();
+    issue(&mut d, a, held, 200).await;
+    assert_eq!(status(&mut d, a).await, "completed");
+    // Case B already at its decision step: the reasonless withdrawal blocks the decision issue.
+    let b = submit_da(&mut d, &["development_approval"], 60_000).await;
+    to_decision(&mut d, b, json!({"approvals":["development_approval"]})).await;
+    let exhibition = legacy_withdrawn_exhibition(&mut d, b).await;
+    let held = prepare(&mut d, b, "development_approval", None).await;
+    let refused = issue(&mut d, b, held, 409).await;
+    assert!(refused["error"]["message"].as_str().unwrap().contains("without a recorded reason"), "{refused}");
+    let r = revision(&mut d, "helen", b).await;
+    d.req("helen", "POST", &format!("/api/exhibitions/{exhibition}/withdrawal-reason"), reason(r)).await.unwrap();
+    issue(&mut d, b, held, 200).await;
+    assert_eq!(status(&mut d, b).await, "completed");
+}
+/// A published exhibition on case `c`, withdrawn as the previous release did it: no reason, time or manager.
+async fn legacy_withdrawn_exhibition(d: &mut Driver, c: i64) -> i64 {
+    let now = d.state.now();
+    let source = d.req("priya", "GET", &format!("/api/cases/{c}/documents"), json!({})).await.unwrap()[0]["versions"]
+        [0]["id"]
+        .as_i64()
+        .unwrap();
+    let r = revision(d, "priya", c).await;
+    let exhibition = d
+        .req(
+            "priya",
+            "POST",
+            "/api/exhibitions",
+            json!({"case_id":c,"title":"Fictional notice","summary":"Fictional summary.","opens_at":(now - Duration::hours(1)).to_rfc3339(),"closes_at":(now + Duration::days(14)).to_rfc3339(),"expected_revision":r}),
+        )
+        .await
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    let r = revision(d, "priya", c).await;
+    d.req(
+        "priya",
+        "POST",
+        &format!("/api/exhibitions/{exhibition}/items"),
+        json!({"source_document_version_id":source,"title":"Redacted plan","redactions":[{"page":1,"x":0.05,"y":0.1,"w":0.9,"h":0.35}],"expected_revision":r}),
+    )
+    .await
+    .unwrap();
+    let r = revision(d, "helen", c).await;
+    d.req("helen", "POST", &format!("/api/exhibitions/{exhibition}/publish"), json!({"expected_revision":r}))
+        .await
+        .unwrap();
+    let r = revision(d, "helen", c).await;
+    d.req(
+        "helen",
+        "POST",
+        &format!("/api/exhibitions/{exhibition}/withdraw"),
+        json!({"reason":"placeholder","expected_revision":r}),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE exhibitions SET withdrawal_reason=NULL,withdrawn_at=NULL,withdrawn_by=NULL WHERE id=?")
+        .bind(exhibition)
+        .execute(&d.state.db)
+        .await
+        .unwrap();
+    exhibition
+}
+
+/// Once a decision is issued the fee cannot be re-assessed (the form is no longer offered) and, once every
+/// decision in scope is issued, the scope form is no longer offered either.
+#[tokio::test]
+async fn fee_and_scope_actions_end_when_they_no_longer_apply() {
+    let (mut d, _dir) = support::fixture().await;
+    let c = submit_da(&mut d, &BOTH, 50_000).await;
+    to_decision(&mut d, c, json!({"approvals":BOTH})).await;
+    let route = d.req("olga", "GET", &format!("/api/cases/{c}/building-route"), json!({})).await.unwrap();
+    assert_eq!(route["fee"]["can_assess"], true);
+    assert_eq!(route["can_scope"], true);
+    d.decision(c, "development_approval", None).await.unwrap();
+    let route = d.req("olga", "GET", &format!("/api/cases/{c}/building-route"), json!({})).await.unwrap();
+    assert_eq!(route["fee"]["can_assess"], false);
+    assert_eq!(route["can_scope"], true, "the building approval is still outstanding");
+    let r = revision(&mut d, "olga", c).await;
+    d.expect(
+        "olga",
+        "POST",
+        &format!("/api/cases/{c}/building-fee"),
+        json!({"method":"manual","amount_cents":1,"reason":"Fictional late change.","expected_revision":r}),
+        409,
+    )
+    .await
+    .unwrap();
+    d.decision(c, "building_approval", None).await.unwrap();
+    let route = d.req("olga", "GET", &format!("/api/cases/{c}/building-route"), json!({})).await.unwrap();
+    assert_eq!(route["can_scope"], false);
+    assert_eq!(route["fee"]["can_assess"], false);
 }

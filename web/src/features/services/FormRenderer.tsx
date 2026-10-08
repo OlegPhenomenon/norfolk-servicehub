@@ -66,7 +66,7 @@ function DecisionRefAnswer({ value, labels }: { value: unknown; labels?: Decisio
   if (!ids.length) return 'Not provided'
   const describe = (id: number) => {
     const d = labels?.[String(id)] ?? own.data?.find((a) => a.id === id)
-    if (!d) return own.isPending && !labels ? 'Loading approval…' : 'Approval not available'
+    if (!d) return own.isPending && !labels ? 'Loading approval…' : `Approval #${id}`
     return `${humanize(d.approval_type)}${d.decision_type === 'modification_approval' ? ' (as modified)' : ''} — ${d.case_number ?? 'no case number'}`
   }
   return <>{ids.map((id, i) => <span key={id}>{i > 0 && '; '}{describe(id)}</span>)}</>

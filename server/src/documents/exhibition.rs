@@ -108,6 +108,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/exhibitions/{id}/items/{item}", put(edit_item))
         .route("/api/exhibitions/{id}/items/{item}/pages/{page}", get(preview))
         .route("/api/exhibitions/{id}/withdraw", post(withdraw))
+        .route("/api/exhibitions/{id}/withdrawal-reason", post(withdrawal_reason))
         .route("/api/exhibitions/lookup/{number}", get(lookup))
         .route("/api/exhibitions/{id}/items/{item}/redacted-pages/{page}", get(redacted_preview))
         .route("/api/exhibitions/{id}/publish", post(publish))
@@ -985,9 +986,23 @@ pub async fn case_block(tx: &mut SqliteConnection, case_id: i64) -> AppResult<Op
     .fetch_optional(&mut *tx)
     .await?;
     if let Some(closes) = open {
+        let closes = crate::time::parse(&closes).map(crate::time::display_local_clock).unwrap_or(closes);
         return Ok(Some(format!(
-            "A public exhibition on this request is open until {closes}. Wait for it to close, or formally terminate it with a reason."
+            "A public exhibition on this request is open until {closes} (Norfolk Island time). Wait for it to close, or formally terminate it with a reason."
         )));
+    }
+    // A withdrawal counts like a formal termination only with its recorded reason (withdrawals made before reasons
+    // were recorded need a manager to record it).
+    let unexplained: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM exhibitions WHERE case_id=? AND status='withdrawn' AND withdrawal_reason IS NULL)",
+    )
+    .bind(case_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if unexplained {
+        return Ok(Some(
+            "A public exhibition on this request was withdrawn without a recorded reason. A manager must record the withdrawal reason on the exhibition first.".into(),
+        ));
     }
     let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM public_submissions s JOIN exhibitions e ON e.id=s.exhibition_id WHERE e.case_id=? AND s.status='received'")
         .bind(case_id)
@@ -1003,7 +1018,7 @@ pub async fn step_block(tx: &mut SqliteConnection, case_id: i64) -> AppResult<Op
     if let Some(block) = case_block(tx, case_id).await? {
         return Ok(Some(block));
     }
-    let (handled, any): (bool, bool) = sqlx::query_as("SELECT EXISTS(SELECT 1 FROM exhibitions WHERE case_id=? AND status IN ('closed','withdrawn')) OR EXISTS(SELECT 1 FROM exhibition_not_required WHERE case_id=?),EXISTS(SELECT 1 FROM exhibitions WHERE case_id=?)")
+    let (handled, any): (bool, bool) = sqlx::query_as("SELECT EXISTS(SELECT 1 FROM exhibitions WHERE case_id=? AND (status='closed' OR (status='withdrawn' AND withdrawal_reason IS NOT NULL))) OR EXISTS(SELECT 1 FROM exhibition_not_required WHERE case_id=?),EXISTS(SELECT 1 FROM exhibitions WHERE case_id=?)")
         .bind(case_id)
         .bind(case_id)
         .bind(case_id)
@@ -1029,7 +1044,7 @@ pub async fn on_skip(
         return Ok(Some(block));
     }
     let (finished, any): (bool, bool) = sqlx::query_as(
-        "SELECT EXISTS(SELECT 1 FROM exhibitions WHERE case_id=? AND status IN ('closed','withdrawn')),EXISTS(SELECT 1 FROM exhibitions WHERE case_id=?)",
+        "SELECT EXISTS(SELECT 1 FROM exhibitions WHERE case_id=? AND (status='closed' OR (status='withdrawn' AND withdrawal_reason IS NOT NULL))),EXISTS(SELECT 1 FROM exhibitions WHERE case_id=?)",
     )
     .bind(case_id)
     .bind(case_id)
@@ -1131,6 +1146,41 @@ async fn withdraw(
         "documents.exhibition_withdrawn",
         Visibility::Applicant,
         &format!("A manager withdrew the public exhibition and removed every public copy. Reason: {reason}"),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Json(json!({"ok":true})))
+}
+/// Records the missing reason of an exhibition withdrawn before reasons were recorded (manager only, once). Until
+/// then the withdrawal does not finish the exhibition step and blocks building decisions; afterwards it counts
+/// like a formal termination (comments still need consideration).
+async fn withdrawal_reason(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path(id): Path<i64>,
+    Json(input): Json<ReasonInput>,
+) -> AppResult<Json<Value>> {
+    super::text("reason", &input.reason, 5000)?;
+    let mut tx = write_tx(&state.db).await?;
+    let e = load(&mut tx, id).await?;
+    super::manage(&mut tx, &actor, e.case_id, &[Role::Manager]).await?;
+    crate::cases::core::bump_revision(&mut tx, e.case_id, Some(input.expected_revision)).await?;
+    if e.status != "withdrawn" || e.withdrawal_reason.is_some() {
+        return Err(AppError::conflict("Only a withdrawal without a recorded reason can be given one."));
+    }
+    let reason = input.reason.trim();
+    sqlx::query("UPDATE exhibitions SET withdrawal_reason=? WHERE id=? AND withdrawal_reason IS NULL")
+        .bind(reason)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    super::changed(
+        &mut tx,
+        actor.db_id(),
+        e.case_id,
+        "documents.exhibition_withdrawal_reason",
+        Visibility::Applicant,
+        &format!("A manager recorded why the public exhibition was withdrawn. Reason: {reason}"),
     )
     .await?;
     tx.commit().await?;

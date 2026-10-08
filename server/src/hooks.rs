@@ -110,6 +110,12 @@ pub async fn on_step_entered(
         StepKind::Task => {
             operations::api::create_step_task(tx, case, step, step_run_id, actor.db_id()).await?;
         }
+        StepKind::Module => {
+            if let Some(letter_type) = step.handler.as_deref().and_then(|h| h.strip_prefix("documents.letter_issued:"))
+            {
+                documents::api::adopt_unlinked_letter(tx, case.id, letter_type, step_run_id).await?;
+            }
+        }
         _ => {}
     }
     match owner_of(&case.module) {

@@ -759,3 +759,95 @@ async fn empty_group_rows_do_not_count_as_answers() {
         .unwrap();
     assert_eq!(d.detail("olga", c).await.unwrap()["answers"]["contacts"], json!([{"name":"Ann"}, {"name":"Bo"}]));
 }
+
+/// The state the previous release could leave: a road response letter issued at the current (pre-response) step,
+/// left unlinked to any step run by migration 0805.
+async fn legacy_early_letter(d: &mut Driver, c: i64) {
+    let r = rev(d, "olga", c).await;
+    let pdf = servicehub::pdf::simple_document("Fictional early response", &[], &[]);
+    let fields = [
+        ("title", "Fictional early road response".to_string()),
+        ("category", "supporting".to_string()),
+        ("visibility", "applicant".to_string()),
+        ("expected_revision", r.to_string()),
+    ];
+    let doc = d.upload("olga", &format!("/api/cases/{c}/documents"), &fields, &pdf).await.unwrap();
+    sqlx::query("INSERT INTO issued_letters(case_id,letter_type,document_id,document_version_id,issued_by,issued_at) SELECT ?,'road_response',?,?,NULL,entered_at FROM workflow_step_runs WHERE case_id=? ORDER BY id DESC LIMIT 1")
+        .bind(c)
+        .bind(doc["id"].as_i64().unwrap())
+        .bind(doc["version_id"].as_i64().unwrap())
+        .bind(c)
+        .execute(&d.state.db)
+        .await
+        .unwrap();
+}
+async fn unlinked_letters(d: &Driver, c: i64) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM issued_letters WHERE case_id=? AND step_run_id IS NULL")
+        .bind(c)
+        .fetch_one(&d.state.db)
+        .await
+        .unwrap()
+}
+
+/// A letter issued before its step under the previous release satisfies the first run of its letter step entered
+/// after it — linked once, on entry or by migration 0806 for runs that already exist — instead of forcing staff to
+/// issue a duplicate letter.
+#[tokio::test]
+async fn pre_upgrade_letter_issued_before_its_step_satisfies_that_step_once() {
+    let (mut d, _dir) = support::fixture().await;
+    // Entering the response step adopts the early letter.
+    let (a, _) = d.submit("alexey", "road-issue", json!({}), None).await.unwrap();
+    d.action("olga", a, "advance").await.unwrap();
+    legacy_early_letter(&mut d, a).await;
+    assert_eq!(unlinked_letters(&d, a).await, 1);
+    d.complete_task(a, "road_inspection").await.unwrap();
+    d.complete_task(a, "road_repair").await.unwrap();
+    let detail = d.detail("olga", a).await.unwrap();
+    assert_eq!(detail["case"]["current_step"], "response");
+    assert!(detail["guard_reason"].is_null(), "{}", detail["guard_reason"]);
+    assert_eq!(unlinked_letters(&d, a).await, 0);
+    let letters = req(&mut d, "olga", "GET", &format!("/api/cases/{a}/road-response"), json!({})).await;
+    assert_eq!(letters["can_issue"], false, "{letters}");
+    let r = rev(&mut d, "olga", a).await;
+    d.expect(
+        "olga",
+        "POST",
+        &format!("/api/cases/{a}/letters"),
+        json!({"letter_type":"road_response","title":"Duplicate","body":"Duplicate.","expected_revision":r}),
+        409,
+    )
+    .await
+    .unwrap();
+    d.action("olga", a, "advance").await.unwrap();
+    assert_eq!(d.detail("olga", a).await.unwrap()["case"]["status"], "completed");
+    // A case that already sat at its response step when the release was installed: the migration links it.
+    let (b, _) = d.submit("alexey", "road-issue", json!({}), None).await.unwrap();
+    d.action("olga", b, "advance").await.unwrap();
+    legacy_early_letter(&mut d, b).await;
+    d.complete_task(b, "road_inspection").await.unwrap();
+    d.complete_task(b, "road_repair").await.unwrap();
+    sqlx::query("UPDATE issued_letters SET step_run_id=NULL WHERE case_id=?")
+        .bind(b)
+        .execute(&d.state.db)
+        .await
+        .unwrap();
+    assert!(d.detail("olga", b).await.unwrap()["guard_reason"].is_string());
+    sqlx::raw_sql(include_str!("../migrations/0806_letter_early_issue.sql")).execute(&d.state.db).await.unwrap();
+    assert_eq!(unlinked_letters(&d, b).await, 0);
+    let run: i64 = sqlx::query_scalar("SELECT l.step_run_id FROM issued_letters l WHERE l.case_id=?")
+        .bind(b)
+        .fetch_one(&d.state.db)
+        .await
+        .unwrap();
+    let response: i64 = sqlx::query_scalar(
+        "SELECT id FROM workflow_step_runs WHERE case_id=? AND step_key='response' AND left_at IS NULL",
+    )
+    .bind(b)
+    .fetch_one(&d.state.db)
+    .await
+    .unwrap();
+    assert_eq!(run, response);
+    assert!(d.detail("olga", b).await.unwrap()["guard_reason"].is_null());
+    d.action("olga", b, "advance").await.unwrap();
+    assert_eq!(d.detail("olga", b).await.unwrap()["case"]["status"], "completed");
+}

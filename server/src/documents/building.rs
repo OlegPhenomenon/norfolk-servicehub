@@ -51,16 +51,21 @@ async fn role_in(
     }
     let slug: String =
         sqlx::query_scalar("SELECT slug FROM services WHERE id=?").bind(case.service_id).fetch_one(&mut *tx).await?;
-    Ok(legacy_role(&slug))
+    Ok(effective_role(&case.module, &slug, None))
 }
-/// Role of the building services that existed before `building_role` (their slugs were the role).
-fn legacy_role(slug: &str) -> Option<BuildingRole> {
-    match slug {
+/// The building role a definition of service `slug` runs with: its declared `building_role`, else — for the
+/// building services that existed before the field, whose slugs were the role — the role of the slug. Runtime
+/// (`role_of`) and publish validation both use this, so a definition is validated with the role it will run as.
+pub fn effective_role(module: &str, slug: &str, declared: Option<BuildingRole>) -> Option<BuildingRole> {
+    if module != "building" {
+        return None;
+    }
+    declared.or(match slug {
         "development-application" => Some(BuildingRole::Project),
         "modify-approval" => Some(BuildingRole::Modification),
         "building-commencement-notice" | "building-completion-notice" => Some(BuildingRole::FollowUp),
         _ => None,
-    }
+    })
 }
 /// Decision types a building role may receive: a project its development and/or building approval (its
 /// confirmed scope decides which), a modification only a modification approval, and a follow-up notice only
@@ -365,19 +370,33 @@ pub(crate) async fn root_type(tx: &mut SqliteConnection, mut id: i64) -> AppResu
     }
     Err(AppError::internal("Decision supersedes chain is too long."))
 }
-/// Readable labels of the approvals a submitted request names in its `original_approval` answer (validated and
-/// recorded at submission), keyed by decision id: approval type, the decision's own type and its case number.
-pub async fn original_labels(tx: &mut SqliteConnection, case_id: i64) -> AppResult<Value> {
-    let rows: Vec<(i64, String, Option<String>)> = sqlx::query_as("SELECT d.id,d.decision_type,c.number FROM building_original_approvals o JOIN decisions d ON d.id=o.decision_id JOIN cases c ON c.id=d.case_id WHERE o.case_id=? ORDER BY d.id")
-        .bind(case_id)
-        .fetch_all(&mut *tx)
-        .await?;
+/// Readable labels of every decision a submitted request names in a `decision_ref` answer (`{decision_id}` or
+/// `{decision_ids}`, validated at submission), keyed by decision id: approval type, the decision's own type and its
+/// case number. The ids come from the frozen answers, so every `decision_ref` field is covered.
+pub async fn decision_ref_labels(
+    tx: &mut SqliteConnection,
+    def: &ServiceDefinition,
+    answers: &Value,
+) -> AppResult<Value> {
     let mut out = serde_json::Map::new();
-    for (id, decision_type, number) in rows {
-        out.insert(
-            id.to_string(),
-            json!({"approval_type":root_type(tx,id).await?,"decision_type":decision_type,"case_number":number}),
-        );
+    for f in def.fields.iter().filter(|f| f.field_type == FieldType::DecisionRef) {
+        for id in answers.get(&f.key).and_then(decision_ids).unwrap_or_default() {
+            if out.contains_key(&id.to_string()) {
+                continue;
+            }
+            let row: Option<(String, Option<String>)> = sqlx::query_as(
+                "SELECT d.decision_type,c.number FROM decisions d JOIN cases c ON c.id=d.case_id WHERE d.id=?",
+            )
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if let Some((decision_type, number)) = row {
+                out.insert(
+                    id.to_string(),
+                    json!({"approval_type":root_type(tx,id).await?,"decision_type":decision_type,"case_number":number}),
+                );
+            }
+        }
     }
     Ok(Value::Object(out))
 }
@@ -769,6 +788,12 @@ pub async fn route(State(state): State<AppState>, actor: Actor, Path(id): Path<i
     let exhibition_step =
         definition.workflow.steps.iter().any(|s| s.handler.as_deref() == Some("documents.exhibition_closed"));
     let fee = crate::finance::building_fees::view(&mut c, &actor, &case, access).await?;
+    // The scope can change only while the decisions it requires are still outstanding.
+    let decisions_pending =
+        match definition.workflow.steps.iter().find(|s| s.kind == crate::services::definition::StepKind::Decision) {
+            Some(step) => decision_guard(&mut c, &case, step).await?.is_some(),
+            None => false,
+        };
     Ok(Json(json!({
         "route": kind.map(BuildingRole::as_str),
         "revision": case.revision,
@@ -778,7 +803,7 @@ pub async fn route(State(state): State<AppState>, actor: Actor, Path(id): Path<i
         "fee": fee,
         "exhibition_step": exhibition_step,
         "exhibition": if exhibition_step || kind.is_some() { super::exhibition::case_view(&mut c, id).await? } else { Value::Null },
-        "can_scope": kind.is_some() && open && access.can_manage() && roles.iter().any(|r| matches!(r, Role::Intake | Role::Specialist | Role::Manager)),
+        "can_scope": kind.is_some() && open && decisions_pending && access.can_manage() && roles.iter().any(|r| matches!(r, Role::Intake | Role::Specialist | Role::Manager)),
         "can_exhibit": open && access.can_manage() && roles.iter().any(|r| matches!(r, Role::Specialist | Role::Manager)),
     })))
 }
