@@ -1,6 +1,7 @@
 //! Clearly fictional demo configuration based on researched NIRC forms; amounts owned by finance.
 use super::catalog;
 use crate::{error::AppResult, state::AppState, time};
+use serde::Serialize;
 use serde_json::{Value, json};
 use sqlx::SqliteConnection;
 const ROOT: &str = "https://www.nirc.gov.au/files/assets/public/v/1/";
@@ -88,6 +89,35 @@ fn property() -> Vec<Value> {
         field("owner_name", "text", "Landowner's name", true),
     ]
 }
+fn project_field(label: &str) -> Value {
+    let mut f = field("project_reference", "project_ref", label, true);
+    f["help"] =
+        json!("Choose one of your building projects, or type its reference (for example BP-2026-000001) or ID.");
+    f
+}
+fn yes_na(key: &str, label: &str) -> Value {
+    let mut f = field(key, "select", label, true);
+    f["options"] = json!([{"value":"yes","label":"Yes"},{"value":"n_a","label":"N/a"}]);
+    f
+}
+/// Section 4 "Specified stage" of the official Stage A–E notices, quoting Building Regulation 2004 (NI) Schedule 3.
+fn stage_items(stage: &str) -> &'static [&'static str] {
+    match stage {
+        "A" => &[
+            "(a) excavation and placement of formwork and steel reinforcing for any slab, footing, wall, foundation wall, or like item but before any concrete for any slab, footing, wall, foundation wall or like item is poured",
+            "(b) excavation for any piers, posts, stumps, and like items but before any concrete for any piers, posts, stumps, or like items is poured",
+            "(c) placement of formwork and steel for any reinforced concrete member but before any concrete for the member is poured",
+        ],
+        "B" => &[
+            "completion of the structural framework and before the placement of any external cladding, roofing material or internal lining",
+        ],
+        "C" => &["completion of drainage work but before the covering over of any of those works"],
+        "D" => &["completion of plumbing services but before the covering over of any of those services"],
+        _ => &[
+            "completion of the building work approved in the relevant building approval before occupancy or use of the building",
+        ],
+    }
+}
 pub fn catalogue() -> Vec<(&'static str, &'static str, &'static str, &'static str, &'static str, Value, String)> {
     let entries = [
         (
@@ -172,9 +202,58 @@ pub fn catalogue() -> Vec<(&'static str, &'static str, &'static str, &'static st
             "Customer Care",
             "customer-service/documents/application_to_register_dogs.pdf",
         ),
+        (
+            "builder-stage-a-notice",
+            "Builder's Stage A Compliance Declaration Notice",
+            "Planning & Building",
+            "building",
+            "Planning",
+            "planning-development/documents/builders_stage_a_compliance_declaration_notice.pdf",
+        ),
+        (
+            "builder-stage-b-notice",
+            "Builder's Stage B Compliance Declaration Notice",
+            "Planning & Building",
+            "building",
+            "Planning",
+            "planning-development/documents/builders_stage_b_compliance_declaration_notice.pdf",
+        ),
+        (
+            "builder-stage-c-notice",
+            "Builder's Stage C Compliance Declaration Notice",
+            "Planning & Building",
+            "building",
+            "Planning",
+            "planning-development/documents/builders_stage_c_compliance_declaration_notice.pdf",
+        ),
+        (
+            "builder-stage-d-notice",
+            "Builder's Stage D Compliance Declaration Notice",
+            "Planning & Building",
+            "building",
+            "Planning",
+            "planning-development/documents/builders_stage_d_compliance_declaration_notice.pdf",
+        ),
+        (
+            "builder-stage-e-notice",
+            "Builder's Stage E Compliance Declaration Notice",
+            "Planning & Building",
+            "building",
+            "Planning",
+            "planning-development/documents/builders_stage_e_compliance_declaration_notice.docx",
+        ),
+        (
+            "pipeline-conduit-crossing",
+            "Application to Install Pipeline or Conduit Crossing in Public Roadway",
+            "Works & Roads",
+            "generic",
+            "Works Depot",
+            "infrastructure/documents/212_application_to_install_pipeline_or_conduit_crossing_in_public_roadway.pdf",
+        ),
     ];
     entries.into_iter().map(|(slug,name,category,m,department,url)|{
         let mut fields=contact();let mut docs=vec![];let mut pricing=vec![];let mut conditions=vec![];
+        let (mut response_days,mut fee_note,mut own_declaration)=(20,None::<&str>,false);
         let intake=review("intake","intake","Checking your request");
         let assessment=review("assessment","specialist","Assessing your application");
         let mut steps=vec![intake.clone(),assessment.clone(),done()];
@@ -201,7 +280,7 @@ pub fn catalogue() -> Vec<(&'static str, &'static str, &'static str, &'static st
                 if slug=="modify-approval"{("Apply to modify an issued approval with landowner consent and supporting plans.","A modification decision linked to the original approval.",vec!["development","building","modification","approval"])}else{("Apply for planning and building decisions with landowner consent, plans and supporting information.","Separate development and building decisions; approval is required before relevant work starts.",vec!["development","building","permit","DA","plans"])}
             },
             "building-commencement-notice"|"building-completion-notice"=>{
-                fields.extend(property());fields.push(field("project_reference","text","Building project reference or ID",true));
+                fields.extend(property());fields.push(project_field("Building project reference or ID"));
                 if slug=="building-commencement-notice"{fields.push(field("commencement_date","date","Commencement date (notify at least 48 hours before work)",true));}
                 else{fields.extend([field("builder","text","Person who carried out the building work",true),field("structure_owner","text","Structure owner's name",true),select("completion","Compliance declaration",&["Fully completed — s38(1)","Partly carried out — s38(2)"]),field("work_description","textarea","Description of work",true)]);docs.push(doc("compliance","Signed building compliance declaration",true));}
                 steps=vec![intake.clone(),task("site","site_inspection","Site inspection, if required",true),done()];
@@ -213,54 +292,213 @@ pub fn catalogue() -> Vec<(&'static str, &'static str, &'static str, &'static st
             "road-issue"=>{fields.extend([field("location","location","Location and description of road issue",true),field("description","textarea","Describe the pothole, culvert or other issue",true)]);docs.push(doc("photo","Photograph of the issue",false));steps=vec![review("triage","intake","Checking your road report"),task("inspection","road_inspection","Inspecting the road issue",false),task("repair","road_repair","Repair work, if required",true),module("response","documents.letter_issued:road_response","intake","Preparing your written response",false),done()];("Report a pothole, damaged road, culvert or runoff problem. Personal details remain private.","An inspection, repair when needed, and a written response.",vec!["road","pothole","culvert","repair"])},
             "complaint"=>{let mut subject=field("staff_member_concerned","select","Staff member concerned (if known)",false);subject["options"]=json!([]);fields.push(subject);fields.extend([field("complaint","textarea","Describe your complaint",true),field("desired_outcome","textarea","What outcome would you like?",true)]);docs.push(doc("evidence","Supporting evidence",false));steps=vec![review("triage","complaints_officer","Reviewing your complaint"),review("investigation","complaints_officer","Investigating your complaint"),module("response","documents.letter_issued:complaint_response","complaints_officer","Preparing your complaint response",false),done()];("Make a confidential complaint to the Complaints Officer.","A written complaint response.",vec!["complaint","feedback","confidential"])},
             "council-record-copy"=>{fields.extend([field("record_description","textarea","Describe the Council record requested",true),field("reference","text","Meeting date or record reference",false)]);pricing.push(json!({"item":"RECORD_COPY","quantity":1}));steps=vec![intake.clone(),payment(),review("assessment","intake","Finding the requested record"),done()];("Request a copy of a Council record, such as meeting minutes.","A copy of an available record or an explanation.",vec!["record","copy","minutes","information"])},
+            s if s.starts_with("builder-stage-")=>{
+                // Builder's Stage A–E Compliance Declaration Notices (s34 Building Act 2002 (NI)), updated 24 February 2025.
+                let stage=s[14..15].to_uppercase();
+                fields=vec![project_field("Building approval — your building project"),field("builder_first_name","text","Person who carried out the building work — first name",true),field("builder_last_name","text","Person who carried out the building work — last name",true),field("phone","phone","Phone number",true)];
+                if stage=="A"{fields.push(field("mobile","phone","Mobile number",true));}
+                fields.extend([field("email","email",if stage=="A"{"Email(s)"}else{"Email"},true),field("property_ref","property_ref","Portion number",true),field("address","text","Property address",true)]);
+                fields.extend([field("declare_completed","checkbox",&format!("I have completed the building work described for Inspection Stage {stage}"),true),field("declare_complies","checkbox",&format!("I declare that the building work complies with the relevant and applicable requirements for Stage {stage} building work specified in Schedule 3 of the Building Regulation 2004 (NI)"),true),field("declare_approval","checkbox","I certify that I am satisfied that the building work has been completed in accordance with the building approval and the Building Act 2002 (NI)",true),field("declaration_date","date","Date of the compliance declaration",true)]);
+                let items=stage_items(&stage);
+                for (i,item) in items.iter().enumerate(){
+                    let key=if items.len()==1{"stage_item".to_string()}else{format!("stage_item_{}",(b'a'+i as u8) as char)};
+                    fields.push(yes_na(&key,&format!("Specified Stage {stage} work (Building Regulation 2004 (NI) Schedule 3): {item}")));
+                }
+                docs=vec![doc("declaration",&format!("Signed Builder's Stage {stage} compliance declaration notice"),true)];
+                pricing.push(json!({"item":"BUILDING_STAGE_INSPECTION","quantity":1}));
+                let mut accept=step("decision","decision",Some("specialist"),"Accept declaration and permit work to continue","We are confirming whether building work may continue.");
+                accept["decision_types"]=json!(["service_response"]);
+                steps=vec![intake.clone(),payment(),task("site","site_inspection",&format!("Stage {stage} inspection by an authorised officer"),false),accept,done()];
+                fee_note=Some("Building inspection fee: $83.00 per stage (Council fees and charges; demo schedule — confirm before real use).");
+                own_declaration=true;
+                ("Notify the General Manager under section 34 of the Building Act 2002 (NI) that this stage of building work complies with the building approval, so that an authorised officer can inspect it.","An inspection and written permission under section 34(c) to continue building work, recorded on the same building project.",vec!["building","stage","inspection","compliance","declaration","notice"])
+            },
+            "pipeline-conduit-crossing"=>{
+                // Form 212, last updated 1 June 2023: every field except the business name is marked mandatory.
+                for f in fields.iter_mut(){if matches!(f["key"].as_str(),Some("email"|"phone")){f["required"]=json!(true);}}
+                fields.extend([field("organisation_name","text","Business / company name",false),field("abn","text","ABN / ACN number",true),field("position_held","text","Position held by the person signing",true),field("road_name","text","Name of road that the pipeline or conduit will be installed in",true),field("crossing_location","property_ref","Location of proposed pipeline or conduit crossing (Portion number of property)",true),field("pipe_size_type","textarea","Size and type of proposed pipe or conduit",true),field("adjacent_portions","text","Description of land adjacent to the road reserve (Portion numbers)",true),field("no_work","checkbox","I/we understand that no work is to be carried out until this application is approved by Council",true),field("restoration","checkbox","I/we agree to meet the costs of restoring the road pavement, or other remedial work Council deems necessary",true)]);
+                docs.push(doc("drawing","Sketch or drawing showing location, dimensions and levels of the proposed pipe or conduit",true));
+                steps=vec![intake.clone(),review("assessment","intake","Assessing the pipeline or conduit crossing"),done()];
+                response_days=10;
+                fee_note=Some("Form 212 does not state an application fee. Council will confirm any fee and road restoration costs before work starts.");
+                ("Apply to install a pipeline or other conduit within a road reserve or beneath a public roadway. An officer responds within 10 working days.","A written decision approving or declining the proposed crossing.",vec!["pipe","pipeline","conduit","crossing","road","water","cable"])
+            },
             _=>{fields.extend([field("dog_name","text","Dog's name",true),field("breed","text","Breed",true),field("microchip","text","Microchip number",false)]);("Draft demonstration service: dog registration rules need review before publishing.","A registration confirmation after staff review.",vec!["dog","registration"])},
         };
-        fields.push(field("declaration","checkbox","I declare that the information is correct",true));
+        if m=="generic"&&slug!="dog-registration"{let terminal=steps.pop().expect("complete");steps.push(decision(&["service_response"]));steps.push(terminal);}
+        if !own_declaration{fields.push(field("declaration","checkbox","I declare that the information is correct",true));}
         let first=steps.first().unwrap()["key"].as_str().unwrap();let second=steps.get(1).unwrap()["key"].as_str().unwrap();
-        let deadlines=json!([{"kind":"completeness","label":"Initial check","days":if m=="building"{10}else{3},"basis":"business","starts":"submitted","stops":format!("step:{second}"),"pausable":false},{"kind":"response","label":"Reply","days":20,"basis":"business","starts":format!("step:{first}"),"stops":"closed","pausable":true,"max_pause_days":30}]);
+        let deadlines=json!([{"kind":"completeness","label":"Initial check","days":if m=="building"{10}else{3},"basis":"business","starts":"submitted","stops":format!("step:{second}"),"pausable":false},{"kind":"response","label":"Reply","days":response_days,"basis":"business","starts":format!("step:{first}"),"stops":"closed","pausable":true,"max_pause_days":30}]);
         let calculation=match m {
             "venue_booking"=>"Hire fee plus a refundable bond. Hall fees are charged per calendar day touched by the booking.",
             "equipment_hire"=>"Final charges use actual approved minutes and any agreed pass-through expenses. Rates include fuel, oil and the operator's ordinary-time wages.",
             _=>"Council will confirm the fee before payment.",
         };
-        let price_note=if matches!(slug,"road-issue"|"complaint"){"No fee applies."}else{calculation};
-        let def=json!({"module":m,"summary":summary,"conditions":conditions,"outcome":outcome,"who_can_apply":"Residents and businesses, or an authorised representative.","price_note":price_note,"keywords":keywords,"fields":fields,"documents":docs,"workflow":{"steps":steps},"deadlines":deadlines,"pricing":pricing});
+        let price_note=if matches!(slug,"road-issue"|"complaint"){"No fee applies."}else{fee_note.unwrap_or(calculation)};
+        let building_role=match slug{"development-application"=>Some("project"),"modify-approval"=>Some("modification"),_ if m=="building"=>Some("follow_up"),_=>None};
+        let mut def=json!({"module":m,"summary":summary,"conditions":conditions,"outcome":outcome,"who_can_apply":"Residents and businesses, or an authorised representative.","price_note":price_note,"keywords":keywords,"fields":fields,"documents":docs,"workflow":{"steps":steps},"deadlines":deadlines,"pricing":pricing});
+        if let Some(role)=building_role{def["building_role"]=json!(role);}
         let source=if url.is_empty(){"https://www.nirc.gov.au/Customer-Service/Customer-Service-Forms".into()}else{format!("{ROOT}{url}")};
         (slug,name,category,m,department,def,source)
     }).collect()
 }
+/// What [`upgrade`] did for one catalogue entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogueAction {
+    /// The service did not exist and was created from the seed.
+    Created,
+    /// The published version came from the seed; a new seed version was published and the old one retired.
+    Upgraded,
+    /// Staff changed the published version; the new seed definition was stored as a draft for review.
+    DraftForReview,
+    /// A draft with the current seed definition already waits for staff review.
+    AwaitingReview,
+    Unchanged,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CatalogueChange {
+    pub slug: &'static str,
+    pub action: CatalogueAction,
+    /// The version created, published or found.
+    pub version: i64,
+    /// The previously published version, when it was retired or kept for staff.
+    pub previous: Option<i64>,
+}
+impl std::fmt::Display for CatalogueChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.action, self.previous) {
+            (CatalogueAction::Created, _) => write!(f, "{}: created version {}", self.slug, self.version),
+            (CatalogueAction::Upgraded, Some(p)) => {
+                write!(f, "{}: published version {} (version {p} retired)", self.slug, self.version)
+            }
+            (CatalogueAction::DraftForReview, p) => write!(
+                f,
+                "{}: published version {} was edited by staff; seed changes saved as draft version {} for review",
+                self.slug,
+                p.map_or("-".into(), |p| p.to_string()),
+                self.version
+            ),
+            (CatalogueAction::AwaitingReview, _) => {
+                write!(f, "{}: seed draft version {} awaits staff review", self.slug, self.version)
+            }
+            _ => write!(f, "{}: unchanged (version {})", self.slug, self.version),
+        }
+    }
+}
+/// SHA-256 of the canonical seeded definition JSON (`service_versions.seed_hash`).
+pub fn seed_hash(definition: &Value) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(definition.to_string().as_bytes()))
+}
+type VersionRow = (i64, i64, String, String, Option<String>);
+/// Seed provenance: the stored content still hashes to the recorded seed hash. Versions seeded before
+/// migration 0803 carry `legacy`, trusted only for immutable (non-draft) versions.
+fn seeded(v: &VersionRow) -> bool {
+    match v.4.as_deref() {
+        Some("legacy") => v.2 != "draft",
+        Some(h) => serde_json::from_str::<Value>(&v.3).is_ok_and(|d| seed_hash(&d) == h),
+        None => false,
+    }
+}
+/// One seeded version to write.
+struct Seeded<'a> {
+    definition: &'a Value,
+    hash: &'a str,
+    note: &'a str,
+    now: &'a str,
+}
+impl Seeded<'_> {
+    async fn write(&self, tx: &mut SqliteConnection, id: i64, version: i64, status: &str) -> AppResult<()> {
+        sqlx::query("INSERT INTO service_versions(service_id,version,status,definition_json,source_note,created_at,published_at,seed_hash) VALUES (?,?,?,?,?,?,?,?)")
+            .bind(id).bind(version).bind(status).bind(self.definition.to_string()).bind(self.note).bind(self.now)
+            .bind((status == "published").then_some(self.now)).bind(self.hash).execute(&mut *tx).await?;
+        catalog::reindex(tx, id).await
+    }
+}
 pub async fn seed(tx: &mut SqliteConnection, state: &AppState) -> AppResult<()> {
-    sqlx::query("INSERT INTO service_synonyms VALUES ('party','hall'),('birthday','hall'),('wedding','hall'),('venue','hall'),('digger','equipment'),('excavator','equipment'),('pothole','road'),('hole','road'),('da','development'),('permit','development') ON CONFLICT DO NOTHING").execute(&mut *tx).await?;
-
-    for (slug, name, category, module, department, definition, source) in catalogue() {
-        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM services WHERE slug=?)")
-            .bind(slug)
-            .fetch_one(&mut *tx)
-            .await?;
-        if exists {
-            continue;
+    for change in upgrade(tx, state).await? {
+        if change.action != CatalogueAction::Unchanged {
+            tracing::info!(%change, "service catalogue");
         }
-        let id: i64 = sqlx::query_scalar(
-            "INSERT INTO services(slug,name,category,module,department,created_at) VALUES (?,?,?,?,?,?) RETURNING id",
-        )
-        .bind(slug)
-        .bind(name)
-        .bind(category)
-        .bind(module)
-        .bind(department)
-        .bind(time::fmt(state.now()))
-        .fetch_one(&mut *tx)
-        .await?;
-        let mut definition = definition;
-        if module == "generic" && slug != "dog-registration" {
-            let steps = definition["workflow"]["steps"].as_array_mut().expect("steps");
-            let terminal = steps.pop().expect("complete");
-            steps.push(decision(&["service_response"]));
-            steps.push(terminal);
-        }
-        let status = if slug == "dog-registration" { "draft" } else { "published" };
-        sqlx::query("INSERT INTO service_versions(service_id,version,status,definition_json,source_note,created_at,published_at) VALUES (?,1,?,?,?,?,?)").bind(id).bind(status).bind(definition.to_string()).bind(format!("Fictional demonstration configuration based on NIRC form: {source}. Every rule must be checked before real use.")).bind(time::fmt(state.now())).bind((status=="published").then(||time::fmt(state.now()))).execute(&mut *tx).await?;
-        catalog::reindex(tx, id).await?;
     }
     Ok(())
+}
+/// Installs or upgrades the seeded catalogue. Missing services are created. A published version that still
+/// carries seed provenance and differs from the current seed is retired in favour of a new published version;
+/// a published version edited by staff is never overwritten: the seed definition becomes a draft for review.
+/// Cases keep the version they were created on and their frozen submission snapshot. Idempotent.
+pub async fn upgrade(tx: &mut SqliteConnection, state: &AppState) -> AppResult<Vec<CatalogueChange>> {
+    sqlx::query("INSERT INTO service_synonyms VALUES ('party','hall'),('birthday','hall'),('wedding','hall'),('venue','hall'),('digger','equipment'),('excavator','equipment'),('pothole','road'),('hole','road'),('da','development'),('permit','development'),('pipe','pipeline'),('conduit','pipeline') ON CONFLICT DO NOTHING").execute(&mut *tx).await?;
+    let now = time::fmt(state.now());
+    let mut changes = Vec::new();
+    for (slug, name, category, module, department, definition, source) in catalogue() {
+        let hash = seed_hash(&definition);
+        let note = format!(
+            "Fictional demonstration configuration based on NIRC form: {source}. Every rule must be checked before real use."
+        );
+        let target = if slug == "dog-registration" { "draft" } else { "published" };
+        let insert = Seeded { definition: &definition, hash: &hash, note: &note, now: &now };
+        let change = |action, version, previous| CatalogueChange { slug, action, version, previous };
+        let service: Option<i64> =
+            sqlx::query_scalar("SELECT id FROM services WHERE slug=?").bind(slug).fetch_optional(&mut *tx).await?;
+        let Some(id) = service else {
+            let id: i64 = sqlx::query_scalar(
+                "INSERT INTO services(slug,name,category,module,department,created_at) VALUES (?,?,?,?,?,?) RETURNING id",
+            )
+            .bind(slug)
+            .bind(name)
+            .bind(category)
+            .bind(module)
+            .bind(department)
+            .bind(&now)
+            .fetch_one(&mut *tx)
+            .await?;
+            insert.write(tx, id, 1, target).await?;
+            changes.push(change(CatalogueAction::Created, 1, None));
+            continue;
+        };
+        let versions: Vec<VersionRow> = sqlx::query_as(
+            "SELECT id,version,status,definition_json,seed_hash FROM service_versions WHERE service_id=? ORDER BY version",
+        )
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let next = versions.iter().map(|v| v.1).max().unwrap_or(0) + 1;
+        let same = |v: &VersionRow| serde_json::from_str::<Value>(&v.3).is_ok_and(|d| d == definition);
+        let published = versions.iter().find(|v| v.2 == "published");
+        // The seed definition is already in place: stamp provenance on a matching legacy version.
+        if let Some(v) = versions.iter().find(|v| v.2 == target && same(v)) {
+            if seeded(v) && v.4.as_deref() != Some(hash.as_str()) {
+                sqlx::query("UPDATE service_versions SET seed_hash=? WHERE id=?")
+                    .bind(&hash)
+                    .bind(v.0)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            changes.push(change(CatalogueAction::Unchanged, v.1, None));
+            continue;
+        }
+        if target == "published"
+            && let Some(p) = published.filter(|p| seeded(p))
+        {
+            sqlx::query("UPDATE service_versions SET status='retired' WHERE id=?").bind(p.0).execute(&mut *tx).await?;
+            insert.write(tx, id, next, "published").await?;
+            changes.push(change(CatalogueAction::Upgraded, next, Some(p.1)));
+            continue;
+        }
+        if let Some(v) = versions.iter().find(|v| v.2 == "draft" && v.4.as_deref() == Some(hash.as_str()) && seeded(v))
+        {
+            changes.push(change(CatalogueAction::AwaitingReview, v.1, published.map(|p| p.1)));
+            continue;
+        }
+        insert.write(tx, id, next, "draft").await?;
+        tracing::warn!(
+            slug,
+            version = next,
+            "service catalogue: the current version is not seed-managed; seed changes saved as a draft for staff review"
+        );
+        changes.push(change(CatalogueAction::DraftForReview, next, published.map(|p| p.1)));
+    }
+    Ok(changes)
 }

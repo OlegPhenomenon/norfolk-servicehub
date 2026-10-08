@@ -1,4 +1,4 @@
-//! `servicehub serve | migrate | seed-demo | reset-demo | backup <dir> | restore-check <backup-dir>`
+//! `servicehub serve | migrate | seed-demo | reset-demo | seed-catalogue | upgrade-catalogue | backup <dir> | restore-check <backup-dir>`
 
 use std::path::PathBuf;
 
@@ -17,7 +17,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run migrations, then serve HTTP with the background worker and scheduler.
+    /// Run migrations and the catalogue upgrade, then serve HTTP with the background worker and scheduler.
     Serve,
     /// Apply database migrations and exit.
     Migrate,
@@ -34,6 +34,8 @@ enum Command {
     },
     /// Seed configuration only, without demo users or cases.
     SeedCatalogue,
+    /// Upgrade seeded service definitions of an installed catalogue and print what changed.
+    UpgradeCatalogue,
     /// Write a backup (database + blobs) into DIR.
     Backup { dir: PathBuf },
     /// Verify that a backup in DIR restores cleanly.
@@ -55,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
             Command::Serve => {
                 db::migrate(&state.db).await?;
                 servicehub::bootstrap::seed_fresh_demo(&state).await?;
+                servicehub::bootstrap::upgrade_catalogue(&state).await?;
                 app::serve(state.clone()).await.map_err(servicehub::AppError::from)?;
             }
             Command::Migrate => {
@@ -75,6 +78,16 @@ async fn main() -> anyhow::Result<()> {
             Command::SeedCatalogue => {
                 db::migrate(&state.db).await?;
                 servicehub::bootstrap::seed_catalogue(&state).await?;
+            }
+            Command::UpgradeCatalogue => {
+                db::migrate(&state.db).await?;
+                let changes = servicehub::bootstrap::upgrade_catalogue(&state).await?;
+                if changes.is_empty() {
+                    println!("No catalogue installed; run seed-catalogue first.");
+                }
+                for change in changes {
+                    println!("{change}");
+                }
             }
             Command::Backup { dir } => {
                 db::migrate(&state.db).await?;

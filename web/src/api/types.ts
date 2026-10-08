@@ -204,6 +204,8 @@ export type FieldType =
   | 'booking_slot'
   | 'equipment_request'
   | 'decision_ref'
+  /** Building project reference or ID (string answer). */
+  | 'project_ref'
 
 export interface FieldOption {
   value: string
@@ -340,4 +342,8 @@ export interface ServiceDefinition {
   workflow: { steps: StepDef[] }
   deadlines: DeadlineDef[]
   pricing: PricingItem[]
+  /** Building module only: how a case relates to a building project. */
+  building_role?: BuildingRole
 }
+
+export type BuildingRole = 'project' | 'modification' | 'follow_up'

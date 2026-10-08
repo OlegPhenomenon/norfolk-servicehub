@@ -51,6 +51,20 @@ A script for walking someone through the demo — at https://norfolk.shelfcompas
 
 **Point out:** issuing needs explicit *decision authority* (Helen granted Priya's; Mark the sysadmin can't issue anything). A refusal is issued the same way and recorded with its reasons.
 
+## Story 2b — A stage inspection notice and a pipe under the road (~3 min)
+
+*Personas: Ben → Olga → Ben → Tom/DemoPay → Jake → Priya → Helen; Ben → Olga → Priya → Helen*
+
+The seed already contains a completed **Builder's Stage B Compliance Declaration Notice** on Island Builders' project (returned once for a signed copy, version 2 accepted) and a decided **form 212 pipeline / conduit crossing**. Open the project page from either the Stage B case or the approval to see them. To walk it live:
+
+1. **Ben** → Services → *Planning & Building* → one of *"Builder's Stage A … E Compliance Declaration Notice"* (one service per official notice; each quotes its Schedule 3 stage text). Pick the building project from **Your building projects** (or type its reference), fill in the builder, Portion and declarations, upload the declaration and submit. The case is linked to the same project.
+2. **Olga** → Documents → comments on the declaration with *Request a new version* ("not signed"). The case waits for Ben; *Complete this step* is not offered.
+3. **Ben** uploads **version 2** of the declaration (resolving the comment). **Olga** completes the intake check; the **$83 inspection fee** (demo schedule) is invoiced and Ben pays it.
+4. **Jake** completes the **site inspection** task (required, it cannot be skipped).
+5. **Priya** → Decisions → prepares a *Service response* — written permission under s34(c) to continue — with evidence **version 2**; **Helen** issues it. Approvals cannot be issued on a notice.
+6. Open the **building project** page: the request lists both declaration versions with the return comment, the decision history shows *Decision based on … v2*, and **Project history** lists the return, the new version and the decision across all project requests.
+7. **Pipeline crossing:** Ben → Services → *Works & Roads* → *"Application to Install Pipeline or Conduit Crossing in Public Roadway"* (form 212: road, Portion, pipe/conduit size and type, adjacent land, acknowledgements, drawing). Olga checks and assesses it, Priya prepares and Helen issues the written decision; Ben is notified. Form 212 states no fee, so none is charged.
+
 ## Story 3 — A planning certificate (~1 min)
 
 *Personas: Alexey → Olga → Tom/DemoPay → Priya → Helen*

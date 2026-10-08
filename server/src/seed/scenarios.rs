@@ -208,6 +208,11 @@ pub async fn run(state: &AppState) -> AppResult<()> {
     let start = d.instant(9, 7, 30);
     let end = d.instant(9, 13, 0);
     schedule_equipment(&mut d, scheduled, &start, &end).await?;
+    // Appended after the earlier stories so their case numbers (used by the demo bank statement) stay put.
+    // Builder's Stage B notice on Island Builders' project: returned for a signed copy, replaced and accepted.
+    stage_notice(&mut d, &project.to_string(), org).await?;
+    // Form 212 pipeline / conduit crossing through to a written decision.
+    pipeline_crossing(&mut d).await?;
 
     let csv = include_str!("../../seed-data/legacy/legacy-cases-sample.csv");
     let batch = d
@@ -380,4 +385,40 @@ pub async fn verify(d: &mut Driver) -> AppResult<()> {
         return Err(AppError::internal("Unbalanced seed journal entry"));
     }
     Ok(())
+}
+/// Stage B compliance declaration: intake returns the unsigned declaration, the builder uploads version 2,
+/// the inspection fee is paid, the site is inspected and written permission is issued against version 2.
+pub async fn stage_notice(d: &mut Driver, project: &str, org: i64) -> AppResult<i64> {
+    let (stage, docs) =
+        d.submit("ben", "builder-stage-b-notice", json!({"project_reference":project}), Some(org)).await?;
+    let declaration = &docs["declaration"];
+    let revision = d.revision("olga", stage).await?;
+    let comment = d.req("olga", "POST", &format!("/api/document-versions/{}/comments", declaration["version_id"]), json!({"expected_revision":revision,"body":"The declaration is not signed. Please upload the signed Stage B notice.","visibility":"applicant","request_new_version":true})).await?["id"].clone();
+    let pdf = crate::pdf::simple_document(
+        "Fictional Builder's Stage B compliance declaration (signed)",
+        &[],
+        &[("Declaration", "Signed by the fictional builder of Island Builders.".into())],
+    );
+    let signed = d
+        .upload(
+            "ben",
+            &format!("/api/documents/{}/versions", declaration["id"]),
+            &[("resolves_comment_ids", json!([comment]).to_string()), ("note", "Signed declaration".into())],
+            &pdf,
+        )
+        .await?["version_id"]
+        .as_i64()
+        .unwrap();
+    d.action("olga", stage, "advance").await?;
+    d.pay("ben", stage, false).await?;
+    d.complete_task(stage, "site_inspection").await?;
+    d.decision(stage, "service_response", Some(vec![signed])).await?;
+    Ok(stage)
+}
+pub async fn pipeline_crossing(d: &mut Driver) -> AppResult<i64> {
+    let (case, _) = d.submit("ben", "pipeline-conduit-crossing", json!({"road_name":"Taylors Road","pipe_size_type":"Fictional 50 mm PE water main in 100 mm conduit","adjacent_portions":"Portion DEMO-44 and DEMO-45"}), None).await?;
+    d.action("olga", case, "advance").await?;
+    d.action("olga", case, "advance").await?;
+    d.decision(case, "service_response", None).await?;
+    Ok(case)
 }

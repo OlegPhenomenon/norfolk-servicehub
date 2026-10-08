@@ -8,7 +8,7 @@ mod seed;
 pub mod validation;
 use crate::state::AppState;
 use axum::Router;
-pub use seed::seed;
+pub use seed::{CatalogueAction, CatalogueChange, catalogue, seed, seed_hash, upgrade};
 pub fn routes() -> Router<AppState> {
     Router::new().merge(catalog::routes()).merge(admin::routes()).merge(imports::routes()).merge(ai_suggest::routes())
 }

@@ -68,6 +68,26 @@ pub async fn seed_catalogue(state: &AppState) -> AppResult<()> {
     Ok(())
 }
 
+/// Versioned upgrade of an installed catalogue (see `services::upgrade`), plus the idempotent configuration
+/// seeds new definitions depend on (price items, decision templates). Runs on every `serve` once a catalogue
+/// exists, and as `servicehub upgrade-catalogue`. An empty database is left alone: installing the catalogue
+/// stays an explicit `seed-catalogue` / demo-seed step.
+pub async fn upgrade_catalogue(state: &AppState) -> AppResult<Vec<crate::services::CatalogueChange>> {
+    let mut tx = db::write_tx(&state.db).await?;
+    let installed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM services)").fetch_one(&mut *tx).await?;
+    if !installed {
+        return Ok(vec![]);
+    }
+    crate::finance::seed(&mut tx, state).await?;
+    crate::documents::seed(&mut tx, state).await?;
+    let changes = crate::services::upgrade(&mut tx, state).await?;
+    tx.commit().await?;
+    for change in changes.iter().filter(|c| c.action != crate::services::CatalogueAction::Unchanged) {
+        tracing::info!(%change, "service catalogue upgrade");
+    }
+    Ok(changes)
+}
+
 pub async fn seed_fresh_demo(state: &AppState) -> AppResult<()> {
     if state.cfg.demo_mode {
         let fresh: bool =

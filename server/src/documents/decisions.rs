@@ -118,8 +118,13 @@ pub async fn list(
         .fetch_one(&mut *c)
         .await?;
     let definition: serde_json::Value = serde_json::from_str(&requirements)?;
+    let role = super::building::role_of(&mut c, &case).await?;
+    let allowed: Vec<&str> = crate::services::validation::decision_types(&case.module)
+        .into_iter()
+        .filter(|t| super::building::role_permits(role, t))
+        .collect();
     Ok(Json(
-        serde_json::json!({"editable":editable,"can_upload":editable && super::uploads::writable(a).is_ok(),"can_comment":editable && can_comment,"can_prepare":can_prepare,"document_requirements":definition.get("documents").cloned().unwrap_or_else(||serde_json::json!([])),"items":rows,"authorities":authorities,"staff":a.is_staff(),"revision":case.revision,"building_project_id":case.building_project_id,"allowed_decision_types":crate::services::validation::decision_types(&case.module)}),
+        serde_json::json!({"editable":editable,"can_upload":editable && super::uploads::writable(a).is_ok(),"can_comment":editable && can_comment,"can_prepare":can_prepare,"document_requirements":definition.get("documents").cloned().unwrap_or_else(||serde_json::json!([])),"items":rows,"authorities":authorities,"staff":a.is_staff(),"revision":case.revision,"building_project_id":case.building_project_id,"allowed_decision_types":allowed}),
     ))
 }
 async fn validate(tx: &mut SqliteConnection, case: &CaseRow, input: &Input) -> AppResult<Vec<i64>> {
@@ -130,12 +135,7 @@ async fn validate(tx: &mut SqliteConnection, case: &CaseRow, input: &Input) -> A
     if !permitted {
         return Err(AppError::field("decision_type", "This decision type does not match the service."));
     }
-    let slug: String =
-        sqlx::query_scalar("SELECT slug FROM services WHERE id=?").bind(case.service_id).fetch_one(&mut *tx).await?;
-    if (slug == "modify-approval" && input.decision_type != "modification_approval")
-        || (slug == "development-application" && input.decision_type == "modification_approval")
-        || slug.ends_with("notice")
-    {
+    if !super::building::role_permits(super::building::role_of(tx, case).await?, &input.decision_type) {
         return Err(AppError::field("decision_type", "This approval does not match the request."));
     }
     if !matches!(input.outcome.as_str(), "approved" | "approved_with_conditions" | "refused") {

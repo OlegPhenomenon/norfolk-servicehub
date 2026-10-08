@@ -56,6 +56,18 @@ async fn seeded_history_is_complete_balanced_repeatable_and_leaves_the_visitor_s
     assert_eq!(scalar(&state,"SELECT COUNT(*) FROM decision_evidence e JOIN document_versions v ON v.id=e.document_version_id JOIN decisions d ON d.id=e.decision_id WHERE d.decision_type IN ('development_approval','building_approval') AND v.version=2").await,2);
     assert_eq!(scalar(&state,"SELECT COUNT(*) FROM cases c JOIN services s ON s.id=c.service_id WHERE s.slug='building-commencement-notice' AND c.building_project_id IS NOT NULL AND c.status='completed'").await,1);
     assert_eq!(scalar(&state, "SELECT COUNT(*) FROM case_links WHERE kind='modification_of'").await, 1);
+    // Audit 2 / N-05: 18 catalogue services (17 published), all seed-managed; a Stage B notice on the seeded
+    // project was returned, replaced and accepted against version 2; a pipeline crossing was decided.
+    assert_eq!(scalar(&state, "SELECT COUNT(*) FROM services").await, 18);
+    assert_eq!(
+        scalar(&state, "SELECT COUNT(*) FROM service_versions WHERE status='published' AND seed_hash IS NOT NULL")
+            .await,
+        17
+    );
+    assert_eq!(scalar(&state,"SELECT COUNT(*) FROM cases c JOIN services s ON s.id=c.service_id WHERE s.slug='builder-stage-b-notice' AND c.status='completed' AND c.building_project_id=(SELECT building_project_id FROM cases c2 JOIN services s2 ON s2.id=c2.service_id WHERE s2.slug='building-commencement-notice')").await,1);
+    assert_eq!(scalar(&state,"SELECT COUNT(*) FROM document_comments k JOIN document_versions v ON v.id=k.document_version_id JOIN documents d ON d.id=v.document_id JOIN cases c ON c.id=d.case_id JOIN services s ON s.id=c.service_id WHERE s.slug='builder-stage-b-notice' AND k.request_new_version=1 AND k.resolved_by_version_id IS NOT NULL").await,1);
+    assert_eq!(scalar(&state,"SELECT COUNT(*) FROM decision_evidence e JOIN document_versions v ON v.id=e.document_version_id JOIN decisions d ON d.id=e.decision_id JOIN cases c ON c.id=d.case_id JOIN services s ON s.id=c.service_id WHERE s.slug='builder-stage-b-notice' AND d.decision_type='service_response' AND d.status='issued' AND v.version=2").await,1);
+    assert_eq!(scalar(&state,"SELECT COUNT(*) FROM decisions d JOIN cases c ON c.id=d.case_id JOIN services s ON s.id=c.service_id WHERE s.slug='pipeline-conduit-crossing' AND d.status='issued' AND c.status='completed'").await,1);
     assert_eq!(scalar(&state, "SELECT COUNT(*) FROM exhibitions WHERE status='open'").await, 1);
     assert_eq!(
         scalar(

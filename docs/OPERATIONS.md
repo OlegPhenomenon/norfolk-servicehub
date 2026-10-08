@@ -68,10 +68,27 @@ Migrations, backups and restore tooling are shared. All `/mock/**` routes, inclu
 
 1. Build and test the new image without replacing the running service.
 2. Take a backup using the currently installed binary, and run its restore check.
-3. Stop the running service, preserve its environment configuration, then start the new image with the same data volume. `serve` applies embedded migrations before accepting requests.
-4. Check `/api/health`, a resident case, a staff case, and the worker's delivery logs.
+3. Stop the running service, preserve its environment configuration, then start the new image with the same data volume. `serve` applies embedded migrations and then the catalogue upgrade (below) before accepting requests.
+4. Check `/api/health`, a resident case, a staff case, the worker's delivery logs and the `service catalogue upgrade` log lines.
 
 Never edit an applied migration. Keep the old image and verified backup together. If an upgrade must be rolled back after a schema change, restore the pre-upgrade database and files using the old image; running the old binary on a newer schema is not a rollback.
+
+### Catalogue upgrade
+
+Each release carries the seeded service catalogue (`server/src/services/seed.rs`). Every seeded version records `service_versions.seed_hash`, the SHA-256 of the definition it was created from (migration `0803_services_catalogue.sql` marks versions seeded before this field existed as `legacy`). On every `serve` of an installation that already has a catalogue, and on demand with:
+
+```sh
+servicehub upgrade-catalogue   # migrates, upgrades, prints one line per service
+```
+
+the binary compares each catalogue entry with the database, in one transaction, together with the idempotent price-item and decision-template seeds the definitions use:
+
+- **Missing service** → created with version 1 (for example the Builder's Stage A–E notices and form 212 on an older installation).
+- **Published version is seed-managed and differs from the release** → a new version (highest + 1) is inserted and published; the old one is retired. Output: `slug: published version N (version M retired)`.
+- **Published version was created or edited by staff in the builder** (no seed provenance) → the release definition is stored as a **draft for review** and the published version is untouched; a warning is logged. Staff open *Admin → Services → service → Version N — draft*, compare, then publish or discard it. Later runs report `awaits staff review` and add nothing.
+- **Unchanged** → nothing is written. Running the upgrade again is a no-op.
+
+Cases are never moved: each case keeps its `service_version_id`, and submitted cases keep their frozen definition snapshot, so open requests finish on the workflow they were submitted under. New drafts use the newly published version; drafts started before the upgrade keep their original version. An empty database is left alone — install the catalogue explicitly with `seed-catalogue`. On the hosted demo (Kamal, persisted `/data` volume) the upgrade runs when the new container starts `servicehub serve`, so the existing database receives the new versions without a demo reset.
 
 ## Back up and verify
 

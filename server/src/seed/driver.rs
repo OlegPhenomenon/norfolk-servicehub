@@ -240,6 +240,7 @@ impl Driver {
                 "location" => json!({"lat":-29.04,"lng":167.95,"description":"Fictional pothole on Taylors Road"}),
                 "date" => json!(time::local_date(self.state.now()).to_string()),
                 "email" => json!("fictional@example.invalid"),
+                "phone" => json!("+672 355501"),
                 _ => json!(match key {
                     "applicant_name" =>
                         if who == "alexey" {

@@ -151,13 +151,10 @@ pub async fn validate_for_module(
         "planning_certificate" => &["intake", "payment", "preparation", "decision", "done"],
         "road_issue" => &["triage", "inspection", "repair", "response", "done"],
         "complaint" => &["triage", "investigation", "response", "done"],
-        "building"
-            if def.field("project_reference").is_some()
-                && (def.field("commencement_date").is_some() || def.field("completion").is_some()) =>
-        {
-            &["intake", "site", "done"]
-        }
-        "building" => &["intake", "assessment", "decision", "done"],
+        "building" => match def.building_role {
+            Some(BuildingRole::FollowUp) => &["intake", "site", "done"],
+            _ => &["intake", "assessment", "decision", "done"],
+        },
         _ => &[],
     };
     if !MODULES.contains(&module) {
@@ -166,6 +163,20 @@ pub async fn validate_for_module(
     for key in required {
         if !keys.contains(key) {
             issue("workflow.steps".into(), &format!("This module requires the {key} step."));
+        }
+    }
+    if def.building_role.is_some() && module != "building" {
+        issue("building_role".into(), "Only building services can relate to a building project.");
+    }
+    if module == "building" && def.building_role == Some(BuildingRole::FollowUp) {
+        if !def.fields.iter().any(|f| f.field_type == FieldType::ProjectRef && f.required && f.show_if.is_none()) {
+            issue(
+                "fields".into(),
+                "A follow-up building service needs a required building project field (project_ref).",
+            );
+        }
+        if def.step("site").is_some_and(|s| s.kind != StepKind::Task) {
+            issue("workflow.steps".into(), "The site checkpoint must remain an inspection task.");
         }
     }
     // A required module checkpoint cannot be relabelled as a review to bypass its guard.

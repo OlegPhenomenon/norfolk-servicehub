@@ -23,6 +23,13 @@ pub async fn seed(tx: &mut SqliteConnection, _state: &AppState) -> AppResult<()>
         ("EQUIP_TIPPER_HOUR", "Hino Truck (demo schedule)", "hour", "fee", 11000),
         ("EQUIP_ROLLER_HOUR", "Cat Steel Drum Roller 8T with Council operator (demo schedule)", "hour", "fee", 21100),
         ("EQUIP_EXPENSES", "Agreed pass-through expenses — illustrative demo price", "each", "fee", 100),
+        (
+            "BUILDING_STAGE_INSPECTION",
+            "Building inspection — per stage (fees schedule $83.00; demo schedule)",
+            "each",
+            "fee",
+            8300,
+        ),
     ] {
         sqlx::query("INSERT INTO price_items(code,name,unit,kind) VALUES(?,?,?,?) ON CONFLICT(code) DO NOTHING")
             .bind(code)

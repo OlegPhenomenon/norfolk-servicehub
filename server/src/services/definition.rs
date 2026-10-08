@@ -36,6 +36,19 @@ pub struct ServiceDefinition {
     /// Fixed price items for generic services (`[{ "item": "PLANNING_CERT", "quantity": 1 }]`).
     #[serde(default)]
     pub pricing: Vec<PricingItem>,
+    /// Building module only: how a submitted case relates to a building project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub building_role: Option<BuildingRole>,
+}
+
+/// `project` starts a building project, `modification` modifies an issued approval of one, `follow_up`
+/// (commencement, stage and completion notices) is lodged against an existing project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildingRole {
+    Project,
+    Modification,
+    FollowUp,
 }
 
 impl ServiceDefinition {
@@ -79,6 +92,8 @@ pub enum FieldType {
     EquipmentRequest,
     /// Documents: `{decision_id}`.
     DecisionRef,
+    /// Documents: building project reference or ID (string), chosen from the applicant's projects.
+    ProjectRef,
 }
 
 /// One form field.
