@@ -31,6 +31,11 @@ pub fn is_open(c: &CaseRow) -> bool {
 pub fn can_step(actor: &Actor, c: &CaseRow, step: &StepDef) -> bool {
     actor.is_staff() && step.role.is_some_and(|r| actor.roles_for_service(c.service_id).contains(&r))
 }
+/// Phone, walk-in, email, post (or imported) requests: the applicant deals with Council offline, so staff
+/// record what the applicant tells them, as an explicitly labelled action.
+pub fn is_assisted(c: &CaseRow) -> bool {
+    c.intake_channel != "online"
+}
 pub fn allowed_actions(actor: &Actor, c: &CaseRow, access: CaseAccess, def: &ServiceDefinition) -> Vec<&'static str> {
     let mut actions = vec![];
     if access == CaseAccess::Applicant && is_open(c) {
@@ -46,14 +51,25 @@ pub fn allowed_actions(actor: &Actor, c: &CaseRow, access: CaseAccess, def: &Ser
                 actions.push("skip");
             }
         }
-        actions.push("request-info");
-        if !def.workflow.steps.iter().any(|s| s.kind == StepKind::Decision) {
-            actions.push("refuse");
+        // Questions to the applicant and refusals belong to case handlers; finance only moves its money steps.
+        if access.can_manage() {
+            actions.push("request-info");
+            if !def.workflow.steps.iter().any(|s| s.kind == StepKind::Decision) {
+                actions.push("refuse");
+            }
         }
     }
     if access.can_manage() {
         if is_open(c) {
             actions.extend(["cancel", "close-duplicate", "assign", "escalate"]);
+            if is_assisted(c) {
+                if c.status == "waiting_on_applicant" {
+                    actions.push("record-reply");
+                }
+                if actor.roles_for_service(c.service_id).contains(&Role::Intake) {
+                    actions.push("withdraw-on-behalf");
+                }
+            }
         } else if c.status != "draft" && actor.roles_for_service(c.service_id).contains(&Role::Manager) {
             actions.push("reopen");
         }
@@ -151,13 +167,14 @@ async fn transition(
         .bind(case.id)
         .execute(&mut *tx)
         .await?;
+    // Stored in staff wording; each audience reads it through `timeline::event_summary`.
     record(
         tx,
         actor,
         case.id,
         if skip { "step.skipped" } else { "step.changed" },
         Visibility::Applicant,
-        &format!("{} {}. Next: {}.", step.label, if skip { "skipped" } else { "completed" }, next.applicant_label),
+        &format!("{} {}. Next: {}.", step.label, if skip { "skipped" } else { "completed" }, next.label),
         json!({"from":step.key,"to":next.key,"reason":reason}),
     )
     .await?;
@@ -279,6 +296,19 @@ struct ActionInput {
     body: Option<String>,
     of_case: Option<i64>,
     document_version_id: Option<i64>,
+    /// Assisted actions: how the applicant contacted Council (`phone`, `post`, `email`, `walk_in`).
+    channel: Option<String>,
+}
+impl ActionInput {
+    fn text(&self) -> &str {
+        self.body.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or(&self.reason).trim()
+    }
+    fn channel(&self) -> AppResult<&str> {
+        self.channel
+            .as_deref()
+            .filter(|c| super::timeline::received_how(c).is_some())
+            .ok_or_else(|| AppError::field("channel", "Choose how the applicant contacted Council."))
+    }
 }
 async fn action(
     State(state): State<AppState>,
@@ -368,6 +398,37 @@ async fn action(
                     )
                     .await?;
                 }
+                "record-reply" => {
+                    super::messages::record_reply_on_behalf(
+                        &mut tx,
+                        &state,
+                        &actor,
+                        &case,
+                        input.channel()?,
+                        input.text(),
+                    )
+                    .await?;
+                }
+                "withdraw-on-behalf" => {
+                    let channel = input.channel()?;
+                    record(
+                        &mut tx,
+                        &actor,
+                        id,
+                        "case.withdrawn_on_behalf",
+                        Visibility::Applicant,
+                        &super::timeline::event_summary(
+                            &def,
+                            "case.withdrawn_on_behalf",
+                            &json!({"channel":channel,"recorded_by_name":actor.display_name}),
+                            "",
+                            true,
+                        ),
+                        json!({"channel":channel,"recorded_by_name":actor.display_name,"reason":input.text()}),
+                    )
+                    .await?;
+                    close(&mut tx, &state, &actor, id, "withdrawn", input.text()).await?;
+                }
                 _ => return Err(AppError::not_found()),
             }
         }
@@ -387,12 +448,20 @@ pub async fn projection(tx: &mut SqliteConnection, state: &AppState, actor: &Act
     let step = current.map(|i| json!({"def":def.workflow.steps[i],"index":i,"total":def.workflow.steps.len()}));
     let steps:Vec<Value>=def.workflow.steps.iter().enumerate().map(|(i,s)|json!({"key":s.key,"label":if access.is_staff(){&s.label}else{&s.applicant_label},"state":if case.status=="completed"||current.is_some_and(|c|i<c){"complete"}else if current==Some(i){"current"}else{"upcoming"}})).collect();
     let required:Option<(i64,String,Option<i64>)>=sqlx::query_as("SELECT id,body,document_version_id FROM case_messages WHERE case_id=? AND requires_response=1 AND resolved_at IS NULL ORDER BY id LIMIT 1").bind(id).fetch_optional(&mut *tx).await?;
-    let events:Vec<(i64,String,String,Option<String>)>=sqlx::query_as("SELECT e.id,e.at,e.summary,u.display_name FROM case_events e LEFT JOIN users u ON u.id=e.actor_user_id WHERE e.case_id=? AND (? OR e.visibility='applicant') ORDER BY e.id").bind(id).bind(access.is_staff()).fetch_all(&mut *tx).await?;
+    let events:Vec<(i64,String,String,String,String,Option<String>)>=sqlx::query_as("SELECT e.id,e.at,e.kind,e.summary,e.data_json,u.display_name FROM case_events e LEFT JOIN users u ON u.id=e.actor_user_id WHERE e.case_id=? AND (? OR e.visibility='applicant') ORDER BY e.id").bind(id).bind(access.is_staff()).fetch_all(&mut *tx).await?;
+    let timeline: Vec<Value> = events
+        .into_iter()
+        .map(|(id, at, kind, stored, data, actor)| {
+            let data = serde_json::from_str::<Value>(&data).unwrap_or(Value::Null);
+            let summary = super::timeline::event_summary(&def, &kind, &data, &stored, access.is_staff());
+            json!({"id":id,"at":at,"summary":summary,"actor_name":actor})
+        })
+        .collect();
     let answers: Option<String> = sqlx::query_scalar("SELECT answers_json FROM submissions WHERE case_id=?")
         .bind(id)
         .fetch_optional(&mut *tx)
         .await?;
-    let mut result = json!({"case":super::search::summary(tx,&case).await?,"access":access,"step":step,"steps":steps,"allowed_actions":allowed_actions(actor,&case,access,&def),"required_action":required.map(|(id,body,v)|json!({"message_id":id,"body":body,"document_version_id":v})),"definition":def,"answers":answers.map(|a|serde_json::from_str::<Value>(&a)).transpose()?.unwrap_or(json!({})),"timeline":events.into_iter().map(|(id,at,summary,actor)|json!({"id":id,"at":at,"summary":summary,"actor_name":actor})).collect::<Vec<_>>(),"applicant_status_text":super::search::status_text(&case,&def)});
+    let mut result = json!({"case":super::search::summary(tx,&case).await?,"access":access,"step":step,"steps":steps,"allowed_actions":allowed_actions(actor,&case,access,&def),"required_action":required.map(|(id,body,v)|json!({"message_id":id,"body":body,"document_version_id":v})),"definition":def,"answers":answers.map(|a|serde_json::from_str::<Value>(&a)).transpose()?.unwrap_or(json!({})),"timeline":timeline,"applicant_status_text":super::search::status_text(&case,&def)});
     // `decision_ref` answers hold decision ids; staff and applicant see the approval type and case number.
     let decision_refs = crate::documents::building::decision_ref_labels(tx, &def, &result["answers"]).await?;
     result["decision_refs"] = decision_refs;

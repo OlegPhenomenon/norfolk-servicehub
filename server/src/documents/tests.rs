@@ -47,6 +47,8 @@ async fn fixture() -> (AppState, tempfile::TempDir, i64, Actor, Actor, Actor) {
     )
     .await
     .unwrap();
+    // A submitted request carries its submission time (only never-submitted drafts lack it).
+    sqlx::query("UPDATE cases SET submitted_at=created_at WHERE id=?").bind(c.id).execute(&mut *tx).await.unwrap();
     let actor = |id, kind, roles: Vec<Role>| Actor {
         user_id: id,
         kind,
@@ -947,6 +949,327 @@ async fn aggregate_upload_quota_rejects_attachment_without_registering_more_byte
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM document_versions").fetch_one(&state.db).await.unwrap(),
         1
     );
+}
+
+async fn case_revision(state: &AppState, cid: i64) -> String {
+    let revision: i64 =
+        sqlx::query_scalar("SELECT revision FROM cases WHERE id=?").bind(cid).fetch_one(&state.db).await.unwrap();
+    revision.to_string()
+}
+
+/// On a phone request the intake officer attaches the applicant's documents; they stay the applicant's, so other staff
+/// change them only through the labelled "received from the applicant" action, never as a plain Council version.
+#[tokio::test]
+async fn documents_attached_at_assisted_intake_are_the_applicants() {
+    use crate::web::Path;
+    use axum::extract::State;
+    let (state, _dir, cid, _resident, specialist, _) = fixture().await;
+    sqlx::query("UPDATE cases SET intake_channel='phone',submitted_at='2999-01-01T00:00:00Z' WHERE id=?")
+        .bind(cid)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let plan = crate::pdf::simple_document("Fictional plan read out by phone", &[], &[]);
+    let form = multipart(
+        &state,
+        &plan,
+        &[("title", "Site plan".into()), ("expected_revision", case_revision(&state, cid).await)],
+    )
+    .await;
+    let crate::web::Json(doc) =
+        uploads::upload(State(state.clone()), specialist.clone(), Path(cid), form).await.unwrap();
+    let did = doc["id"].as_i64().unwrap();
+    let mut tx = crate::db::write_tx(&state.db).await.unwrap();
+    let view = uploads::project(&mut tx, cid, CaseAccess::Staff { can_manage: true }).await.unwrap();
+    let attached = view.iter().find(|d| d.id == did).unwrap();
+    assert!(!attached.can_replace && attached.can_attach_on_behalf);
+    tx.commit().await.unwrap();
+    let form = multipart(&state, &plan, &[("expected_revision", case_revision(&state, cid).await)]).await;
+    let err = uploads::version(State(state.clone()), specialist.clone(), Path(did), form).await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::Forbidden);
+}
+
+#[tokio::test]
+async fn staff_cannot_supply_applicant_replacement_online_but_can_attach_on_behalf_on_assisted_case() {
+    use crate::web::Path;
+    use axum::extract::State;
+    let (state, _dir, cid, resident, specialist, _) = fixture().await;
+    let first = crate::pdf::simple_document("Fictional applicant plan", &[], &[]);
+    let form = multipart(&state, &first, &[("title", "Drawing A-101".into())]).await;
+    let crate::web::Json(doc) = uploads::upload(State(state.clone()), resident.clone(), Path(cid), form).await.unwrap();
+    let did = doc["id"].as_i64().unwrap();
+    let v1 = doc["version_id"].as_i64().unwrap();
+    let comment: i64 = sqlx::query_scalar("INSERT INTO document_comments(document_version_id,author_user_id,visibility,body,created_at,request_new_version) VALUES(?,2,'applicant','Replace the setback dimension',?,1) RETURNING id")
+        .bind(v1).bind(crate::time::now_str()).fetch_one(&state.db).await.unwrap();
+    let replacement = crate::pdf::simple_document("Fictional revised plan", &[], &[]);
+    let attempts: [Vec<(&str, String)>; 3] = [
+        vec![("resolves_comment_ids[]", comment.to_string())],
+        vec![],
+        vec![("received_via", "post".into()), ("resolves_comment_ids[]", comment.to_string())],
+    ];
+    for fields in attempts {
+        let mut fields = fields;
+        fields.push(("expected_revision", case_revision(&state, cid).await));
+        let form = multipart(&state, &replacement, &fields).await;
+        let err = uploads::version(State(state.clone()), specialist.clone(), Path(did), form).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::Forbidden, "online request: staff must not version the applicant's document");
+    }
+    let unresolved: Option<i64> = sqlx::query_scalar("SELECT resolved_by_version_id FROM document_comments WHERE id=?")
+        .bind(comment)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(unresolved, None);
+    let mut tx = crate::db::write_tx(&state.db).await.unwrap();
+    let staff_view = uploads::project(&mut tx, cid, CaseAccess::Staff { can_manage: true }).await.unwrap();
+    assert!(!staff_view[0].can_replace && !staff_view[0].can_attach_on_behalf);
+    // The same request recorded by phone: staff attach the version the applicant posted, on their behalf.
+    sqlx::query("UPDATE cases SET intake_channel='phone' WHERE id=?").bind(cid).execute(&mut *tx).await.unwrap();
+    let staff_view = uploads::project(&mut tx, cid, CaseAccess::Staff { can_manage: true }).await.unwrap();
+    assert!(!staff_view[0].can_replace && staff_view[0].can_attach_on_behalf);
+    tx.commit().await.unwrap();
+    let form = multipart(
+        &state,
+        &replacement,
+        &[
+            ("received_via", "post".into()),
+            ("resolves_comment_ids[]", comment.to_string()),
+            ("expected_revision", case_revision(&state, cid).await),
+        ],
+    )
+    .await;
+    let crate::web::Json(version) =
+        uploads::version(State(state.clone()), specialist.clone(), Path(did), form).await.unwrap();
+    let v2 = version["version_id"].as_i64().unwrap();
+    let resolved: i64 = sqlx::query_scalar("SELECT resolved_by_version_id FROM document_comments WHERE id=?")
+        .bind(comment)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(resolved, v2);
+    let note: String = sqlx::query_scalar("SELECT note FROM document_versions WHERE id=?")
+        .bind(v2)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert!(note.contains("Received from the applicant by post"), "{note}");
+    let (summary, visibility, data): (String, String, String) = sqlx::query_as(
+        "SELECT summary,visibility,data_json FROM case_events WHERE case_id=? AND kind='documents.version_on_behalf'",
+    )
+    .bind(cid)
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    assert!(summary.contains("on the applicant's behalf"), "{summary}");
+    assert_eq!(visibility, "applicant");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&data).unwrap()["channel"], "post");
+    // A phone call cannot carry a file.
+    let form = multipart(
+        &state,
+        &replacement,
+        &[("received_via", "phone".into()), ("expected_revision", case_revision(&state, cid).await)],
+    )
+    .await;
+    let err = uploads::version(State(state.clone()), specialist, Path(did), form).await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::Validation);
+}
+
+#[tokio::test]
+async fn applicant_versions_only_their_documents_or_requested_replacements_never_issued_ones() {
+    use crate::web::Path;
+    use axum::extract::State;
+    let (state, _dir, cid, resident, specialist, _) = fixture().await;
+    let file = crate::pdf::simple_document("Fictional site photo", &[], &[]);
+    let form = multipart(
+        &state,
+        &file,
+        &[
+            ("title", "Council site photo".into()),
+            ("category", "photo".into()),
+            ("visibility", "applicant".into()),
+            ("expected_revision", case_revision(&state, cid).await),
+        ],
+    )
+    .await;
+    let crate::web::Json(doc) =
+        uploads::upload(State(state.clone()), specialist.clone(), Path(cid), form).await.unwrap();
+    let staff_doc = doc["id"].as_i64().unwrap();
+    let mut tx = crate::db::write_tx(&state.db).await.unwrap();
+    let (invoice, _) = api::attach_generated(
+        &mut tx,
+        &state,
+        cid,
+        "invoice",
+        "Issued invoice",
+        Visibility::Applicant,
+        file.clone(),
+        Some(2),
+    )
+    .await
+    .unwrap();
+    let view = uploads::project(&mut tx, cid, CaseAccess::Applicant).await.unwrap();
+    for d in &view {
+        assert!(!d.can_replace && !d.can_attach_on_behalf, "{} must not be replaceable by the applicant", d.title);
+    }
+    let staff_view = uploads::project(&mut tx, cid, CaseAccess::Staff { can_manage: true }).await.unwrap();
+    assert!(staff_view.iter().find(|d| d.id == staff_doc).unwrap().can_replace);
+    assert!(!staff_view.iter().find(|d| d.id == invoice).unwrap().can_replace);
+    tx.commit().await.unwrap();
+    let form = multipart(&state, &file, &[]).await;
+    let err = uploads::version(State(state.clone()), resident.clone(), Path(staff_doc), form).await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::Forbidden);
+    let form = multipart(&state, &file, &[]).await;
+    let err = uploads::version(State(state.clone()), resident.clone(), Path(invoice), form).await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::Conflict);
+    // Council asks the applicant to replace its document: now the applicant may.
+    let v1: i64 = sqlx::query_scalar("SELECT id FROM document_versions WHERE document_id=?")
+        .bind(staff_doc)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    let comment: i64 = sqlx::query_scalar("INSERT INTO document_comments(document_version_id,author_user_id,visibility,body,created_at,request_new_version) VALUES(?,2,'applicant','Send a clearer photo',?,1) RETURNING id")
+        .bind(v1).bind(crate::time::now_str()).fetch_one(&state.db).await.unwrap();
+    let form = multipart(&state, &file, &[("resolves_comment_ids[]", comment.to_string())]).await;
+    uploads::version(State(state.clone()), resident, Path(staff_doc), form).await.unwrap();
+    // Staff still version their own document, but never resolve a replacement request with it.
+    let open: i64 = sqlx::query_scalar("INSERT INTO document_comments(document_version_id,author_user_id,visibility,body,created_at,request_new_version) VALUES(?,2,'applicant','And another angle',?,1) RETURNING id")
+        .bind(v1).bind(crate::time::now_str()).fetch_one(&state.db).await.unwrap();
+    let form = multipart(
+        &state,
+        &file,
+        &[("resolves_comment_ids[]", open.to_string()), ("expected_revision", case_revision(&state, cid).await)],
+    )
+    .await;
+    let err = uploads::version(State(state.clone()), specialist.clone(), Path(staff_doc), form).await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::Forbidden);
+    let form = multipart(&state, &file, &[("expected_revision", case_revision(&state, cid).await)]).await;
+    uploads::version(State(state.clone()), specialist, Path(staff_doc), form).await.unwrap();
+}
+
+#[tokio::test]
+async fn applicant_building_route_hides_draft_exhibitions_staff_instructions_and_staff_names() {
+    let (state, _dir, cid, _, specialist, _) = fixture().await;
+    let mut tx = crate::db::write_tx(&state.db).await.unwrap();
+    sqlx::query("INSERT INTO service_versions(id,service_id,version,status,definition_json,created_at) VALUES(9,1,2,'retired',?,?)")
+        .bind(serde_json::json!({"summary":"","outcome":"","building_role":"project","workflow":{"steps":[
+            {"key":"fees","kind":"module","role":"intake","label":"Determine fees","applicant_label":"We are confirming your fee.","handler":"finance.fee_assessed"},
+            {"key":"exhibition","kind":"module","role":"specialist","label":"Public exhibition","applicant_label":"Public exhibition","handler":"documents.exhibition_closed"}
+        ]}}).to_string())
+        .bind(crate::time::now_str())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE cases SET service_version_id=9 WHERE id=?").bind(cid).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO exhibitions(case_id,title,summary,status,prepared_by,created_at) VALUES(?,'Fictional draft notice','Summary','draft',2,?)").bind(cid).bind(crate::time::now_str()).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO building_fee_assessments(case_id,version,method,rule,inputs_json,lines_json,explanation,amount_cents,reason,assessed_by,assessed_at) VALUES(?,1,'manual','staff_assessment','{}','[]','Fictional assessment',57000,'Fictional basis',2,?)").bind(cid).bind(crate::time::now_str()).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO price_items(code,name,unit,kind) VALUES('FICTIONAL_FEE','Fictional building fee','each','fee') ON CONFLICT DO NOTHING").execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO case_price_waivers(case_id,item_code,amount_cents,reason,approved_by,approved_at) VALUES(?,'FICTIONAL_FEE',1000,'Fictional exemption',2,?)").bind(cid).bind(crate::time::now_str()).execute(&mut *tx).await.unwrap();
+    let case = crate::cases::core::load_case(&mut tx, cid).await.unwrap();
+    let mut resident = specialist.clone();
+    resident.user_id = 1;
+    resident.kind = UserKind::Resident;
+    resident.roles = vec![];
+    let applicant = exhibition::case_view(&mut tx, cid, false).await.unwrap();
+    assert_eq!(applicant["exhibitions"], serde_json::json!([]), "drafts are staff working material");
+    assert!(applicant["block"].is_null());
+    assert!(applicant["status_note"].as_str().unwrap().starts_with("Council is deciding"));
+    let staff = exhibition::case_view(&mut tx, cid, true).await.unwrap();
+    assert_eq!(staff["exhibitions"].as_array().unwrap().len(), 1);
+    assert!(staff["block"].as_str().unwrap().contains("Publish"));
+    let fee = crate::finance::building_fees::view(&mut tx, &resident, &case, CaseAccess::Applicant).await.unwrap();
+    assert!(fee["proposal_error"].is_null());
+    assert_eq!(fee["staff"], false);
+    assert!(fee["assessments"][0]["assessed_by"].is_null());
+    assert!(fee["waivers"][0]["approved_by"].is_null());
+    assert_eq!(fee["waivers"][0]["description"], "Fictional building fee");
+    let fee = crate::finance::building_fees::view(&mut tx, &specialist, &case, CaseAccess::Staff { can_manage: true })
+        .await
+        .unwrap();
+    assert!(fee["proposal_error"].is_string());
+    assert_eq!(fee["assessments"][0]["assessed_by"], "Fictional 2");
+    assert_eq!(fee["waivers"][0]["approved_by"], "Fictional 2");
+}
+
+#[tokio::test]
+async fn staff_assisted_follow_up_links_the_applicants_project_by_reference() {
+    use crate::web::Query;
+    use axum::extract::State;
+    let (state, _dir, cid, resident, specialist, _) = fixture().await;
+    let mut tx = crate::db::write_tx(&state.db).await.unwrap();
+    let case = crate::cases::core::load_case(&mut tx, cid).await.unwrap();
+    building::on_submit(&mut tx, &state, &resident, &case, &serde_json::json!({"property_ref":"Portion DEMO-44"}))
+        .await
+        .unwrap();
+    let reference: String =
+        sqlx::query_scalar("SELECT reference FROM building_projects").fetch_one(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO users(id,email,display_name,kind,password_hash,created_at) VALUES(6,'intake@example.test','Fictional intake','staff','unused',?)").bind(crate::time::now_str()).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO services(id,slug,name,category,module,department,created_at) VALUES(3,'fictional-follow-up','Fictional notice','Planning','building','Planning',?)").bind(crate::time::now_str()).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO service_versions(id,service_id,version,status,definition_json,created_at) VALUES(3,3,1,'published',?,?)")
+        .bind(serde_json::json!({"summary":"","outcome":"","building_role":"follow_up","fields":[{"key":"which_project","type":"project_ref","label":"Building project","required":true}],"workflow":{"steps":[]}}).to_string())
+        .bind(crate::time::now_str())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let assisted = crate::cases::core::create_case(
+        &mut tx,
+        NewCase {
+            service_id: 3,
+            service_version_id: 3,
+            module: "building".into(),
+            title: "Fictional notice by phone".into(),
+            status: "submitted".into(),
+            applicant_user_id: None,
+            applicant_org_id: None,
+            applicant_name: "Fictional owner".into(),
+            applicant_email: None,
+            applicant_phone: Some("+672 3 00000".into()),
+            intake_channel: "phone".into(),
+            recorded_by_user_id: Some(6),
+            property_ref: None,
+        },
+    )
+    .await
+    .unwrap();
+    let answers = serde_json::json!({"which_project":reference});
+    // Another staff member (not the recorder) has no applicant to act for.
+    assert!(building::on_submit(&mut tx, &state, &specialist, &assisted, &answers).await.is_err());
+    let intake = Actor {
+        user_id: 6,
+        kind: UserKind::Staff,
+        roles: vec![RoleGrant { role: Role::Intake, scope_service_id: None }],
+        display_name: "Fictional intake".into(),
+        mfa_passed: true,
+    };
+    building::on_submit(&mut tx, &state, &intake, &assisted, &answers).await.unwrap();
+    let linked = crate::cases::core::load_case(&mut tx, assisted.id).await.unwrap();
+    assert_eq!(linked.building_project_id, case_project(&mut tx, cid).await);
+    let link: (i64, String) = sqlx::query_as("SELECT to_case_id,kind FROM case_links WHERE from_case_id=?")
+        .bind(assisted.id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(link, (cid, "follow_up_of".into()));
+    let summary: String =
+        sqlx::query_scalar("SELECT summary FROM case_events WHERE case_id=? AND kind='documents.project_link'")
+            .bind(assisted.id)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert!(summary.contains(&reference) && summary.contains("on the applicant's behalf"), "{summary}");
+    tx.commit().await.unwrap();
+    let lookup: building::Lookup = serde_json::from_value(serde_json::json!({"q":reference})).unwrap();
+    let crate::web::Json(found) =
+        building::staff_projects(State(state.clone()), crate::auth::StaffActor(intake), Query(lookup)).await.unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0]["reference"], reference.as_str());
+    let lookup: building::Lookup = serde_json::from_value(serde_json::json!({"q":reference})).unwrap();
+    let err =
+        building::staff_projects(State(state), crate::auth::StaffActor(specialist), Query(lookup)).await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::Forbidden);
+}
+
+async fn case_project(tx: &mut sqlx::SqliteConnection, cid: i64) -> Option<i64> {
+    crate::cases::core::load_case(tx, cid).await.unwrap().building_project_id
 }
 
 async fn independent_approver(tx: &mut sqlx::SqliteConnection) -> Actor {

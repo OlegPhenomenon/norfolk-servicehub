@@ -115,8 +115,11 @@ pub async fn process(tx: &mut SqliteConnection, e: &Event, body: &str) -> AppRes
                 ledger::tell(
                     tx,
                     case,
-                    "Payment declined",
-                    "DemoPay declined the test payment. You can try again from your request.",
+                    ("Payment declined", "DemoPay declined the test payment. You can try again from your request."),
+                    (
+                        "Applicant's online payment was declined",
+                        "DemoPay declined the applicant's test payment. The invoice is still outstanding.",
+                    ),
                 )
                 .await?;
             } else {
@@ -179,8 +182,14 @@ pub async fn process(tx: &mut SqliteConnection, e: &Event, body: &str) -> AppRes
                 ledger::tell(
                     tx,
                     case,
-                    "Refund needs attention",
-                    "Your refund has not completed. Finance has been notified to arrange it.",
+                    (
+                        "Refund needs attention",
+                        "Your refund has not completed. Finance has been notified to arrange it.",
+                    ),
+                    (
+                        "Applicant's refund failed",
+                        "The DemoPay refund to the applicant failed. Finance must arrange it from Refunds.",
+                    ),
                 )
                 .await?;
                 ledger::finance_notice(tx, case, "DemoPay refund failed — action required").await?;

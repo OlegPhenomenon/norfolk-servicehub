@@ -1,12 +1,12 @@
 //! Building-project linkage is the only documents-owned write to cases.
 use crate::services::definition::{BuildingRole, FieldType, ServiceDefinition};
 use crate::{
-    auth::Actor,
+    auth::{Actor, StaffActor},
     authz::CaseAccess,
     cases::core::{CaseRow, Visibility},
     error::{AppError, AppResult},
     state::AppState,
-    web::{Json, Path},
+    web::{Json, Path, Query},
 };
 use axum::extract::State;
 use serde_json::{Value, json};
@@ -129,10 +129,14 @@ pub async fn on_submit(
             let mut originals = vec![];
             for id in &ids {
                 let (original,p):(i64,Option<i64>)=sqlx::query_as(&format!("SELECT d.case_id,c.building_project_id FROM decisions d JOIN cases c ON c.id=d.case_id WHERE d.id=? AND {CURRENT_APPROVAL}")).bind(id).fetch_optional(&mut *tx).await?.ok_or_else(||AppError::field("original_approval","Choose a current issued approval you can access."))?;
-                if !applicant_access(tx, actor, case, original).await? {
+                if !may_link(tx, actor, case, original).await? {
                     return Err(AppError::field(
                         "original_approval",
-                        "Choose an approval visible to you as an applicant or representative.",
+                        if assisted_intake(actor, case) {
+                            "Choose the applicant's issued approval from a request you can access."
+                        } else {
+                            "Choose an approval visible to you as an applicant or representative."
+                        },
                     ));
                 }
                 let p =
@@ -163,19 +167,40 @@ pub async fn on_submit(
         .bind(case.id)
         .execute(&mut *tx)
         .await?;
-    super::changed(
-        tx,
-        actor.db_id(),
-        case.id,
-        "documents.project_link",
-        Visibility::Applicant,
-        "Request linked to its building project.",
-    )
-    .await?;
+    let reference: String = sqlx::query_scalar("SELECT reference FROM building_projects WHERE id=?")
+        .bind(project)
+        .fetch_one(&mut *tx)
+        .await?;
+    let summary = if assisted_intake(actor, case) && !matches!(role, BuildingRole::Project) {
+        format!(
+            "Request linked to building project {reference}, chosen by Council on the applicant's behalf when recording the request."
+        )
+    } else {
+        "Request linked to its building project.".to_string()
+    };
+    super::changed(tx, actor.db_id(), case.id, "documents.project_link", Visibility::Applicant, &summary).await?;
     Ok(())
 }
+/// Staff recording a phone, walk-in, email or post request (`/staff/intake`) choose the applicant's project or
+/// approval by reference on the applicant's behalf; such a case has no applicant account to check against.
+fn assisted_intake(actor: &Actor, case: &CaseRow) -> bool {
+    actor.is_staff()
+        && case.intake_channel != "online"
+        && case.recorded_by_user_id.is_some()
+        && case.recorded_by_user_id == actor.db_id()
+        && actor.roles_for_service(case.service_id).contains(&crate::authz::Role::Intake)
+}
+/// May `case` be linked to the earlier request `target`: the applicant's own request, or — for assisted intake —
+/// one the recording staff member can access.
+async fn may_link(tx: &mut SqliteConnection, actor: &Actor, case: &CaseRow, target: i64) -> AppResult<bool> {
+    if assisted_intake(actor, case) {
+        return Ok(crate::authz::case_access(tx, actor, target).await?.is_staff());
+    }
+    applicant_access(tx, actor, case, target).await
+}
 /// Links a follow-up (commencement, stage or completion notice) to the project named by its `project_ref`
-/// answer: a project ID or reference typed by the applicant or chosen from `/api/my/building-projects`.
+/// answer: a project ID or reference typed by the applicant or chosen from `/api/my/building-projects`, or — for
+/// assisted intake — chosen by staff from `/api/staff/building-projects`.
 async fn follow_up(
     tx: &mut SqliteConnection,
     actor: &Actor,
@@ -205,13 +230,21 @@ async fn follow_up(
             .await?;
     let mut original = None;
     for id in originals {
-        if applicant_access(tx, actor, case, id).await? {
+        if may_link(tx, actor, case, id).await? {
             original = Some(id);
             break;
         }
     }
-    let original = original
-        .ok_or_else(|| AppError::field(key, "Choose a project visible to you as an applicant or representative."))?;
+    let original = original.ok_or_else(|| {
+        AppError::field(
+            key,
+            if assisted_intake(actor, case) {
+                "Choose the applicant's building project from a request you can access."
+            } else {
+                "Choose a project visible to you as an applicant or representative."
+            },
+        )
+    })?;
     link(tx, actor, case.id, original, "follow_up_of").await?;
     Ok(project)
 }
@@ -223,6 +256,43 @@ pub async fn my_projects(State(state): State<AppState>, actor: Actor) -> AppResu
         sqlx::query_as("SELECT id,reference,title,property_ref FROM building_projects ORDER BY id DESC")
             .fetch_all(&mut *c)
             .await?;
+    Ok(Json(project_list(&mut c, &actor, projects, false).await?))
+}
+#[derive(serde::Deserialize)]
+pub struct Lookup {
+    q: Option<String>,
+}
+/// `LIKE` pattern for a staff lookup; at least two characters, so staff search rather than browse every project.
+fn lookup_pattern(q: Option<&str>) -> Option<String> {
+    let q = q?.trim();
+    (q.chars().count() >= 2).then(|| format!("%{}%", q.replace(['%', '_'], "")))
+}
+/// Staff-recorded (assisted) intake: find the applicant's building project by project reference, request number,
+/// property or applicant name, among requests the staff member can access.
+pub async fn staff_projects(
+    State(state): State<AppState>,
+    StaffActor(actor): StaffActor,
+    Query(lookup): Query<Lookup>,
+) -> AppResult<Json<Vec<Value>>> {
+    actor.require_any_role(&[crate::authz::Role::Intake])?;
+    let Some(pattern) = lookup_pattern(lookup.q.as_deref()) else {
+        return Ok(Json(vec![]));
+    };
+    let mut c = state.db.acquire().await?;
+    let projects: Vec<(i64, String, String, String)> = sqlx::query_as("SELECT p.id,p.reference,p.title,p.property_ref FROM building_projects p WHERE p.reference LIKE ?1 OR p.title LIKE ?1 OR p.property_ref LIKE ?1 OR EXISTS(SELECT 1 FROM cases c WHERE c.building_project_id=p.id AND (c.number LIKE ?1 OR c.applicant_name LIKE ?1)) ORDER BY p.id DESC LIMIT 50")
+        .bind(pattern)
+        .fetch_all(&mut *c)
+        .await?;
+    Ok(Json(project_list(&mut c, &actor, projects, true).await?))
+}
+/// Projects with their issued approvals, keeping those with a request the actor can see from their side
+/// (applicant/representative, or staff for assisted intake).
+async fn project_list(
+    c: &mut SqliteConnection,
+    actor: &Actor,
+    projects: Vec<(i64, String, String, String)>,
+    staff: bool,
+) -> AppResult<Vec<Value>> {
     let mut out = vec![];
     for (id, reference, title, property_ref) in projects {
         let cases: Vec<i64> = sqlx::query_scalar("SELECT id FROM cases WHERE building_project_id=? ORDER BY id")
@@ -231,7 +301,9 @@ pub async fn my_projects(State(state): State<AppState>, actor: Actor) -> AppResu
             .await?;
         let mut visible = false;
         for case in cases {
-            if crate::authz::case_access(&mut c, &actor, case).await? == CaseAccess::Applicant {
+            let access = crate::authz::case_access(&mut *c, actor, case).await?;
+            let seen = if staff { access.is_staff() } else { access == CaseAccess::Applicant };
+            if seen {
                 visible = true;
                 break;
             }
@@ -243,7 +315,7 @@ pub async fn my_projects(State(state): State<AppState>, actor: Actor) -> AppResu
             .bind(id).fetch_all(&mut *c).await?;
         out.push(json!({"id":id,"reference":reference,"title":title,"property_ref":property_ref,"approvals":approvals.into_iter().map(|(id,t,at,number)|json!({"id":id,"decision_type":t,"issued_at":at,"case_number":number})).collect::<Vec<_>>()}));
     }
-    Ok(Json(out))
+    Ok(out)
 }
 async fn applicant_access(tx: &mut SqliteConnection, actor: &Actor, case: &CaseRow, target: i64) -> AppResult<bool> {
     if crate::authz::case_access(tx, actor, case.id).await? == CaseAccess::Applicant {
@@ -275,15 +347,39 @@ async fn link(tx: &mut SqliteConnection, actor: &Actor, from: i64, to: i64, kind
 pub async fn approvals(State(state): State<AppState>, actor: Actor) -> AppResult<Json<Vec<Value>>> {
     let mut c = state.db.acquire().await?;
     let rows=sqlx::query(&format!("SELECT d.id,d.case_id,d.decision_type,d.issued_at,c.number,c.building_project_id,c.property_ref FROM decisions d JOIN cases c ON c.id=d.case_id WHERE {CURRENT_APPROVAL} ORDER BY d.id DESC")).fetch_all(&mut *c).await?;
+    Ok(Json(approval_list(&mut c, &actor, rows, false).await?))
+}
+/// Staff-recorded (assisted) intake: find the applicant's current issued approvals by request number, project
+/// reference, property or applicant name, among requests the staff member can access.
+pub async fn staff_approvals(
+    State(state): State<AppState>,
+    StaffActor(actor): StaffActor,
+    Query(lookup): Query<Lookup>,
+) -> AppResult<Json<Vec<Value>>> {
+    actor.require_any_role(&[crate::authz::Role::Intake])?;
+    let Some(pattern) = lookup_pattern(lookup.q.as_deref()) else {
+        return Ok(Json(vec![]));
+    };
+    let mut c = state.db.acquire().await?;
+    let rows=sqlx::query(&format!("SELECT d.id,d.case_id,d.decision_type,d.issued_at,c.number,c.building_project_id,c.property_ref FROM decisions d JOIN cases c ON c.id=d.case_id LEFT JOIN building_projects p ON p.id=c.building_project_id WHERE {CURRENT_APPROVAL} AND (c.number LIKE ?1 OR c.property_ref LIKE ?1 OR c.applicant_name LIKE ?1 OR p.reference LIKE ?1) ORDER BY d.id DESC LIMIT 50")).bind(pattern).fetch_all(&mut *c).await?;
+    Ok(Json(approval_list(&mut c, &actor, rows, true).await?))
+}
+async fn approval_list(
+    c: &mut SqliteConnection,
+    actor: &Actor,
+    rows: Vec<sqlx::sqlite::SqliteRow>,
+    staff: bool,
+) -> AppResult<Vec<Value>> {
     let mut out = vec![];
     for r in rows {
-        let id: i64 = r.get("case_id");
-        if crate::authz::case_access(&mut c, &actor, id).await? == CaseAccess::Applicant {
-            let approval_type = root_type(&mut c, r.get("id")).await?;
+        let access = crate::authz::case_access(&mut *c, actor, r.get("case_id")).await?;
+        let seen = if staff { access.is_staff() } else { access == CaseAccess::Applicant };
+        if seen {
+            let approval_type = root_type(&mut *c, r.get("id")).await?;
             out.push(json!({"id":r.get::<i64,_>("id"),"decision_type":r.get::<String,_>("decision_type"),"approval_type":approval_type,"issued_at":r.get::<String,_>("issued_at"),"case_number":r.get::<Option<String>,_>("number"),"project_id":r.get::<Option<i64>,_>("building_project_id"),"property_ref":r.get::<Option<String>,_>("property_ref")}));
         }
     }
-    Ok(Json(out))
+    Ok(out)
 }
 pub async fn detail(State(state): State<AppState>, actor: Actor, Path(id): Path<i64>) -> AppResult<Json<Value>> {
     let mut c = state.db.acquire().await?;
@@ -324,17 +420,20 @@ pub async fn detail(State(state): State<AppState>, actor: Actor, Path(id): Path<
             }
         }
         let documents = super::uploads::project(&mut c, cid, a).await?;
-        let events: Vec<(String, String, String)> = sqlx::query_as(
-            "SELECT at,kind,summary FROM case_events WHERE case_id=? AND (? OR visibility='applicant') ORDER BY id",
+        let events: Vec<(String, String, String, String)> = sqlx::query_as(
+            "SELECT at,kind,summary,data_json FROM case_events WHERE case_id=? AND (? OR visibility='applicant') ORDER BY id",
         )
         .bind(cid)
         .bind(a.is_staff())
         .fetch_all(&mut *c)
         .await?;
-        history.extend(events.into_iter().map(|(at, kind, summary)| {
+        let def = crate::services::definition::load_for_case(&mut c, &case).await?;
+        for (at, kind, summary, data) in events {
+            let data: Value = serde_json::from_str(&data).unwrap_or(Value::Null);
+            let summary = crate::cases::timeline::event_summary(&def, &kind, &data, &summary, a.is_staff());
             let event = json!({"case_id":cid,"case_number":case.number,"at":at,"kind":kind,"summary":summary});
-            (at, event)
-        }));
+            history.push((at, event));
+        }
         cases.push(json!({"id":case.id,"number":case.number,"title":case.title,"status":case.status,"created_at":case.created_at,"links":visible_links,"documents":documents}));
         let mut ds: Vec<super::decisions::Decision> =
             sqlx::query_as("SELECT * FROM decisions WHERE case_id=? AND (? OR status='issued') ORDER BY id")
@@ -787,10 +886,11 @@ pub async fn route(State(state): State<AppState>, actor: Actor, Path(id): Path<i
         .bind(id)
         .fetch_all(&mut *c)
         .await?;
+    let staff = access.is_staff();
     let history: Vec<Value> = history
         .into_iter()
         .map(|(scope, source, reason, by, at)| {
-            Ok(json!({"scope":serde_json::from_str::<Value>(&scope)?,"source":source,"reason":reason,"set_by":by,"set_at":at}))
+            Ok(json!({"scope":serde_json::from_str::<Value>(&scope)?,"source":source,"reason":reason,"set_by":if staff { by } else { None },"set_at":at}))
         })
         .collect::<AppResult<_>>()?;
     let current = scope(&mut c, id).await?;
@@ -831,7 +931,7 @@ pub async fn route(State(state): State<AppState>, actor: Actor, Path(id): Path<i
         "originals": originals,
         "fee": fee,
         "exhibition_step": exhibition_step,
-        "exhibition": if exhibition_step || kind.is_some() { super::exhibition::case_view(&mut c, id).await? } else { Value::Null },
+        "exhibition": if exhibition_step || kind.is_some() { super::exhibition::case_view(&mut c, id, staff).await? } else { Value::Null },
         "can_scope": kind.is_some() && open && decisions_pending && access.can_manage() && roles.iter().any(|r| matches!(r, Role::Intake | Role::Specialist | Role::Manager)),
         "can_exhibit": open && access.can_manage() && roles.iter().any(|r| matches!(r, Role::Specialist | Role::Manager)),
     })))

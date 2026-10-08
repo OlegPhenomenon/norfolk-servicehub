@@ -73,7 +73,7 @@ pub async fn on_submit(
         json!({"owner_user_id":owner}),
     )
     .await?;
-    super::complaints::notify_handler(tx, case, owner).await
+    super::complaints::notify_handler(tx, case, owner, "complaint").await
 }
 pub async fn on_step_entered(
     _tx: &mut SqliteConnection,

@@ -124,7 +124,11 @@ async fn primary_application_fee_is_assessed_invoiced_paid_and_reassessed_withou
     assert_eq!(history[0]["reason"], "Applicant revised the estimated cost to $300,000.");
     assert!(history[0]["explanation"].as_str().unwrap().contains("$1600.00 + $2.57 per $1,000"));
     assert_eq!(history[0]["adjustment"]["total_cents"], 84_850);
-    assert!(history[0]["assessed_by"].as_str().is_some());
+    // Staff names are staff-only; the applicant sees that Council assessed the fee.
+    assert!(history[0]["assessed_by"].is_null());
+    assert!(fee["proposal_error"].is_null());
+    let staff_fee = d.req("priya", "GET", &format!("/api/cases/{c}/building-fee"), json!({})).await.unwrap();
+    assert!(staff_fee["assessments"][0]["assessed_by"].as_str().is_some());
     // Decisions cannot be issued while the difference is unpaid.
     let da = prepare(&mut d, c, "development_approval", None).await;
     let error = issue(&mut d, c, da, 409).await;

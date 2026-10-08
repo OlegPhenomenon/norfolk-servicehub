@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link } from 'react-router'
-import { useQuery, useMutation } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api, isApiError } from '@/api/client'
 import {
   Button,
@@ -17,11 +17,14 @@ import {
   Money,
   EmptyState,
   Table,
+  formatDateTime,
+  useToast,
 } from '@/ui'
 import { BookingSlot } from './fields'
 import { useOperation } from './data'
 import { utcInput, priceNote } from './time'
 import type {
+  Availability,
   BookingDetail,
   Equipment,
   Preview,
@@ -49,6 +52,11 @@ function BookingContent({
   data: BookingDetail
 }) {
   const op = useOperation()
+  const qc = useQueryClient()
+  const toast = useToast()
+  // Staff always receive `can_manage`; the applicant projection omits it.
+  const staff = d.can_manage !== undefined
+  const manager = d.can_manage === true
   const [dialog, setDialog] = useState<'move' | 'cancel' | null>(null)
   const [slot, setSlot] = useState<Slot>({
     unit_code: d.unit.code,
@@ -57,6 +65,7 @@ function BookingContent({
     attendees: d.booking.attendees,
   })
   const [reason, setReason] = useState('')
+  const [note, setNote] = useState('')
   const preview = useMutation({
     mutationFn: () =>
       api.post<Preview>(
@@ -68,11 +77,42 @@ function BookingContent({
     unit_code: slot.unit_code,
     start: slot.start_at,
     end: slot.end_at,
-    reason,
+    reason: manager ? reason : '',
     expected_revision: d.booking.revision,
   }
+  // The applicant cannot move a booking; the request goes to Council through the case conversation.
+  const ask = useMutation({
+    mutationFn: () => {
+      const unit =
+        slot.unit_code === d.unit.code
+          ? d.unit.name
+          : (qc
+              .getQueriesData<Availability>({ queryKey: ['operations', 'availability'] })
+              .flatMap(([, a]) => a?.units ?? [])
+              .find((u) => u.code === slot.unit_code)?.name ?? slot.unit_code)
+      return api.post(`/api/cases/${caseId}/messages`, {
+        body: [
+          `Please move my booking to ${unit}, ${formatDateTime(slot.start_at)}–${formatDateTime(slot.end_at, 'time')}.`,
+          note.trim(),
+        ]
+          .filter(Boolean)
+          .join('\n\n'),
+      })
+    },
+    onSuccess: async () => {
+      toast.success('Your request to move the booking was sent to Council.')
+      setDialog(null)
+      setNote('')
+      await qc.invalidateQueries()
+    },
+  })
   const errors = isApiError(op.error) ? op.error.fields : {}
   const active = ['requested', 'confirmed'].includes(d.booking.status)
+  const moveTitle = manager
+    ? 'Reschedule booking'
+    : staff
+      ? 'Preview a reschedule'
+      : 'Preview a new time'
   return (
     <div className="space-y-5">
       <Card title={d.unit.name}>
@@ -83,7 +123,11 @@ function BookingContent({
         <StatusPill status={d.booking.status} />
         <p>{d.booking.attendees} guests</p>
         {d.booking.status === 'requested' && (
-          <p>Your booking is requested and awaits Council confirmation.</p>
+          <p>
+            {staff
+              ? 'Requested by the applicant — awaiting confirmation.'
+              : 'Your booking is requested and awaits Council confirmation.'}
+          </p>
         )}
         {d.booking.confirmation_version_id && (
           <a
@@ -136,7 +180,18 @@ function BookingContent({
             </Button>
           </div>
         )}
-        {!d.can_manage && active && <Button variant="secondary" onClick={()=>{preview.reset();setDialog('move')}}>Preview a reschedule</Button>}
+        {!manager && active && (
+          <Button
+            variant="secondary"
+            onClick={() => {
+              preview.reset()
+              ask.reset()
+              setDialog('move')
+            }}
+          >
+            {staff ? 'Preview a reschedule' : 'Preview a new time'}
+          </Button>
+        )}
         {d.can_manage && d.booking.status === 'requested' && !d.settled && (
           <p className="mt-2">
             Confirmation is available when hire fees and bond are received.
@@ -176,27 +231,44 @@ function BookingContent({
       <Dialog
         open={dialog !== null}
         onClose={() => setDialog(null)}
-        title={dialog === 'move' ? 'Reschedule booking' : 'Cancel booking'}
+        title={dialog === 'move' ? moveTitle : 'Cancel booking'}
         footer={
-          <Button
-            loading={op.isPending}
-            variant={dialog === 'move' ? 'primary' : 'danger'}
-            disabled={!d.can_manage || (dialog === 'move' ? !preview.data?.available : !reason.trim())}
-            onClick={() =>
-              op.mutate(
-                {
-                  path: `/api/cases/${caseId}/booking/${dialog === 'move' ? 'reschedule' : 'cancel'}`,
-                  body:
-                    dialog === 'move'
-                      ? moveBody
-                      : { reason, expected_revision: d.booking.revision },
-                },
-                { onSuccess: () => setDialog(null) },
-              )
-            }
-          >
-            {dialog === 'move' ? 'Save reschedule' : 'Cancel booking (unused)'}
-          </Button>
+          manager ? (
+            <Button
+              loading={op.isPending}
+              variant={dialog === 'move' ? 'primary' : 'danger'}
+              disabled={dialog === 'move' ? !preview.data?.available : !reason.trim()}
+              onClick={() =>
+                op.mutate(
+                  {
+                    path: `/api/cases/${caseId}/booking/${dialog === 'move' ? 'reschedule' : 'cancel'}`,
+                    body:
+                      dialog === 'move'
+                        ? moveBody
+                        : { reason, expected_revision: d.booking.revision },
+                  },
+                  { onSuccess: () => setDialog(null) },
+                )
+              }
+            >
+              {dialog === 'move' ? 'Save reschedule' : 'Cancel booking (unused)'}
+            </Button>
+          ) : (
+            <>
+              <Button variant="secondary" onClick={() => setDialog(null)}>
+                Close
+              </Button>
+              {!staff && (
+                <Button
+                  loading={ask.isPending}
+                  disabled={!preview.data?.available}
+                  onClick={() => ask.mutate()}
+                >
+                  Ask Council to move my booking
+                </Button>
+              )}
+            </>
+          )
         }
       >
         <div className="space-y-4">
@@ -243,7 +315,15 @@ function BookingContent({
                   {preview.data.old_lines.map((l,i)=><p key={`old-${i}`}>Previous: {l.description} <Money cents={l.amount_cents}/></p>)}
                   {preview.data.new_lines.map((l,i)=><p key={`new-${i}`}>Proposed: {l.description} <Money cents={l.amount_cents}/></p>)}
                   <p>Credit change: <Money cents={preview.data.credit_delta_cents}/></p>
-                  {!d.can_manage && <p>Ask Customer Care to arrange this reschedule.</p>}
+                  {staff && !manager && (
+                    <p>Only Customer Care can reschedule this booking.</p>
+                  )}
+                  {!staff && (
+                    <p>
+                      Your booking does not change until Council checks and
+                      confirms the new time.
+                    </p>
+                  )}
                   <p>
                     Previous fees and bond:{' '}
                     <Money
@@ -270,13 +350,24 @@ function BookingContent({
               )}
             </>
           )}
-          <Field label="Reason" required error={errors.reason}>
-            <Textarea
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-            />
-          </Field>
+          {manager && (
+            <Field label="Reason" required error={errors.reason}>
+              <Textarea
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+              />
+            </Field>
+          )}
+          {!staff && dialog === 'move' && (
+            <Field
+              label="Message to Council (optional)"
+              hint="Sent with your request in the request messages."
+            >
+              <Textarea value={note} onChange={(e) => setNote(e.target.value)} />
+            </Field>
+          )}
           {op.error && <ErrorAlert error={op.error} />}
+          {ask.error && <ErrorAlert error={ask.error} />}
         </div>
       </Dialog>
     </div>
@@ -343,7 +434,7 @@ function StaffTask({
       <Link className="link" to={`/staff/field/${t.id}`}>
         Open task
       </Link>
-      {!['done', 'cancelled'].includes(t.status) && (
+      {t.can_manage && !['done', 'cancelled'].includes(t.status) && (
         <div className="mt-4 space-y-3">
           <Field label="Assign field worker">
             <Select

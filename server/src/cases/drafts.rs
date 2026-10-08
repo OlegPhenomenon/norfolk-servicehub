@@ -171,7 +171,7 @@ pub async fn rebind(tx: &mut SqliteConnection, actor: &Actor, case: &CaseRow) ->
             case.id,
             "draft.version_updated",
             Visibility::Applicant,
-            "The form was updated to the current version; please review your answers.",
+            "The form was updated to the current version; the answers need review.",
             json!({"from_version":from,"to_version":version}),
         )
         .await?;

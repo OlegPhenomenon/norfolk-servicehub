@@ -51,9 +51,57 @@ pub(crate) struct Document {
     pub title: String,
     pub visibility: String,
     pub requirement_key: Option<String>,
+    /// This viewer may add a version through their own side's action (applicant replacement, or a staff
+    /// update of a Council document). Never true for issued/generated documents.
+    #[sqlx(skip)]
+    pub can_replace: bool,
+    /// Staff on an assisted (non-online) request may attach a version received from the applicant.
+    #[sqlx(skip)]
+    pub can_attach_on_behalf: bool,
+    #[serde(skip)]
+    pub generated: bool,
+    #[serde(skip)]
+    pub applicant_origin: bool,
+    #[serde(skip)]
+    pub open_request: bool,
     #[sqlx(skip)]
     pub versions: Vec<Version>,
 }
+/// Who may add a version to a document, for one viewer.
+///
+/// Applicants replace only what their side provided, or what Council asked them to replace. Staff update
+/// Council's own documents; a version of the applicant's document is accepted from staff only on an assisted
+/// request, as an explicit "received from the applicant" action. Issued documents are never versioned.
+struct VersionRights {
+    replace: bool,
+    on_behalf: bool,
+}
+fn version_rights(
+    case: &crate::cases::core::CaseRow,
+    a: CaseAccess,
+    generated: bool,
+    visibility: &str,
+    applicant_origin: bool,
+    open_request: bool,
+) -> VersionRights {
+    if generated || editable(case).is_err() || writable(a).is_err() {
+        return VersionRights { replace: false, on_behalf: false };
+    }
+    if a == CaseAccess::Applicant {
+        return VersionRights { replace: applicant_origin || open_request, on_behalf: false };
+    }
+    // Phone, walk-in, email, post or imported requests: Council records documents on the applicant's behalf, and the
+    // applicant's own documents (applicant_origin) change only through that labelled action.
+    VersionRights {
+        replace: !applicant_origin,
+        on_behalf: crate::cases::workflow::is_assisted(case) && visibility == "applicant",
+    }
+}
+/// `applicant_origin`: uploaded by a resident account, or on an assisted request attached for the applicant by the
+/// intake officer (an applicant-visible document for a form requirement, or attached before submission).
+const DOC_FLAGS: &str = "d.generated OR d.category IN ('decision','letter','certificate','invoice','credit_note','booking_confirmation') generated,\
+ (EXISTS(SELECT 1 FROM users u WHERE u.id=d.created_by AND u.kind='resident') OR EXISTS(SELECT 1 FROM cases c WHERE c.id=d.case_id AND c.intake_channel<>'online' AND d.visibility='applicant' AND (d.requirement_key IS NOT NULL OR c.submitted_at IS NULL OR d.created_at<=c.submitted_at))) applicant_origin,\
+ EXISTS(SELECT 1 FROM document_comments c JOIN document_versions v ON v.id=c.document_version_id WHERE v.document_id=d.id AND c.request_new_version=1 AND c.resolved_at IS NULL AND c.visibility='applicant') open_request";
 #[derive(Serialize, sqlx::FromRow)]
 pub(crate) struct Version {
     pub id: i64,
@@ -82,8 +130,12 @@ pub async fn list(State(state): State<AppState>, actor: Actor, Path(id): Path<i6
 }
 pub(crate) async fn project(tx: &mut SqliteConnection, id: i64, a: CaseAccess) -> AppResult<Vec<Document>> {
     let staff = a.is_staff();
-    let mut docs:Vec<Document>=sqlx::query_as("SELECT id,case_id,category,title,visibility,requirement_key FROM documents WHERE case_id=? AND disposed_at IS NULL AND (? OR visibility='applicant') ORDER BY category,id").bind(id).bind(staff).fetch_all(&mut *tx).await?;
+    let case = crate::cases::core::load_case(tx, id).await?;
+    let mut docs: Vec<Document> = sqlx::query_as(&format!("SELECT d.id,d.case_id,d.category,d.title,d.visibility,d.requirement_key,{DOC_FLAGS} FROM documents d WHERE d.case_id=? AND d.disposed_at IS NULL AND (? OR d.visibility='applicant') ORDER BY d.category,d.id")).bind(id).bind(staff).fetch_all(&mut *tx).await?;
     for doc in &mut docs {
+        let rights = version_rights(&case, a, doc.generated, &doc.visibility, doc.applicant_origin, doc.open_request);
+        doc.can_replace = rights.replace;
+        doc.can_attach_on_behalf = rights.on_behalf;
         doc.versions=sqlx::query_as("SELECT v.id,v.version,v.uploaded_at,COALESCE(u.display_name,'ServiceHub') uploader,v.note FROM document_versions v LEFT JOIN users u ON u.id=v.uploaded_by WHERE document_id=? ORDER BY version").bind(doc.id).fetch_all(&mut *tx).await?;
         for v in &mut doc.versions {
             v.comments=sqlx::query_as("SELECT c.id,c.body,c.visibility,u.display_name author,c.created_at,c.resolved_by_version_id,c.request_new_version FROM document_comments c JOIN users u ON u.id=c.author_user_id WHERE document_version_id=? AND (? OR visibility='applicant') ORDER BY c.id").bind(v.id).bind(staff).fetch_all(&mut *tx).await?;
@@ -236,6 +288,76 @@ pub(crate) async fn version_access(
     let (case, a, title, _) = document_access(tx, actor, doc).await?;
     Ok((case, a, doc, blob, title))
 }
+/// How a new version is being added; decides whether it may resolve the applicant's replacement requests.
+#[derive(Clone, Copy)]
+enum VersionMode {
+    /// The applicant (or representative) replaces their own document or one Council asked them to replace.
+    Applicant,
+    /// Staff update a Council document; never resolves a replacement request.
+    Staff,
+    /// Staff attach a version received from the applicant on an assisted request (`channel` it came through).
+    OnBehalf(&'static str),
+}
+/// A file reaches Council from the applicant by email, post or in person (never by phone).
+fn received_via(value: &str) -> AppResult<&'static str> {
+    match value {
+        "email" => Ok("email"),
+        "post" => Ok("post"),
+        "walk_in" => Ok("walk_in"),
+        _ => Err(AppError::field("received_via", "Choose how Council received this version from the applicant.")),
+    }
+}
+async fn version_mode(
+    tx: &mut SqliteConnection,
+    case: &crate::cases::core::CaseRow,
+    a: CaseAccess,
+    id: i64,
+    channel: Option<&str>,
+    resolves: bool,
+) -> AppResult<VersionMode> {
+    editable(case)?;
+    writable(a)?;
+    let (generated, applicant_origin, open_request, visibility): (bool, bool, bool, String) =
+        sqlx::query_as(&format!("SELECT {DOC_FLAGS},d.visibility FROM documents d WHERE d.id=?"))
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let rights = version_rights(case, a, generated, &visibility, applicant_origin, open_request);
+    match channel {
+        Some(channel) => {
+            let channel = received_via(channel)?;
+            if !rights.on_behalf {
+                return Err(AppError::forbidden_msg(
+                    "Only staff on a phone, walk-in, email or post request can attach a version received from the applicant.",
+                ));
+            }
+            Ok(VersionMode::OnBehalf(channel))
+        }
+        None if a == CaseAccess::Applicant => {
+            if !rights.replace {
+                return Err(AppError::forbidden_msg(
+                    "You can add versions only to documents you provided or that Council asked you to replace.",
+                ));
+            }
+            Ok(VersionMode::Applicant)
+        }
+        None => {
+            if !rights.replace {
+                return Err(AppError::forbidden_msg(if rights.on_behalf {
+                    "This is the applicant's document. Use \"Attach version received from the applicant\" and say how Council received it."
+                } else {
+                    "This is the applicant's document. Ask the applicant for a new version instead."
+                }));
+            }
+            if resolves {
+                return Err(AppError::forbidden_msg(
+                    "Only a version from the applicant can resolve a replacement request.",
+                ));
+            }
+            Ok(VersionMode::Staff)
+        }
+    }
+}
 pub async fn version(
     State(state): State<AppState>,
     actor: Actor,
@@ -250,12 +372,15 @@ pub async fn version(
         immutable(&mut c, id, &category).await?;
     }
     let u = parse(multi.0).await?;
+    let channel = u.fields.get("received_via").map(String::as_str).filter(|s| !s.is_empty());
+    if let Some(channel) = channel {
+        received_via(channel)?;
+    }
     let staged = storage::stage(&state, &u.bytes, &u.name, storage::AllowList::Docs).await?;
     let mut tx = write_tx(&state.db).await?;
     let (case, a, title, category) = document_access(&mut tx, &actor, id).await?;
-    editable(&case)?;
-    writable(a)?;
     immutable(&mut tx, id, &category).await?;
+    let mode = version_mode(&mut tx, &case, a, id, channel, !u.resolves.is_empty()).await?;
     revision(&mut tx, case.id, a, &u.fields).await?;
     let n: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(version),0)+1 FROM document_versions WHERE document_id=?")
         .bind(id)
@@ -263,7 +388,21 @@ pub async fn version(
         .await?;
     upload_quota(&mut tx, actor.user_id, staged.size_bytes).await?;
     let blob = storage::register(&mut tx, staged, actor.db_id()).await?;
-    let vid:i64=sqlx::query_scalar("INSERT INTO document_versions(document_id,version,blob_id,uploaded_by,note,uploaded_at) VALUES(?,?,?,?,?,?) RETURNING id").bind(id).bind(n).bind(blob.id).bind(actor.db_id()).bind(u.fields.get("note")).bind(time::now_str()).fetch_one(&mut *tx).await?;
+    let note = u.fields.get("note").map(|s| s.trim()).filter(|s| !s.is_empty());
+    let how = match mode {
+        VersionMode::OnBehalf(channel) => crate::cases::timeline::received_how(channel),
+        VersionMode::Applicant | VersionMode::Staff => None,
+    };
+    let note = match (how, note) {
+        (Some(how), Some(note)) => {
+            Some(format!("Received from the applicant {how}; attached by Council on the applicant's behalf. {note}"))
+        }
+        (Some(how), None) => {
+            Some(format!("Received from the applicant {how}; attached by Council on the applicant's behalf."))
+        }
+        (None, note) => note.map(str::to_string),
+    };
+    let vid:i64=sqlx::query_scalar("INSERT INTO document_versions(document_id,version,blob_id,uploaded_by,note,uploaded_at) VALUES(?,?,?,?,?,?) RETURNING id").bind(id).bind(n).bind(blob.id).bind(actor.db_id()).bind(note).bind(time::now_str()).fetch_one(&mut *tx).await?;
     for cid in u.resolves {
         let updated=sqlx::query("UPDATE document_comments SET resolved_at=?,resolved_by_version_id=? WHERE id=? AND resolved_at IS NULL AND visibility='applicant' AND document_version_id IN (SELECT id FROM document_versions WHERE document_id=? AND version<?)").bind(time::now_str()).bind(vid).bind(cid).bind(id).bind(n).execute(&mut *tx).await?;
         if updated.rows_affected() != 1 {
@@ -273,12 +412,14 @@ pub async fn version(
             ));
         }
     }
-    crate::cases::messages::resolve_document_requests(&mut tx, &state, case.id).await?;
+    if !matches!(mode, VersionMode::Staff) {
+        crate::cases::messages::resolve_document_requests(&mut tx, &state, case.id).await?;
+    }
     let visibility: String =
         sqlx::query_scalar("SELECT visibility FROM documents WHERE id=?").bind(id).fetch_one(&mut *tx).await?;
     let visibility = if visibility == "staff" { Visibility::Staff } else { Visibility::Applicant };
-    let recipients: Vec<i64> = sqlx::query_scalar("SELECT DISTINCT author_user_id FROM document_comments WHERE resolved_by_version_id=? AND request_new_version=1")
-        .bind(vid).fetch_all(&mut *tx).await?;
+    let recipients: Vec<i64> = sqlx::query_scalar("SELECT DISTINCT author_user_id FROM document_comments WHERE resolved_by_version_id=? AND request_new_version=1 AND author_user_id<>?")
+        .bind(vid).bind(actor.user_id).fetch_all(&mut *tx).await?;
     for user in recipients {
         crate::notify::send(
             &mut tx,
@@ -294,15 +435,47 @@ pub async fn version(
         )
         .await?;
     }
-    super::changed(
-        &mut tx,
-        actor.db_id(),
-        case.id,
-        "documents.new_version",
-        visibility,
-        &format!("Uploaded {title}, version {n}; earlier versions remain available."),
-    )
-    .await?;
+    match (mode, how) {
+        (VersionMode::OnBehalf(channel), Some(how)) => {
+            // Staff wording; `timeline::event_summary` renders the applicant's second-person view from `data`.
+            let summary = format!(
+                "Applicant's version {n} of {title} received {how}. Attached by {} on the applicant's behalf; earlier versions remain available.",
+                actor.display_name
+            );
+            let data =
+                serde_json::json!({"title":title,"version":n,"channel":channel,"recorded_by_name":actor.display_name});
+            crate::audit::record(
+                &mut tx,
+                actor.db_id(),
+                "documents.version_on_behalf",
+                "case",
+                Some(case.id),
+                serde_json::json!({"summary":summary}),
+            )
+            .await?;
+            crate::cases::core::append_event(
+                &mut tx,
+                case.id,
+                actor.db_id(),
+                "documents.version_on_behalf",
+                visibility,
+                &summary,
+                data,
+            )
+            .await?;
+        }
+        _ => {
+            super::changed(
+                &mut tx,
+                actor.db_id(),
+                case.id,
+                "documents.new_version",
+                visibility,
+                &format!("Uploaded {title}, version {n}; earlier versions remain available."),
+            )
+            .await?
+        }
+    }
     tx.commit().await?;
     Ok(Json(serde_json::json!({"version_id":vid,"version":n})))
 }

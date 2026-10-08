@@ -61,6 +61,7 @@ async fn staff_cases(
 }
 async fn list(state: &AppState, actor: &Actor, filter: Filter, staff: bool) -> AppResult<Json<Value>> {
     let mut scope = authz::case_scope_sql(actor);
+    // Applicants' never-submitted drafts (also deleted ones) are outside the staff scope (authz).
     if !staff {
         // Staff roles must never turn /my into a staff listing.
         scope.sql.push_str(" AND (c.status='draft' OR c.submitted_at IS NOT NULL) AND ((c.applicant_org_id IS NULL AND c.applicant_user_id=?) OR EXISTS(SELECT 1 FROM memberships m WHERE m.organisation_id=c.applicant_org_id AND m.user_id=? AND m.status='active') OR EXISTS(SELECT 1 FROM case_representatives r WHERE r.case_id=c.id AND r.user_id=? AND r.status='active'))");

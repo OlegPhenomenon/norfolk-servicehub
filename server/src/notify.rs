@@ -27,22 +27,39 @@ pub struct Notice {
 }
 
 /// Inserts the in-app row (if `user_id`) and queues `email` / `sms` rows with a `notify.deliver` job each.
-pub async fn send(conn: &mut SqliteConnection, mut notice: Notice) -> AppResult<()> {
+/// Confidential cases get a generic subject and body in the recipient's viewpoint: the complainant reads
+/// "your feedback", staff read "Confidential case …".
+pub async fn send(conn: &mut SqliteConnection, notice: Notice) -> AppResult<()> {
+    send_with(conn, notice, true).await
+}
+
+/// Like [`send`], but keeps the caller's subject and body on confidential cases. Only for staff notices
+/// written to carry nothing but the case reference, e.g. "Confidential complaint NSH-… assigned to you".
+pub async fn send_reference_only(conn: &mut SqliteConnection, notice: Notice) -> AppResult<()> {
+    send_with(conn, notice, false).await
+}
+
+async fn send_with(conn: &mut SqliteConnection, mut notice: Notice, generic: bool) -> AppResult<()> {
     if let Some(case_id) = notice.case_id {
-        if !recipient_access(conn, notice.user_id, case_id).await? {
+        let Some(access) = recipient_access(conn, notice.user_id, case_id).await? else {
             return Ok(());
-        }
-        let confidential: Option<Option<String>> =
-            sqlx::query_scalar("SELECT number FROM cases WHERE id=? AND confidential=1")
-                .bind(case_id)
-                .fetch_optional(&mut *conn)
-                .await?;
-        if let Some(number) = confidential
-            && notice.user_id.is_some()
-        {
-            let reference = number.as_deref().unwrap_or("request");
-            notice.subject = format!("Update on your feedback {reference}");
-            notice.body = format!("There is an update on your feedback {reference} — sign in to read it");
+        };
+        if generic && notice.user_id.is_some() {
+            let confidential: Option<Option<String>> =
+                sqlx::query_scalar("SELECT number FROM cases WHERE id=? AND confidential=1")
+                    .bind(case_id)
+                    .fetch_optional(&mut *conn)
+                    .await?;
+            if let Some(number) = confidential {
+                let reference = number.as_deref().unwrap_or("request");
+                if access.is_staff() {
+                    notice.subject = format!("Confidential case {reference} has an update");
+                    notice.body = format!("Confidential case {reference} has an update — sign in to read it");
+                } else {
+                    notice.subject = format!("Update on your feedback {reference}");
+                    notice.body = format!("There is an update on your feedback {reference} — sign in to read it");
+                }
+            }
         }
     }
     let now = time::now_str();
@@ -167,7 +184,7 @@ async fn deliver(state: &AppState, id: i64) -> AppResult<()> {
     }
     if let Some(cid) = n.case_id {
         let mut tx = crate::db::write_tx(&state.db).await?;
-        if !recipient_access(&mut tx, n.user_id, cid).await? {
+        if recipient_access(&mut tx, n.user_id, cid).await?.is_none() {
             sqlx::query("UPDATE notifications SET status='failed',subject='Request update',body='',link=NULL,last_error='Recipient no longer has access' WHERE id=?")
                 .bind(id).execute(&mut *tx).await?;
             tx.commit().await?;
@@ -233,18 +250,26 @@ async fn record_attempt(state: &AppState, id: i64, msg: &str) -> AppResult<()> {
     Ok(())
 }
 
-async fn recipient_access(conn: &mut SqliteConnection, user: Option<i64>, case_id: i64) -> AppResult<bool> {
+/// The recipient's view of the case, or `None` when they may not be told about it. Offline contacts of an
+/// accountless assisted-intake case count as the applicant.
+async fn recipient_access(
+    conn: &mut SqliteConnection,
+    user: Option<i64>,
+    case_id: i64,
+) -> AppResult<Option<crate::authz::CaseAccess>> {
     if let Some(id) = user {
-        let Some(actor) = crate::auth::Actor::load_recipient(conn, id).await? else { return Ok(false) };
-        return Ok(crate::authz::case_access(conn, &actor, case_id).await? != crate::authz::CaseAccess::None);
+        let Some(actor) = crate::auth::Actor::load_recipient(conn, id).await? else { return Ok(None) };
+        let access = crate::authz::case_access(conn, &actor, case_id).await?;
+        return Ok((access != crate::authz::CaseAccess::None).then_some(access));
     }
     // Assisted intake may have offline contacts; organisation contacts require a live member.
-    Ok(sqlx::query_scalar(
+    let offline: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM cases WHERE id=? AND applicant_user_id IS NULL AND applicant_org_id IS NULL)",
     )
     .bind(case_id)
     .fetch_one(conn)
-    .await?)
+    .await?;
+    Ok(offline.then_some(crate::authz::CaseAccess::Applicant))
 }
 
 #[cfg(test)]

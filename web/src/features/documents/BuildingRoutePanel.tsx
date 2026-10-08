@@ -29,21 +29,21 @@ export function BuildingRoutePanel({ caseId }: { caseId: number }) {
       {r.exhibition && <ExhibitionCard caseId={caseId} data={r} />}
     </div>}</QueryView>
 }
-
-function AssessmentItem({ a }: { a: FeeAssessment }) {
+function AssessmentItem({ a, staff }: { a: FeeAssessment; staff: boolean }) {
   return <li className="border-b border-line py-3">
     <p className="font-semibold">Assessment v{a.version} · {RULES[a.rule] ?? a.rule} · <Money cents={a.amount_cents} /></p>
-    <p className="text-sm text-muted">{a.method === 'manual' ? 'Set by staff' : 'Schedule calculation'}{a.assessed_by ? ` · ${a.assessed_by}` : ''} · <DateTime value={a.assessed_at} /></p>
+    <p className="text-sm text-muted">{a.method === 'manual' ? (staff ? 'Set by staff' : 'Set by Council') : 'Schedule calculation'}{a.assessed_by ? ` · ${a.assessed_by}` : ''} · <DateTime value={a.assessed_at} /></p>
     <p className="mt-2">{a.explanation}</p>
     {a.reason && <p className="mt-2">Basis / reason: {a.reason}</p>}
-    {a.inputs.estimated_cost_cents !== null && <p className="text-sm">Estimated cost used: <Money cents={a.inputs.estimated_cost_cents} /> ({a.inputs.estimated_cost_source === 'staff' ? 'recorded by staff' : 'from the application'})</p>}
+    {a.inputs.estimated_cost_cents !== null && <p className="text-sm">Estimated cost used: <Money cents={a.inputs.estimated_cost_cents} /> ({a.inputs.estimated_cost_source === 'staff' ? (staff ? 'recorded by staff' : 'recorded by Council') : staff ? 'from the application' : 'from your application'})</p>}
     {a.inputs.modification_types && <p className="text-sm">Modification types used: {a.inputs.modification_types.map(t => MODIFICATION_TYPES.find(m => m.value === t)?.label ?? t).join(', ')}</p>}
     {a.adjustment && <p className="mt-2">{a.adjustment.kind === 'credit_note' ? 'Credit note' : 'Supplementary invoice'} {a.adjustment.number} for <Money cents={a.adjustment.total_cents} />. Earlier invoices are unchanged.</p>}
   </li>
 }
 
+/** Staff see the schedule's gaps and who did what; the applicant sees what Council will do and what they need to pay. */
 function FeeCard({ caseId, fee, revision }: { caseId: number; fee: FeeView; revision: number }) {
-  const assessments = fee.assessments ?? []
+  const assessments = fee.assessments ?? [], staff = fee.staff ?? false
   const [method, setMethod] = useState('schedule')
   const [cost, setCost] = useState(fee.application?.estimated_cost_cents != null ? (fee.application.estimated_cost_cents / 100).toFixed(2) : '')
   const [types, setTypes] = useState<string[]>(fee.application?.modification_types ?? [])
@@ -51,12 +51,14 @@ function FeeCard({ caseId, fee, revision }: { caseId: number; fee: FeeView; revi
   const m = useAction(`/api/cases/${caseId}/building-fee`, () => setReason(''))
   const errors = isApiError(m.error) ? m.error.fields : {}
   return <Card title="Fee assessment" description={fee.schedule_note}>
-    {fee.proposal ? <Alert title={`System calculation: ${RULES[fee.proposal.rule] ?? fee.proposal.rule}`}><p><Money cents={fee.proposal.amount_cents} /> — {fee.proposal.explanation}</p><p className="mt-2 text-sm">Based on the application answers. Staff confirm or replace it below.</p></Alert>
-      : <Alert tone="warning" title="No schedule calculation">{fee.proposal_error}</Alert>}
+    {fee.proposal ? <Alert title={`System calculation: ${RULES[fee.proposal.rule] ?? fee.proposal.rule}`}><p><Money cents={fee.proposal.amount_cents} /> — {fee.proposal.explanation}</p><p className="mt-2 text-sm">{!staff ? 'Based on your application answers. Council will confirm the fee.' : fee.can_assess ? 'Based on the application answers. Staff confirm or replace it below.' : 'Based on the application answers. Staff confirm or replace it.'}</p></Alert>
+      : staff ? <Alert tone="warning" title="No schedule calculation">{fee.proposal_error}</Alert> : <Alert tone="info" title="Council will confirm the fee">Council will assess the fee for this request and let you know the amount.</Alert>}
     <h3 className="mt-5 font-semibold">Recorded assessments</h3>
-    {assessments.length ? <ol aria-label="Fee assessment history">{assessments.map(a => <AssessmentItem key={a.id} a={a} />)}</ol> : <p className="text-muted">No fee has been assessed yet. The request cannot be invoiced or decided until it is.</p>}
-    <p className="mt-3">{fee.invoiced ? (fee.settled ? 'Invoice issued and settled.' : 'Invoice issued — payment outstanding. Decisions cannot be issued until it is paid.') : 'Not invoiced yet: the invoice is issued when the request enters the payment step.'}</p>
-    {(fee.waivers ?? []).map(w => <Alert key={w.item_code} tone="info" title={`Approved exemption: ${w.item_code}`}><Money cents={w.amount_cents} /> waived — {w.reason}. Approved by {w.approved_by}.</Alert>)}
+    {assessments.length ? <ol aria-label="Fee assessment history">{assessments.map(a => <AssessmentItem key={a.id} a={a} staff={staff} />)}</ol> : <p className="text-muted">{staff ? 'No fee has been assessed yet. The request cannot be invoiced or decided until it is.' : 'Waiting for Council to assess the fee.'}</p>}
+    <p className="mt-3">{staff
+      ? (fee.invoiced ? (fee.settled ? 'Invoice issued and settled.' : 'Invoice issued — payment outstanding. Decisions cannot be issued until it is paid.') : 'Not invoiced yet: the invoice is issued when the request enters the payment step.')
+      : (fee.invoiced ? (fee.settled ? 'Your invoice is paid.' : 'Your invoice has been issued. Pay it in the Money tab; Council makes its decision once it is paid.') : 'Not invoiced yet: you will receive an invoice when your request reaches the payment step.')}</p>
+    {(fee.waivers ?? []).map(w => <Alert key={w.item_code} tone="info" title={`Approved exemption: ${w.description}`}><Money cents={w.amount_cents} /> waived — {w.reason}.{w.approved_by ? ` Approved by ${w.approved_by}.` : ''}</Alert>)}
     {fee.can_assess && <form className="mt-5 space-y-4" onSubmit={e => { e.preventDefault(); m.mutate(() => ({ method, estimated_cost: cost.trim(), ...(fee.route === 'modification' ? { modification_types: types } : {}), ...(method === 'manual' ? { amount_cents: cents(amount) } : {}), reason, expected_revision: revision })) }} noValidate>
       <RadioGroup legend="Assessment method" name={`fee-method-${caseId}`} value={method} onChange={setMethod} inline options={[{ value: 'schedule', label: 'Apply the fee schedule' }, { value: 'manual', label: 'Staff assessment (enter amount and basis)' }]} error={errors.method} />
       <Field label="Total estimated cost of building and works (AUD)" hint="Change it only with a reason; the application value is kept on record." error={errors.estimated_cost}><TextInput inputMode="decimal" value={cost} onChange={e => setCost(e.target.value)} /></Field>
@@ -82,7 +84,7 @@ function ScopeCard({ caseId, data }: { caseId: number; data: BuildingRoute }) {
   return <Card title={modification ? 'Approvals being modified' : 'Approvals in scope'} description="Council staff confirm which approvals this request covers. Only those decisions are required.">
     {current ? <p className="flex flex-wrap items-center gap-2"><span className="font-semibold">{describe(current)}</span>{current.confirmed ? <Badge tone="success">Confirmed by Council</Badge> : <Badge tone="warning">Requested — awaiting staff confirmation</Badge>}</p> : <p className="text-muted">This request was lodged before approval scopes were recorded; its workflow requires every listed decision.</p>}
     {modification && <ul className="mt-3 space-y-1" aria-label="Original approvals">{data.originals.map(o => <li key={o.decision_id}>{approvalLabel(o.approval_type)} #{o.decision_id} ({o.case_number}){o.in_scope ? '' : ' — not in scope'}{o.modification_decision_id ? ` — modification decision #${o.modification_decision_id}` : ''}</li>)}</ul>}
-    {data.scope_history.length > 0 && <details className="mt-3"><summary className="cursor-pointer py-2 text-primary">Scope history</summary><ol>{data.scope_history.map((h, i) => <li key={i} className="border-b border-line py-2"><p>{describe(h.scope)} — {h.source === 'staff' ? `confirmed by ${h.set_by ?? 'staff'}` : 'requested by the applicant'} · <DateTime value={h.set_at} /></p><p className="text-sm">Reason: {h.reason}</p></li>)}</ol></details>}
+    {data.scope_history.length > 0 && <details className="mt-3"><summary className="cursor-pointer py-2 text-primary">Scope history</summary><ol>{data.scope_history.map((h, i) => <li key={i} className="border-b border-line py-2"><p>{describe(h.scope)} — {h.source === 'staff' ? `confirmed by ${h.set_by ?? 'Council'}` : 'requested by the applicant'} · <DateTime value={h.set_at} /></p><p className="text-sm">Reason: {h.reason}</p></li>)}</ol></details>}
     {data.can_scope && <form className="mt-4 space-y-3" onSubmit={e => { e.preventDefault(); m.mutate(() => ({ ...(modification ? { originals } : { approvals }), reason, expected_revision: data.revision })) }} noValidate>
       <fieldset className="space-y-2"><legend className="font-semibold">{modification ? 'Original approvals in scope' : 'Approvals this request needs'}</legend>
         {modification ? data.originals.map(o => <Checkbox key={o.decision_id} label={`${approvalLabel(o.approval_type)} #${o.decision_id} (${o.case_number ?? ''})`} checked={originals.includes(o.decision_id)} onChange={e => setOriginals(e.target.checked ? [...originals, o.decision_id] : originals.filter(v => v !== o.decision_id))} />)
@@ -101,14 +103,15 @@ function ExhibitionCard({ caseId, data }: { caseId: number; data: BuildingRoute 
   const [reason, setReason] = useState('')
   const m = useAction(`/api/cases/${caseId}/exhibition-not-required`, () => setReason(''))
   const errors = isApiError(m.error) ? m.error.fields : {}
-  return <Card title="Public exhibition" description="Either the proposal is exhibited and every public submission is considered, or staff record that exhibition is not required, with the reason.">
+  return <Card title="Public exhibition" description={staff ? 'Either the proposal is exhibited and every public submission is considered, or staff record that exhibition is not required, with the reason.' : 'Some proposals are put on public exhibition so the community can comment before Council decides.'}>
     {e.block && <Alert tone="warning" title="Exhibition stage not finished">{e.block}</Alert>}
+    {e.status_note && <Alert tone="info" title="Public exhibition stage">{e.status_note}</Alert>}
     {e.not_required && <Alert tone="info" title="Exhibition not required for this request">{e.not_required.reason} — recorded{e.not_required.decided_by ? ` by ${e.not_required.decided_by}` : ''} <DateTime value={e.not_required.decided_at} />.</Alert>}
     {e.exhibitions.length > 0 && <ul className="mt-3 space-y-3" aria-label="Exhibitions">{e.exhibitions.map(x => <li key={x.id} className="border-b border-line pb-3">
       <p className="flex flex-wrap items-center gap-2 font-semibold">{x.title} <StatusPill status={x.status} /></p>
       {x.closes_at && <p>Comments close <DateTime value={x.closes_at} /></p>}
       {x.termination_reason && <p>Terminated early: {x.termination_reason}</p>}
-      {x.withdrawal_reason && <p>Withdrawn by a manager: {x.withdrawal_reason}{x.withdrawn_at && <> (<DateTime value={x.withdrawn_at} />)</>}</p>}
+      {x.withdrawal_reason && <p>{staff ? 'Withdrawn by a manager' : 'Withdrawn by Council'}: {x.withdrawal_reason}{x.withdrawn_at && <> (<DateTime value={x.withdrawn_at} />)</>}</p>}
       <p>{x.submissions} public submission(s), {x.pending_submissions} awaiting a consideration outcome.</p>
       {x.consideration_summary && <p>Consideration summary: {x.consideration_summary}</p>}
       {staff && <Link className="link inline-block py-2" to={`/staff/exhibitions/${x.id}`}>Open exhibition and submissions</Link>}

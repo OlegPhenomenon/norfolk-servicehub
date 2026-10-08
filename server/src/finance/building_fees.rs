@@ -565,11 +565,14 @@ pub async fn view(tx: &mut SqliteConnection, actor: &Actor, case: &CaseRow, acce
     let a = answers(tx, case.id).await?;
     let cost = cost_cents(a.get("estimated_cost").unwrap_or(&Value::Null)).unwrap_or(None);
     let types = answer_types(&a);
+    let staff = access.is_staff();
     let (proposal, proposal_error) = match propose(tx, case, kind, cost, &types).await {
         Ok(p) => {
             (json!({"rule":p.rule,"amount_cents":p.amount,"explanation":p.explanation,"lines":p.lines}), Value::Null)
         }
-        Err(e) => (Value::Null, json!(e.fields.values().next().cloned().unwrap_or(e.message))),
+        // The schedule's reason is an instruction to staff; the applicant only learns Council will set the fee.
+        Err(e) if staff => (Value::Null, json!(e.fields.values().next().cloned().unwrap_or(e.message))),
+        Err(_) => (Value::Null, Value::Null),
     };
     let rows = sqlx::query("SELECT a.*,u.display_name FROM building_fee_assessments a LEFT JOIN users u ON u.id=a.assessed_by WHERE a.case_id=? ORDER BY a.version DESC").bind(case.id).fetch_all(&mut *tx).await?;
     let mut assessments = vec![];
@@ -586,16 +589,21 @@ pub async fn view(tx: &mut SqliteConnection, actor: &Actor, case: &CaseRow, acce
             }
             None => Value::Null,
         };
-        assessments.push(json!({"id":r.get::<i64,_>("id"),"version":r.get::<i64,_>("version"),"method":r.get::<String,_>("method"),"rule":r.get::<String,_>("rule"),"inputs":serde_json::from_str::<Value>(&r.get::<String,_>("inputs_json"))?,"explanation":r.get::<String,_>("explanation"),"amount_cents":r.get::<i64,_>("amount_cents"),"reason":r.get::<Option<String>,_>("reason"),"assessed_by":r.get::<Option<String>,_>("display_name"),"assessed_at":r.get::<String,_>("assessed_at"),"charged_cents":r.get::<Option<i64>,_>("charged_cents"),"adjustment":adjustment}));
+        let assessed_by = if staff { r.get::<Option<String>, _>("display_name") } else { None };
+        assessments.push(json!({"id":r.get::<i64,_>("id"),"version":r.get::<i64,_>("version"),"method":r.get::<String,_>("method"),"rule":r.get::<String,_>("rule"),"inputs":serde_json::from_str::<Value>(&r.get::<String,_>("inputs_json"))?,"explanation":r.get::<String,_>("explanation"),"amount_cents":r.get::<i64,_>("amount_cents"),"reason":r.get::<Option<String>,_>("reason"),"assessed_by":assessed_by,"assessed_at":r.get::<String,_>("assessed_at"),"charged_cents":r.get::<Option<i64>,_>("charged_cents"),"adjustment":adjustment}));
     }
-    let waivers: Vec<(String, i64, String, String)> = sqlx::query_as("SELECT w.item_code,w.amount_cents,w.reason,u.display_name FROM case_price_waivers w JOIN users u ON u.id=w.approved_by WHERE w.case_id=?").bind(case.id).fetch_all(&mut *tx).await?;
+    let waivers: Vec<(String, String, i64, String, String)> = sqlx::query_as("SELECT w.item_code,p.name,w.amount_cents,w.reason,u.display_name FROM case_price_waivers w JOIN price_items p ON p.code=w.item_code JOIN users u ON u.id=w.approved_by WHERE w.case_id=?").bind(case.id).fetch_all(&mut *tx).await?;
+    let waivers: Vec<Value> = waivers
+        .into_iter()
+        .map(|(code, name, amount, reason, by)| json!({"item_code":code,"description":name,"amount_cents":amount,"reason":reason,"approved_by":staff.then_some(by)}))
+        .collect();
     let roles = actor.roles_for_service(case.service_id);
     let can_assess = access.can_manage()
         && crate::cases::workflow::is_open(case)
         && roles.iter().any(|r| matches!(r, Role::Intake | Role::Specialist | Role::Finance | Role::Manager))
         && crate::documents::api::issued_decisions(tx, case.id).await?.is_empty();
     Ok(
-        json!({"applies":true,"route":kind.map(BuildingRole::as_str),"schedule_note":NOTE,"application":{"estimated_cost_cents":cost,"modification_types":types},"proposal":proposal,"proposal_error":proposal_error,"assessments":assessments,"invoiced":has_invoice(tx,case.id).await?,"settled":api::case_settled(tx,case.id).await?,"waivers":waivers.into_iter().map(|(c,a,r,n)|json!({"item_code":c,"amount_cents":a,"reason":r,"approved_by":n})).collect::<Vec<_>>(),"can_assess":can_assess}),
+        json!({"applies":true,"staff":staff,"route":kind.map(BuildingRole::as_str),"schedule_note":NOTE,"application":{"estimated_cost_cents":cost,"modification_types":types},"proposal":proposal,"proposal_error":proposal_error,"assessments":assessments,"invoiced":has_invoice(tx,case.id).await?,"settled":api::case_settled(tx,case.id).await?,"waivers":waivers,"can_assess":can_assess}),
     )
 }
 

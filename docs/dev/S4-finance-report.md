@@ -9,7 +9,7 @@ All work is uncommitted and confined to the finance feature, mock payment provid
 | `GET /api/admin/prices` | Catalogue and complete version history; finance or sysadmin |
 | `POST /api/admin/prices/{code}/versions` | Schedule integer-cent rates today or later; reject changes affecting issued invoices; preserve later scheduled versions |
 | `GET /api/cases/{id}/money` | Authz projection of invoice lines, credits, confirmed receipts, bonds, decisions, itemised retention, refunds, sessions and available credit; staff additionally receive evidence, allocation history and case journal |
-| `POST /api/cases/{id}/checkout` | Applicant/staff hosted DemoPay session; redirect never confirms payment |
+| `POST /api/cases/{id}/checkout` | Applicant-only hosted DemoPay session (staff → 403; finance records counter payments instead); redirect never confirms payment |
 | `POST /api/webhooks/demopay` | HMAC-SHA256, five-minute tolerance, event/payment deduplication; invalid signatures stored separately and answered with 400 |
 | `POST /api/finance/statements` | `{filename,csv}` UTF-8 incoming-transfer CSV; file SHA dedupe, transaction dedupe, exact unambiguous reference/balance auto-match, partial suggestions and suspense accounting |
 | `GET /api/finance/unmatched` | Unmatched rows and receipt-document evidence, projected by case scope |

@@ -81,8 +81,17 @@ pub async fn detail(State(st): State<AppState>, a: Actor, Path(id): Path<i64>) -
     .bind(id)
     .fetch_all(&mut *tx)
     .await?;
+    let (request, usage) = if access.is_staff() {
+        (json!(e), json!(usage))
+    } else {
+        // Applicant projection: what was asked for, when it runs, and what is billed; no staff ids or task links.
+        (
+            json!({"id":e.id,"description":e.description,"requested_hours":e.requested_hours,"preferred_date":e.preferred_date,"site_text":e.site_text,"scheduled_start":e.scheduled_start,"scheduled_end":e.scheduled_end,"status":e.status,"created_at":e.created_at}),
+            json!(usage.iter().map(|u| json!({"id":u.id,"started_at":u.started_at,"ended_at":u.ended_at,"downtime_minutes":u.downtime_minutes,"billable_minutes":u.billable_minutes,"expenses_cents":u.expenses_cents,"approved_at":u.approved_at,"final_invoice_id":u.final_invoice_id})).collect::<Vec<_>>()),
+        )
+    };
     Ok(Json(
-        json!({"request":e,"usage":usage,"invoices":invoices,"can_schedule":access.can_manage() && a.roles_for_service(c.service_id).iter().any(|r|matches!(r,Role::Intake|Role::Specialist|Role::Manager)),"can_approve":access.is_staff() && a.roles_for_service(c.service_id).contains(&Role::Finance),"revision":c.revision,"price_note":"FY2026-27 schedule (demo copy — confirm with Council)"}),
+        json!({"request":request,"usage":usage,"invoices":invoices,"can_schedule":access.can_manage() && a.roles_for_service(c.service_id).iter().any(|r|matches!(r,Role::Intake|Role::Specialist|Role::Manager)),"can_approve":access.is_staff() && a.roles_for_service(c.service_id).contains(&Role::Finance),"revision":c.revision,"price_note":"FY2026-27 schedule (demo copy — confirm with Council)"}),
     ))
 }
 pub async fn schedule(

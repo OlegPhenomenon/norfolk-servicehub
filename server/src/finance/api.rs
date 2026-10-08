@@ -194,11 +194,16 @@ pub async fn issue_invoice(
     let id = persist_invoice(tx, actor, case_id, kind, pricing_date, &lines, basis_note.as_deref(), credits).await?;
     attach_pdf(tx, state, actor, id).await?;
     if kind == "invoice" {
+        let number: String =
+            sqlx::query_scalar("SELECT number FROM cases WHERE id=?").bind(case_id).fetch_one(&mut *tx).await?;
         ledger::tell(
             tx,
             case_id,
-            "Invoice ready",
-            "Your invoice is ready. Open your request to see the charges and payment options.",
+            ("Invoice ready", "Your invoice is ready. Open your request to see the charges and payment options."),
+            (
+                &format!("Invoice issued to applicant for {number}"),
+                "An invoice was issued to the applicant. The request is awaiting the applicant's payment.",
+            ),
         )
         .await?;
     }
@@ -339,7 +344,19 @@ pub async fn reprice_case(
     for id in ids {
         attach_pdf(tx, state, actor, id).await?;
     }
-    ledger::tell(tx,case_id,"Booking charges revised","Your booking charges have been revised. Open your request to see the credit notes, revised invoice and any customer credit.").await?;
+    ledger::tell(
+        tx,
+        case_id,
+        (
+            "Booking charges revised",
+            "Your booking charges have been revised. Open your request to see the credit notes, revised invoice and any credit.",
+        ),
+        (
+            "Applicant's booking charges revised",
+            "The applicant's booking charges were revised. Credit notes, the revised invoice and any customer credit are on the Money tab.",
+        ),
+    )
+    .await?;
     Ok(())
 }
 #[allow(clippy::too_many_arguments)]

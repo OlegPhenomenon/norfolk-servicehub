@@ -63,6 +63,18 @@ async fn readable(tx: &mut SqliteConnection, actor: &Actor, id: i64) -> AppResul
     }
     Ok(access.is_staff())
 }
+/// Online payment is the applicant's action. Staff never open a checkout for an applicant;
+/// money taken at Customer Care is recorded as a counter payment by finance.
+async fn payer(tx: &mut SqliteConnection, actor: &Actor, id: i64) -> AppResult<()> {
+    let (_, access) = authz::require_case(tx, actor, id).await?;
+    match access {
+        CaseAccess::Applicant => Ok(()),
+        CaseAccess::TaskOnly => Err(AppError::not_found()),
+        _ => Err(AppError::forbidden_msg(
+            "Only the applicant can pay online. Payments taken at Customer Care are recorded by finance as a counter payment.",
+        )),
+    }
+}
 async fn manageable(tx: &mut SqliteConnection, actor: &Actor, id: i64, revision: Option<i64>) -> AppResult<()> {
     finance(actor)?;
     authz::require_staff_case(tx, actor, id).await?;
@@ -128,7 +140,7 @@ async fn checkout(
     }
     let (amount, number) = {
         let mut c = s.db.acquire().await?;
-        readable(&mut c, &actor, id).await?;
+        payer(&mut c, &actor, id).await?;
         let due = payments::invoice_due(&mut c, id, b.invoice_id).await?;
         let n: String =
             sqlx::query_scalar("SELECT number FROM invoices WHERE id=?").bind(b.invoice_id).fetch_one(&mut *c).await?;
@@ -145,7 +157,7 @@ async fn checkout(
     let provider: Value = res.json().await.map_err(|e| AppError::internal(e.to_string()))?;
     let session = provider["session_id"].as_str().ok_or_else(|| AppError::internal("Missing provider session"))?;
     let mut tx = db::write_tx(&s.db).await?;
-    readable(&mut tx, &actor, id).await?;
+    payer(&mut tx, &actor, id).await?;
     payments::invoice_due(&mut tx, id, b.invoice_id).await?;
     sqlx::query("INSERT INTO checkout_sessions(provider_session_id,case_id,invoice_id,amount_cents,status,created_by,created_at) VALUES(?,?,?,?,'open',?,?)").bind(session).bind(id).bind(b.invoice_id).bind(amount).bind(actor.db_id()).bind(time::fmt(s.now())).execute(&mut *tx).await?;
     ledger::event(
@@ -299,8 +311,11 @@ async fn reverse(
     ledger::tell(
         &mut tx,
         case,
-        "Payment allocation corrected",
-        "A payment allocation has been corrected. Open your request to see the updated balance.",
+        ("Payment record corrected", "Council corrected a payment record on your request. Open your request to see your updated balance."),
+        (
+            "Payment allocation reversed on applicant's request",
+            "A payment allocation was reversed into the applicant's customer credit. The updated balance is on the Money tab.",
+        ),
     )
     .await?;
     tx.commit().await?;
@@ -450,11 +465,12 @@ async fn retry_bank(
         .bind(id)
         .execute(&mut *tx)
         .await?;
-    ledger::event(
+    ledger::event_with_note(
         &mut tx,
         &actor,
         case,
         "finance.refund_recovery",
+        "The refund will be paid by bank transfer.",
         &format!("Failed refund will be paid by bank transfer: {}", b.reason),
         json!({"refund_id":id}),
     )
@@ -462,8 +478,14 @@ async fn retry_bank(
     ledger::tell(
         &mut tx,
         case,
-        "Refund being arranged",
-        "Finance is arranging your refund by bank transfer. It will be marked completed after confirmation.",
+        (
+            "Refund being arranged",
+            "Finance is arranging your refund by bank transfer. It will be marked completed after confirmation.",
+        ),
+        (
+            "Applicant's refund moved to bank transfer",
+            "The applicant's failed refund will be paid by bank transfer. Confirm the bank reference once it is sent.",
+        ),
     )
     .await?;
     tx.commit().await?;

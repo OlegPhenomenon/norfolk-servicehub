@@ -37,6 +37,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/decision-templates", get(decisions::templates))
         .route("/api/my/issued-approvals", get(building::approvals))
         .route("/api/my/building-projects", get(building::my_projects))
+        .route("/api/staff/building-projects", get(building::staff_projects))
+        .route("/api/staff/issued-approvals", get(building::staff_approvals))
         .route("/api/building-projects/{id}", get(building::detail))
         .route("/api/cases/{id}/building-route", get(building::route))
         .route("/api/cases/{id}/approval-scope", post(building::set_scope))

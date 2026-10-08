@@ -116,15 +116,23 @@ pub async fn decide(
         json!({"decision_id":id,"retain_items":d.retain_items}),
     )
     .await?;
+    let body = format!(
+        "{} will be refunded; {} retained. {}. Refunds are awaiting confirmation.",
+        ledger::money(d.refund_cents),
+        ledger::money(retained),
+        d.reason
+    );
     ledger::tell(
         tx,
         case,
-        "Your bond decision",
-        &format!(
-            "{} will be refunded; {} retained. {}. Refunds are awaiting confirmation.",
-            ledger::money(d.refund_cents),
-            ledger::money(retained),
-            d.reason
+        ("Your bond decision", &body),
+        (
+            "Bond decision recorded for applicant",
+            &format!(
+                "Bond decision recorded: {} to be refunded to the applicant; {} retained.",
+                ledger::money(d.refund_cents),
+                ledger::money(retained)
+            ),
         ),
     )
     .await?;
@@ -170,7 +178,13 @@ pub async fn complete(
     .await?;
     let summary = format!("Refund of {} completed", ledger::money(cents));
     ledger::event(tx, actor, case, "finance.refund_completed", &summary, json!({"refund_id":id})).await?;
-    ledger::tell(tx, case, "Refund completed", &summary).await?;
+    ledger::tell(
+        tx,
+        case,
+        ("Refund completed", &format!("Your refund of {} has been completed.", ledger::money(cents))),
+        ("Applicant's refund completed", &format!("Refund of {} to the applicant completed.", ledger::money(cents))),
+    )
+    .await?;
     Ok(Some(case))
 }
 pub async fn request_job(state: &AppState, id: i64) -> AppResult<()> {
@@ -254,20 +268,33 @@ pub async fn refund_credit(
         ids.push(id);
         remaining -= amount;
     }
+    // The reason is entered under "Shown to the applicant" and explains the refund to them.
     ledger::event(
         tx,
         actor,
         case,
         "finance.credit_refund_requested",
-        reason,
+        &format!("Refund of {} of credit requested: {reason}", ledger::money(cents)),
         json!({"refund_ids":ids,"amount_cents":cents}),
     )
     .await?;
     ledger::tell(
         tx,
         case,
-        "Refund processing",
-        &format!("Refund of {} requested: {reason}. Awaiting confirmation.", ledger::money(cents)),
+        (
+            "Refund processing",
+            &format!(
+                "A refund of {} of your credit was requested: {reason}. Awaiting confirmation.",
+                ledger::money(cents)
+            ),
+        ),
+        (
+            "Credit refund requested for applicant",
+            &format!(
+                "A refund of {} of the applicant's credit was requested. Awaiting confirmation.",
+                ledger::money(cents)
+            ),
+        ),
     )
     .await?;
     Ok(ids)

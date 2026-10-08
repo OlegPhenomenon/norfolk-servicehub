@@ -1,14 +1,16 @@
 import { useRef, useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { Link } from 'react-router'
+import { Link, useSearchParams } from 'react-router'
 import { api, isApiError, newIdempotencyKey } from '@/api/client'
 import type { Answers } from '@/api/types'
 import { Alert, Button, Card, ErrorAlert, Field, PageHeader, QueryView, Select, TextInput } from '@/ui'
 import { FormRenderer } from '../services/FormRenderer'
 import type { Catalogue, ServiceDetail } from '../services/types'
 import type { DraftDetail } from './types'
+/** Assisted intake. `?service=<slug>` (from a service page) preselects the service. */
 export function IntakePage() {
-  const [service, setService] = useState(''); const [name, setName] = useState(''); const [email, setEmail] = useState(''); const [phone, setPhone] = useState(''); const [channel, setChannel] = useState('phone'); const [answers, setAnswers] = useState<Answers>({}); const [draft, setDraft] = useState<number | null>(null); const [review, setReview] = useState(false)
+  const [params] = useSearchParams()
+  const [service, setService] = useState(params.get('service') ?? ''); const [name, setName] = useState(''); const [email, setEmail] = useState(''); const [phone, setPhone] = useState(''); const [channel, setChannel] = useState('phone'); const [answers, setAnswers] = useState<Answers>({}); const [draft, setDraft] = useState<number | null>(null); const [review, setReview] = useState(false)
   const key = useRef(newIdempotencyKey())
   const catalogue = useQuery({ queryKey: ['services', 'catalogue'], queryFn: () => api.get<Catalogue>('/api/public/services') })
   const detail = useQuery({ queryKey: ['services', 'service', service], queryFn: () => api.get<ServiceDetail>(`/api/public/services/${service}`), enabled: !!service })

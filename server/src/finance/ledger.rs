@@ -52,6 +52,7 @@ pub async fn post(
     }
     Ok(())
 }
+/// Records a finance timeline event shown to the applicant and to staff.
 pub async fn event(
     tx: &mut SqliteConnection,
     actor: &Actor,
@@ -64,7 +65,34 @@ pub async fn event(
     core::append_event(tx, case, actor.db_id(), kind, Visibility::Applicant, summary, data).await?;
     Ok(())
 }
-pub async fn tell(tx: &mut SqliteConnection, case: i64, subject: &str, body: &str) -> AppResult<()> {
+/// Records a finance event whose detail is an internal accounting note: one timeline event whose stored summary is
+/// the plain `applicant_summary`; staff read `staff_note` instead (`data.staff_note`, rendered by
+/// `cases::timeline::event_summary`; event data never reaches the applicant).
+pub async fn event_with_note(
+    tx: &mut SqliteConnection,
+    actor: &Actor,
+    case: i64,
+    kind: &str,
+    applicant_summary: &str,
+    staff_note: &str,
+    data: Value,
+) -> AppResult<()> {
+    let mut data = data;
+    if let Some(object) = data.as_object_mut() {
+        object.insert("staff_note".into(), Value::String(staff_note.into()));
+    } else {
+        data = serde_json::json!({ "detail": data, "staff_note": staff_note });
+    }
+    audit::record(tx, actor.db_id(), kind, "case", Some(case), data.clone()).await?;
+    core::append_event(tx, case, actor.db_id(), kind, Visibility::Applicant, applicant_summary, data).await?;
+    Ok(())
+}
+/// A notification's subject and body.
+pub type Message<'a> = (&'a str, &'a str);
+/// Notifies the applicant side with `applicant` wording (second person) and the case owners with
+/// `staff` wording (third person, about the applicant).
+pub async fn tell(tx: &mut SqliteConnection, case: i64, applicant: Message<'_>, staff: Message<'_>) -> AppResult<()> {
+    let (subject, body) = applicant;
     let c = core::load_case(tx, case).await?;
     let recipients:Vec<(i64,String)>=sqlx::query_as("SELECT u.id,u.email FROM users u WHERE u.is_active=1 AND (u.id=? OR u.id IN (SELECT user_id FROM memberships WHERE organisation_id=? AND status='active') OR u.id IN (SELECT user_id FROM case_representatives WHERE case_id=? AND status='active'))")
         .bind(c.applicant_user_id).bind(c.applicant_org_id).bind(case).fetch_all(&mut *tx).await?;
@@ -120,8 +148,8 @@ pub async fn tell(tx: &mut SqliteConnection, case: i64, subject: &str, body: &st
             Notice {
                 user_id: Some(owner),
                 case_id: Some(case),
-                subject: subject.into(),
-                body: body.into(),
+                subject: staff.0.into(),
+                body: staff.1.into(),
                 link: Some(format!("/staff/cases/{case}?tab=finance.money")),
                 ..Default::default()
             },

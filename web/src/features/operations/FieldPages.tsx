@@ -242,6 +242,8 @@ function TaskContent({
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   const closed = ['done', 'cancelled'].includes(t.status)
+  // Only the assigned field worker records the work; other staff get a read-only view.
+  const mine = t.assigned_to === user
   const save = async (value: Record<string, unknown>, usage = false) => {
     setBusy(true)
     setError(null)
@@ -301,7 +303,7 @@ function TaskContent({
               key={c.key}
               label={c.label}
               checked={c.done}
-              disabled={closed || busy}
+              disabled={!mine || closed || busy}
               onChange={(e) =>
                 void save({
                   kind: 'checklist',
@@ -312,7 +314,17 @@ function TaskContent({
           ))}
         </div>
       </Card>
-      {!closed && (
+      {!mine && (
+        <Card title="Work result">
+          <p className="whitespace-pre-line">
+            {t.result_text ?? 'No result recorded yet.'}
+          </p>
+          <p className="mt-2 text-sm text-muted">
+            Only the assigned field worker records the result.
+          </p>
+        </Card>
+      )}
+      {mine && !closed && (
         <>
           <Card title="Note or photo">
             <div className="space-y-4">

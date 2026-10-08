@@ -33,7 +33,15 @@ async fn require_applicant(tx: &mut sqlx::SqliteConnection, actor: &Actor, id: i
     let (_, access) = authz::require_case(tx, actor, id).await?;
     if access != CaseAccess::Applicant {
         return Err(AppError::not_found());
-    } // A representative can act but cannot delegate their authorisation.
+    }
+    if !may_delegate(tx, actor, id).await? {
+        return Err(AppError::forbidden());
+    }
+    Ok(())
+}
+/// For an actor with applicant access: the applicant (or an organisation member) may authorise and revoke
+/// representatives; a representative can act but cannot delegate their authorisation.
+async fn may_delegate(tx: &mut sqlx::SqliteConnection, actor: &Actor, id: i64) -> AppResult<bool> {
     let representative: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM case_representatives WHERE case_id=? AND user_id=? AND status='active')",
     )
@@ -50,11 +58,9 @@ async fn require_applicant(tx: &mut sqlx::SqliteConnection, actor: &Actor, id: i
         .bind(actor.user_id)
         .fetch_one(&mut *tx)
         .await?;
-        if !member {
-            return Err(AppError::forbidden());
-        }
+        return Ok(member);
     }
-    Ok(())
+    Ok(true)
 }
 async fn add(
     State(state): State<AppState>,
@@ -149,8 +155,9 @@ async fn list(State(state): State<AppState>, actor: Actor, Path(id): Path<i64>) 
     if matches!(access, CaseAccess::TaskOnly | CaseAccess::None) {
         return Err(AppError::not_found());
     }
+    let can_manage = access == CaseAccess::Applicant && may_delegate(&mut tx, &actor, id).await?;
     let rows:Vec<(i64,String,String,String)>=sqlx::query_as("SELECT r.id,u.display_name,r.basis,r.status FROM case_representatives r JOIN users u ON u.id=r.user_id WHERE case_id=? ORDER BY r.id").bind(id).fetch_all(&mut *tx).await?;
     Ok(Json(
-        json!({"items":rows.into_iter().map(|(id,name,basis,status)|json!({"id":id,"name":name,"basis":basis,"status":status})).collect::<Vec<_>>()}),
+        json!({"items":rows.into_iter().map(|(id,name,basis,status)|json!({"id":id,"name":name,"basis":basis,"status":status})).collect::<Vec<_>>(),"can_manage_representatives":can_manage}),
     ))
 }

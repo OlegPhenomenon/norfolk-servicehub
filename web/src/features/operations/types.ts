@@ -98,6 +98,8 @@ export interface Task {
     created_at: string
     created_offline_at: string | null
   }[]
+  /** Case Tasks tab only: the viewer may assign or cancel (never record the result). */
+  can_manage?: boolean
 }
 export interface Equipment {
   request: {
@@ -108,7 +110,6 @@ export interface Equipment {
     preferred_date: string
     scheduled_start: string | null
     scheduled_end: string | null
-    assigned_resource_id: number | null
   }
   usage: {
     id: number

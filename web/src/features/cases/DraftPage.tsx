@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useNavigate, useParams } from 'react-router'
+import { Navigate, useNavigate, useParams } from 'react-router'
 import { api, isApiError, newIdempotencyKey } from '@/api/client'
 import type { Answers } from '@/api/types'
+import { useMe } from '@/auth/useMe'
 import { Alert, Button, Card, ErrorAlert, PageHeader, QueryView } from '@/ui'
 import { FormRenderer } from '../services/FormRenderer'
 import type { DraftDetail, DraftSaved } from './types'
+/** The applicant's own draft. Staff never edit it; they are sent to the staff workspace for that request. */
 export function DraftPage() {
-  const { id } = useParams()
-  const q = useQuery({ queryKey: ['cases', 'draft', id], queryFn: () => api.get<DraftDetail>(`/api/cases/${id}/draft`) })
+  const { id } = useParams(); const me = useMe()
+  const staff = me.data?.user?.kind === 'staff'
+  const q = useQuery({ queryKey: ['cases', 'draft', id], queryFn: () => api.get<DraftDetail>(`/api/cases/${id}/draft`), enabled: !staff })
+  if (staff) return <Navigate to={`/staff/cases/${id}`} replace />
   return <QueryView query={q}>{(data) => <DraftEditor key={data.case.id} data={data} />}</QueryView>
 }
 function DraftEditor({ data }: { data: DraftDetail }) {

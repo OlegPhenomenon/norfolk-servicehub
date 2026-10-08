@@ -68,11 +68,11 @@ The seed already contains a completed **Builder's Stage B Compliance Declaration
 
 ## Story 3 — A planning certificate (~1 min)
 
-*Personas: Alexey → Olga → Tom/DemoPay → Priya → Helen*
+*Personas: Alexey → Olga → Alexey/DemoPay → Priya → Helen*
 
 1. **Alexey** → Services → *"Planning Certificate — Section 98 Planning Act 2002"* → enter the Portion reference → submit.
-2. **Olga** advances intake. The payment step auto-issues the **$181.13** invoice (demo-copy price). Try pressing *Complete this step* before paying — the guard blocks it and says why.
-3. **Alexey** pays on the Money tab → the case auto-advances to specialist preparation.
+2. **Olga** advances intake. The payment step auto-issues the **$181.13** invoice (demo-copy price). Try pressing *Complete this step* before paying — the guard blocks it and says why. On her **Money** tab Olga sees *Applicant's balance* and *Awaiting payment from applicant* — staff never pay for the applicant (finance records money taken at the counter as a counter payment).
+3. **Alexey** pays on the Money tab (*Pay* → *Pay with test card*) → the case auto-advances to specialist preparation.
 4. **Priya** prepares and submits the certificate; **Helen** issues it: Alexey downloads the issued PDF; the case closes with the exact issued version on file.
 
 **Point out:** the fee was invoiced when intake advanced to Payment but *acceptance* waited for confirmed money; the certificate is a decision document with recorded evidence, not just a status flag.
@@ -107,7 +107,7 @@ The seed already contains a completed **Builder's Stage B Compliance Declaration
 
 1. **Alexey** → *"Make a Complaint"* → describe it, select **Staff member concerned (if known)** (staff names only) → submit.
 2. **Ruth** sees it in her queue. If Olga was selected, she is denied access before assignment. Ruth or an eligible manager can update subjects on the **Confidential feedback** panel. Select Ruth in a second complaint to demonstrate routing to Helen because Ruth is the only complaints officer.
-3. **Contrast:** sign in as **Olga** — the case URL 404s, search finds nothing, and even Mark the sysadmin sees diagnostics only. Outbound mail about it says just *"There is an update on your feedback NSH-…"*.
+3. **Contrast:** sign in as **Olga** — the case URL 404s, search finds nothing, and even Mark the sysadmin sees diagnostics only. Outbound mail about it says just *"There is an update on your feedback NSH-…"* to the complainant; Ruth's notices read *"Confidential complaint NSH-… assigned to you"*.
 4. **Ruth** investigates and issues the complaint response letter → completed.
 5. **Alexey** disagrees → **request review** on the same case → a new linked complaint is created (different officer), keeping the history connected — no fresh email thread.
 

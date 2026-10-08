@@ -1064,13 +1064,42 @@ pub async fn on_skip(
 pub fn display_status(e: &Exhibition) -> &str {
     if e.terminated_at.is_some() { "terminated" } else { &e.status }
 }
-/// Exhibition state of one case for the building route panel.
-pub async fn case_view(tx: &mut SqliteConnection, case_id: i64) -> AppResult<Value> {
+/// Applicant wording for an unfinished exhibition stage: what is happening, not what staff must do next.
+async fn applicant_status(tx: &mut SqliteConnection, case_id: i64) -> AppResult<Option<String>> {
+    if step_block(tx, case_id).await?.is_none() {
+        return Ok(None);
+    }
+    let open: Option<String> = sqlx::query_scalar(
+        "SELECT closes_at FROM exhibitions WHERE case_id=? AND status='open' ORDER BY closes_at DESC LIMIT 1",
+    )
+    .bind(case_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(closes) = open {
+        let closes = crate::time::parse(&closes).map(crate::time::display_local_clock).unwrap_or(closes);
+        return Ok(Some(format!("The public exhibition is in progress until {closes} (Norfolk Island time).")));
+    }
+    let published: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM exhibitions WHERE case_id=? AND status<>'draft')")
+            .bind(case_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    Ok(Some(if published {
+        "Council is considering the public submissions before the request moves on.".into()
+    } else {
+        "Council is deciding whether this proposal needs to go on public exhibition.".into()
+    }))
+}
+/// Exhibition state of one case for the building route panel. Staff get every exhibition (drafts included) and
+/// the step's `block` instruction; applicants see only published exhibitions and a neutral `status_note`.
+pub async fn case_view(tx: &mut SqliteConnection, case_id: i64, staff: bool) -> AppResult<Value> {
     close_due(tx, &crate::time::now_str()).await?;
-    let rows: Vec<Exhibition> = sqlx::query_as("SELECT * FROM exhibitions WHERE case_id=? ORDER BY id")
-        .bind(case_id)
-        .fetch_all(&mut *tx)
-        .await?;
+    let rows: Vec<Exhibition> =
+        sqlx::query_as("SELECT * FROM exhibitions WHERE case_id=? AND (? OR status<>'draft') ORDER BY id")
+            .bind(case_id)
+            .bind(staff)
+            .fetch_all(&mut *tx)
+            .await?;
     let mut out = vec![];
     for e in &rows {
         let (total, pending): (i64, i64) = sqlx::query_as(
@@ -1085,9 +1114,11 @@ pub async fn case_view(tx: &mut SqliteConnection, case_id: i64) -> AppResult<Val
         .bind(case_id)
         .fetch_optional(&mut *tx)
         .await?;
-    Ok(
-        json!({"exhibitions":out,"not_required":not_required.map(|(reason,at,by)|json!({"reason":reason,"decided_at":at,"decided_by":by})),"block":step_block(tx,case_id).await?}),
-    )
+    let not_required = not_required
+        .map(|(reason, at, by)| json!({"reason":reason,"decided_at":at,"decided_by":if staff { by } else { None }}));
+    let (block, status_note) =
+        if staff { (step_block(tx, case_id).await?, None) } else { (None, applicant_status(tx, case_id).await?) };
+    Ok(json!({"exhibitions":out,"not_required":not_required,"block":block,"status_note":status_note}))
 }
 
 static RENDERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);

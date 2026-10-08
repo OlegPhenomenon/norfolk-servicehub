@@ -1,5 +1,5 @@
 use super::{
-    core::{self, Visibility},
+    core::{self, CaseRow, Visibility},
     record,
 };
 use crate::{
@@ -92,13 +92,18 @@ pub async fn post_staff_message_at(
             .await?;
         deadlines::api::pause_at(tx, case_id, id, body, now).await?;
     }
+    // Stored in staff wording; each audience reads it through `timeline::event_summary`.
     record(
         tx,
         actor,
         case_id,
         "message.staff",
         Visibility::Applicant,
-        if requires_response { "We need more information from you." } else { "Council sent you a message." },
+        if requires_response {
+            "Council requested more information from the applicant."
+        } else {
+            "Council sent the applicant a message."
+        },
         json!({"message_id":id,"requires_response":requires_response}),
     )
     .await?;
@@ -139,23 +144,7 @@ pub async fn applicant_reply(
     validate_body(body)?;
     validate_document(tx, id, document_version_id).await?;
     let mid:i64=sqlx::query_scalar("INSERT INTO case_messages(case_id,author_user_id,from_staff,body,document_version_id,created_at) VALUES (?,?,0,?,?,?) RETURNING id").bind(id).bind(actor.db_id()).bind(body.trim()).bind(document_version_id).bind(time::fmt(state.now())).fetch_one(&mut *tx).await?;
-    sqlx::query(
-        "UPDATE case_messages SET resolved_at=? WHERE case_id=? AND requires_response=1 AND resolved_at IS NULL AND NOT EXISTS(SELECT 1 FROM document_comments c WHERE c.message_id=case_messages.id AND c.request_new_version=1 AND c.resolved_at IS NULL)",
-    )
-    .bind(time::fmt(state.now()))
-    .bind(id)
-    .execute(&mut *tx)
-    .await?;
-    let outstanding: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM case_messages WHERE case_id=? AND requires_response=1 AND resolved_at IS NULL)",
-    )
-    .bind(id)
-    .fetch_one(&mut *tx)
-    .await?;
-    if case.status == "waiting_on_applicant" && !outstanding {
-        sqlx::query("UPDATE cases SET status='in_progress' WHERE id=?").bind(id).execute(&mut *tx).await?;
-        deadlines::api::resume_at(tx, id, "applicant_responded", state.now()).await?;
-    }
+    resolve_replied(tx, state, &case).await?;
     record(
         tx,
         actor,
@@ -188,6 +177,62 @@ pub async fn applicant_reply(
             .await?;
         }
     }
+    Ok(mid)
+}
+/// The applicant answered: resolve their open information requests (except document replacements still awaiting
+/// a new version) and, when nothing is outstanding, resume the case and its paused deadlines.
+async fn resolve_replied(tx: &mut SqliteConnection, state: &AppState, case: &CaseRow) -> AppResult<()> {
+    sqlx::query(
+        "UPDATE case_messages SET resolved_at=? WHERE case_id=? AND requires_response=1 AND resolved_at IS NULL AND NOT EXISTS(SELECT 1 FROM document_comments c WHERE c.message_id=case_messages.id AND c.request_new_version=1 AND c.resolved_at IS NULL)",
+    )
+    .bind(time::fmt(state.now()))
+    .bind(case.id)
+    .execute(&mut *tx)
+    .await?;
+    let outstanding: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM case_messages WHERE case_id=? AND requires_response=1 AND resolved_at IS NULL)",
+    )
+    .bind(case.id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if case.status == "waiting_on_applicant" && !outstanding {
+        sqlx::query("UPDATE cases SET status='in_progress' WHERE id=?").bind(case.id).execute(&mut *tx).await?;
+        deadlines::api::resume_at(tx, case.id, "applicant_responded", state.now()).await?;
+    }
+    Ok(())
+}
+/// Assisted request (phone, walk-in, email, post): staff record the reply the applicant gave offline. It answers
+/// the open information request like an online reply, and both the message and the timeline say it was recorded
+/// by Council on the applicant's behalf. Callers check the `record-reply` action is allowed.
+pub async fn record_reply_on_behalf(
+    tx: &mut SqliteConnection,
+    state: &AppState,
+    actor: &Actor,
+    case: &CaseRow,
+    channel: &str,
+    note: &str,
+) -> AppResult<i64> {
+    if !super::workflow::is_assisted(case) {
+        return Err(AppError::forbidden_msg("The applicant replies online on this request."));
+    }
+    let how = super::timeline::received_how(channel)
+        .ok_or_else(|| AppError::field("channel", "Choose how the applicant contacted Council."))?;
+    validate_body(note)?;
+    let body = format!("Reply received {how}, recorded by Council on the applicant's behalf: {}", note.trim());
+    let mid: i64 = sqlx::query_scalar(
+        "INSERT INTO case_messages(case_id,author_user_id,from_staff,body,created_at) VALUES (?,?,0,?,?) RETURNING id",
+    )
+    .bind(case.id)
+    .bind(actor.db_id())
+    .bind(&body)
+    .bind(time::fmt(state.now()))
+    .fetch_one(&mut *tx)
+    .await?;
+    resolve_replied(tx, state, case).await?;
+    let data = json!({"message_id":mid,"channel":channel,"recorded_by_name":actor.display_name});
+    let def = crate::services::definition::load_for_case(tx, case).await?;
+    let summary = super::timeline::event_summary(&def, "message.applicant_recorded", &data, "", true);
+    record(tx, actor, case.id, "message.applicant_recorded", Visibility::Applicant, &summary, data).await?;
     Ok(mid)
 }
 /// Resolve only messages whose replacement comments have all been satisfied.

@@ -119,7 +119,13 @@ pub async fn receive(
             }
         );
         ledger::event(tx, actor, c, "finance.payment_confirmed", &summary, json!({"payment_id":id})).await?;
-        ledger::tell(tx, c, "Payment received", &summary).await?;
+        ledger::tell(
+            tx,
+            c,
+            ("Payment received", &summary),
+            ("Applicant's payment received", &format!("{summary} from the applicant")),
+        )
+        .await?;
     } else {
         crate::audit::record(
             tx,
@@ -182,8 +188,11 @@ pub async fn match_suspense(
     ledger::tell(
         tx,
         case,
-        "Bank payment confirmed",
-        &format!("Bank transfer of {} matched to your request.", ledger::money(available)),
+        ("Bank payment confirmed", &format!("Bank transfer of {} matched to your request.", ledger::money(available))),
+        (
+            "Applicant's bank transfer matched",
+            &format!("The applicant's bank transfer of {} was matched to this request.", ledger::money(available)),
+        ),
     )
     .await?;
     Ok(())
@@ -228,11 +237,12 @@ pub async fn reverse(tx: &mut SqliteConnection, actor: &Actor, id: i64, reason: 
         &[("receivables", cents, 0), ("customer_credit", 0, cents)],
     )
     .await?;
-    ledger::event(
+    ledger::event_with_note(
         tx,
         actor,
         case,
         "finance.allocation_reversed",
+        "Council corrected a payment record on this request.",
         &format!("Payment allocation reversed: {reason}"),
         json!({"allocation_id":id}),
     )
@@ -353,13 +363,27 @@ pub async fn unmatch(tx: &mut SqliteConnection, actor: &Actor, id: i64, reason: 
         &[("customer_credit", credit, 0), ("unallocated_receipts", 0, credit)],
     )
     .await?;
-    ledger::event(tx, actor, case, "finance.payment_unmatched", reason, json!({"payment_id":id,"amount_cents":credit}))
-        .await?;
+    ledger::event_with_note(
+        tx,
+        actor,
+        case,
+        "finance.payment_unmatched",
+        "Council corrected a bank payment record on this request.",
+        &format!("Bank transfer unmatched to suspense: {reason}"),
+        json!({"payment_id":id,"amount_cents":credit}),
+    )
+    .await?;
     ledger::tell(
         tx,
         case,
-        "Bank transfer correction",
-        "A wrongly matched transfer was returned to suspense. The updated balance is shown on your request.",
+        (
+            "Bank transfer correction",
+            "A bank transfer that was recorded against your request in error has been removed. Your updated balance is shown on your request.",
+        ),
+        (
+            "Bank transfer unmatched from applicant's request",
+            "A wrongly matched bank transfer was returned to suspense. The applicant's balance has been updated.",
+        ),
     )
     .await?;
     Ok(case)

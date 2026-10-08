@@ -29,17 +29,19 @@ pub async fn select_handler(tx: &mut SqliteConnection, id: i64, exclude: Option<
     Ok(sqlx::query_scalar("SELECT u.id FROM users u WHERE u.kind='staff' AND u.is_active=1 AND (? IS NULL OR u.id<>?) AND NOT EXISTS(SELECT 1 FROM case_access_denials d WHERE d.case_id=? AND d.user_id=u.id) AND EXISTS(SELECT 1 FROM role_grants g WHERE g.user_id=u.id AND g.revoked_at IS NULL AND g.role IN ('complaints_officer','manager')) ORDER BY EXISTS(SELECT 1 FROM role_grants g WHERE g.user_id=u.id AND g.revoked_at IS NULL AND g.role='complaints_officer') DESC,u.persona_key='ruth' DESC,u.id LIMIT 1")
         .bind(exclude).bind(exclude).bind(id).fetch_optional(tx).await?)
 }
-pub async fn notify_handler(tx: &mut SqliteConnection, case: &CaseRow, uid: i64) -> AppResult<()> {
+/// Tells the staff handler a confidential case is theirs; `what` is "complaint" or "independent review".
+/// The text carries only the reference, so it bypasses the generic confidential rewrite.
+pub async fn notify_handler(tx: &mut SqliteConnection, case: &CaseRow, uid: i64, what: &str) -> AppResult<()> {
     let email: String = sqlx::query_scalar("SELECT email FROM users WHERE id=?").bind(uid).fetch_one(&mut *tx).await?;
-    let message = format!("There is an update on your feedback {}.", case.number.as_deref().unwrap_or("request"));
-    notify::send(
+    let message = format!("Confidential {what} {} assigned to you", case.number.as_deref().unwrap_or("request"));
+    notify::send_reference_only(
         tx,
         Notice {
             user_id: Some(uid),
             email: Some(email),
             case_id: Some(case.id),
             subject: message.clone(),
-            body: message,
+            body: format!("{message} — sign in to read it."),
             link: Some(format!("/staff/cases/{}", case.id)),
             ..Notice::default()
         },
@@ -144,7 +146,7 @@ pub async fn subjects(
             "Previous handler is a subject of the complaint.",
         )
         .await?;
-        notify_handler(&mut tx, &case, replacement).await?;
+        notify_handler(&mut tx, &case, replacement, "complaint").await?;
     }
     common::changed(
         &mut tx,
@@ -222,7 +224,7 @@ async fn request_review(
         json!({"review_of":id,"reason":reason}),
     )
     .await?;
-    notify_handler(&mut tx, &review, handler).await?;
+    notify_handler(&mut tx, &review, handler, "independent review").await?;
     tx.commit().await?;
     Ok(Json(json!({"id":review.id,"number":review.number})))
 }

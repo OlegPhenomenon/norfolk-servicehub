@@ -10,7 +10,9 @@
 //!
 //! Rules, in order:
 //! 1. A `case_access_denials` row for (case, actor) → `None`, overriding everything.
-//! 2. Staff roles (staff users only):
+//! 2. Staff roles (staff users only), except on an applicant's own unsubmitted draft (`status = 'draft'` with no
+//!    `recorded_by_user_id`): that draft belongs to the applicant alone until they submit it. Assisted drafts
+//!    (recorded by staff) stay visible to staff.
 //!    * `confidential = 1` → `Staff` only for `complaints_officer` / `manager`; nobody else.
 //!    * otherwise `intake`, `manager` → `Staff { can_manage: true }`; `specialist` whose grant is unscoped
 //!      or scoped to the case's service → `Staff { can_manage: true }`; `finance` → `Staff { can_manage: false }`
@@ -105,6 +107,22 @@ struct CaseFacts {
     applicant_user_id: Option<i64>,
     applicant_org_id: Option<i64>,
     confidential: i64,
+    status: String,
+    recorded_by_user_id: Option<i64>,
+    submitted_at: Option<String>,
+}
+
+/// SQL form of [`CaseFacts::applicant_private`] over alias `c`.
+const APPLICANT_PRIVATE_DRAFT: &str =
+    "(c.status IN ('draft','withdrawn') AND c.submitted_at IS NULL AND c.recorded_by_user_id IS NULL)";
+
+impl CaseFacts {
+    /// The applicant's own never-submitted draft, also after the applicant deleted it: no staff role reaches it.
+    fn applicant_private(&self) -> bool {
+        matches!(self.status.as_str(), "draft" | "withdrawn")
+            && self.submitted_at.is_none()
+            && self.recorded_by_user_id.is_none()
+    }
 }
 
 /// Staff access from roles alone (rule 2), given the case's service and confidentiality.
@@ -131,11 +149,13 @@ fn staff_access_from_roles(actor: &Actor, service_id: i64, confidential: bool) -
 
 /// Computes the actor's access to a case. Unknown case → `CaseAccess::None`.
 pub async fn case_access(conn: &mut SqliteConnection, actor: &Actor, case_id: i64) -> AppResult<CaseAccess> {
-    let facts: Option<CaseFacts> =
-        sqlx::query_as("SELECT service_id, applicant_user_id, applicant_org_id, confidential FROM cases WHERE id = ?")
-            .bind(case_id)
-            .fetch_optional(&mut *conn)
-            .await?;
+    let facts: Option<CaseFacts> = sqlx::query_as(
+        "SELECT service_id, applicant_user_id, applicant_org_id, confidential, status, recorded_by_user_id, submitted_at \
+         FROM cases WHERE id = ?",
+    )
+    .bind(case_id)
+    .fetch_optional(&mut *conn)
+    .await?;
     let Some(facts) = facts else { return Ok(CaseAccess::None) };
     let uid = actor.user_id;
 
@@ -150,9 +170,11 @@ pub async fn case_access(conn: &mut SqliteConnection, actor: &Actor, case_id: i6
         return Ok(CaseAccess::None);
     }
 
-    // 2. Staff by role.
+    // 2. Staff by role (never on an applicant's own unsubmitted draft).
     let confidential = facts.confidential == 1;
-    if let Some(a) = staff_access_from_roles(actor, facts.service_id, confidential) {
+    if !facts.applicant_private()
+        && let Some(a) = staff_access_from_roles(actor, facts.service_id, confidential)
+    {
         return Ok(a);
     }
 
@@ -238,14 +260,15 @@ pub fn case_scope_sql(actor: &Actor) -> ScopeSql {
 
     let mut branches: Vec<String> = Vec::new();
 
-    // Staff branches (rule 2).
+    // Staff branches (rule 2), never covering an applicant's own unsubmitted draft.
+    let mut staff: Vec<String> = Vec::new();
     if actor.is_staff() {
         for grant in actor.roles.iter().filter(|g| matches!(g.role, Role::ComplaintsOfficer | Role::Manager)) {
             if let Some(service) = grant.scope_service_id {
-                branches.push("(c.confidential = 1 AND c.service_id = ?)".into());
+                staff.push("(c.confidential = 1 AND c.service_id = ?)".into());
                 binds.push(SqlValue::Int(service));
             } else {
-                branches.push("c.confidential = 1".into());
+                staff.push("c.confidential = 1".into());
             }
         }
         let all_services = actor.roles.iter().any(|g| {
@@ -253,7 +276,7 @@ pub fn case_scope_sql(actor: &Actor) -> ScopeSql {
                 && g.scope_service_id.is_none()
         });
         if all_services {
-            branches.push("c.confidential = 0".into());
+            staff.push("c.confidential = 0".into());
         } else {
             let mut scoped: Vec<i64> = actor
                 .roles
@@ -265,10 +288,14 @@ pub fn case_scope_sql(actor: &Actor) -> ScopeSql {
             scoped.dedup();
             if !scoped.is_empty() {
                 let placeholders = vec!["?"; scoped.len()].join(", ");
-                branches.push(format!("(c.confidential = 0 AND c.service_id IN ({placeholders}))"));
+                staff.push(format!("(c.confidential = 0 AND c.service_id IN ({placeholders}))"));
                 binds.extend(scoped.into_iter().map(SqlValue::Int));
             }
         }
+    }
+    if !staff.is_empty() {
+        let ors = staff.iter().map(|b| format!("({b})")).collect::<Vec<_>>().join(" OR ");
+        branches.push(format!("NOT {APPLICANT_PRIVATE_DRAFT} AND ({ors})"));
     }
 
     // Applicant branches (rule 3).
@@ -491,6 +518,43 @@ mod tests {
         assert!(scope_ids(pool, &actor(4, r, &[])).await.is_empty());
         // The system actor sees nothing through authz.
         assert!(scope_ids(pool, &Actor::system()).await.is_empty());
+    }
+
+    /// An applicant's own draft is theirs alone until submitted; an assisted draft stays visible to staff.
+    #[tokio::test]
+    async fn applicant_drafts_are_private_until_submitted() {
+        let (state, _dir) = crate::state::test_support::test_state().await;
+        let pool = &state.db;
+        user(pool, 1, "resident").await;
+        user(pool, 10, "staff").await;
+        exec(pool, &format!("INSERT INTO services (id, slug, name, category, module, department, created_at) VALUES (1, 's1', 'S1', 'Cat', 'generic', 'Dept', '{NOW}')")).await;
+        exec(pool, &format!("INSERT INTO service_versions (id, service_id, version, status, definition_json, created_at) VALUES (1, 1, 1, 'published', '{{}}', '{NOW}')")).await;
+        case(pool, 200, 1, Some(1), Option::None, false).await;
+        exec(pool, "UPDATE cases SET status = 'draft' WHERE id = 200").await;
+        case(pool, 201, 1, Option::None, Option::None, false).await;
+        exec(
+            pool,
+            "UPDATE cases SET status = 'draft', intake_channel = 'phone', recorded_by_user_id = 10 WHERE id = 201",
+        )
+        .await;
+        let owner = actor(1, UserKind::Resident, &[]);
+        let mut conn = pool.acquire().await.unwrap();
+        for a in [
+            actor(10, UserKind::Staff, &[(Role::Intake, Option::None)]),
+            actor(10, UserKind::Staff, &[(Role::Manager, Option::None)]),
+            actor(10, UserKind::Staff, &[(Role::Finance, Option::None)]),
+        ] {
+            assert_eq!(case_access(&mut conn, &a, 200).await.unwrap(), CaseAccess::None);
+            assert!(case_access(&mut conn, &a, 201).await.unwrap().is_staff());
+            assert_eq!(scope_ids(pool, &a).await, vec![201]);
+        }
+        assert_eq!(case_access(&mut conn, &owner, 200).await.unwrap(), CaseAccess::Applicant);
+        assert_eq!(scope_ids(pool, &owner).await, vec![200]);
+        // Once submitted, staff roles apply again.
+        exec(pool, "UPDATE cases SET status = 'submitted' WHERE id = 200").await;
+        let intake = actor(10, UserKind::Staff, &[(Role::Intake, Option::None)]);
+        assert!(case_access(&mut conn, &intake, 200).await.unwrap().can_manage());
+        assert_eq!(scope_ids(pool, &intake).await, vec![200, 201]);
     }
 
     #[test]

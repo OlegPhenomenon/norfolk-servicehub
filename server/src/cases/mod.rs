@@ -8,6 +8,7 @@ pub mod intake;
 pub mod messages;
 pub mod search;
 pub mod submission;
+pub mod timeline;
 pub mod workflow;
 
 use axum::Router;
@@ -42,14 +43,19 @@ pub async fn record(
     core::append_event(tx, id, actor.db_id(), kind, visibility, summary, data.clone()).await?;
     crate::audit::record(tx, actor.db_id(), kind, "case", Some(id), data).await
 }
+/// Who may read, change, delete or submit a draft (and replay its submission). An applicant's own draft belongs
+/// to the applicant (or their organisation/representative); staff never act on it. An assisted draft
+/// (`recorded_by_user_id` set) is handled only by the staff member who recorded it, through assisted intake.
 pub async fn require_edit(
     tx: &mut sqlx::SqliteConnection,
     actor: &crate::auth::Actor,
     id: i64,
 ) -> crate::error::AppResult<core::CaseRow> {
     let (case, access) = crate::authz::require_case(tx, actor, id).await?;
-    if access != crate::authz::CaseAccess::Applicant && !access.can_manage() {
-        return Err(crate::error::AppError::not_found());
+    match case.recorded_by_user_id {
+        None if access == crate::authz::CaseAccess::Applicant => Ok(case),
+        Some(recorder) if access.can_manage() && actor.db_id() == Some(recorder) => Ok(case),
+        Some(_) if access.is_staff() => Err(crate::error::AppError::forbidden()),
+        _ => Err(crate::error::AppError::not_found()),
     }
-    Ok(case)
 }

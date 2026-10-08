@@ -40,16 +40,27 @@ pub struct Task {
     pub revision: i64,
     pub step_run_id: Option<i64>,
 }
+/// Staff roles that assign and cancel field tasks (they never record the field result).
+const TASK_MANAGERS: &[Role] = &[Role::Intake, Role::Manager, Role::Specialist];
 pub async fn load(tx: &mut SqliteConnection, id: i64) -> AppResult<Task> {
     Ok(sqlx::query_as("SELECT * FROM tasks WHERE id=?").bind(id).fetch_one(&mut *tx).await?)
 }
+/// Reads: the assigned field worker or any staff member with case access. Writes (notes, photos, checklist,
+/// result, status, job card): only the assigned field worker; managing staff assign/cancel through their own
+/// commands and see a read-only view.
 pub async fn require(tx: &mut SqliteConnection, a: &Actor, id: i64, write: bool) -> AppResult<Task> {
     let t = load(tx, id).await?;
     let access = authz::case_access(tx, a, t.case_id).await?;
     let assigned =
         a.is_staff() && a.has_role(Role::FieldWorker) && t.assigned_to == Some(a.user_id) && access != CaseAccess::None;
-    if !assigned && !(access.is_staff() && (!write || access.can_manage())) {
+    if assigned {
+        return Ok(t);
+    }
+    if !access.is_staff() {
         return Err(AppError::not_found());
+    }
+    if write {
+        return Err(AppError::forbidden_msg("Only the assigned field worker records the result of this task."));
     }
     Ok(t)
 }
@@ -120,12 +131,17 @@ pub async fn case_tasks(
     Path(id): Path<i64>,
 ) -> AppResult<Json<Value>> {
     let mut tx = st.db.acquire().await?;
-    authz::require_staff_case(&mut tx, &a, id).await?;
+    let (case, access) = authz::require_staff_case(&mut tx, &a, id).await?;
+    // Assign/cancel rights only; recording the result stays with the assigned field worker.
+    let can_manage =
+        access.can_manage() && a.roles_for_service(case.service_id).iter().any(|r| TASK_MANAGERS.contains(r));
     let tasks: Vec<Task> =
         sqlx::query_as("SELECT * FROM tasks WHERE case_id=? ORDER BY id").bind(id).fetch_all(&mut *tx).await?;
     let mut out = Vec::new();
     for t in tasks {
-        out.push(projection(&mut tx, &t).await?);
+        let mut v = projection(&mut tx, &t).await?;
+        v["can_manage"] = json!(can_manage);
+        out.push(v);
     }
     Ok(Json(json!(out)))
 }
@@ -349,7 +365,7 @@ pub async fn assign(
 ) -> AppResult<Json<Value>> {
     let mut tx = db::write_tx(&st.db).await?;
     let t = load(&mut tx, id).await?;
-    model::manage(&mut tx, &a, t.case_id, &[Role::Intake, Role::Manager, Role::Specialist]).await?;
+    model::manage(&mut tx, &a, t.case_id, TASK_MANAGERS).await?;
     check_revision(&t, &json!({"expected_revision":v.expected_revision}))?;
     eligible_worker(&mut tx, v.assigned_to, t.case_id).await?;
     if matches!(t.status.as_str(), "done" | "cancelled") {
@@ -381,7 +397,7 @@ pub async fn cancel(
 ) -> AppResult<Json<Value>> {
     let mut tx = db::write_tx(&st.db).await?;
     let t = load(&mut tx, id).await?;
-    model::manage(&mut tx, &a, t.case_id, &[Role::Intake, Role::Manager, Role::Specialist]).await?;
+    model::manage(&mut tx, &a, t.case_id, TASK_MANAGERS).await?;
     check_revision(&t, &json!({"expected_revision":v.expected_revision}))?;
     model::text(&json!({"reason":v.reason}), "reason", 2000)?;
     if matches!(t.status.as_str(), "done" | "cancelled") {

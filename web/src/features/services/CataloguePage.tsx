@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { api } from '@/api/client'
-import { useMe } from '@/auth/useMe'
+import { hasRole, useMe } from '@/auth/useMe'
 import { PageContainer } from '@/layout/PageContainer'
 import { Alert, Badge, Button, ButtonLink, Card, EmptyState, ErrorAlert, Field, Money, PageHeader, QueryView, Steps, TextInput } from '@/ui'
 import { DEMO_SCHEDULE_NOTE, firstSentence } from './copy'
@@ -60,11 +60,17 @@ export function ServicePage() {
         </div>
         <div className="space-y-6">
           <Card title="What happens next"><Steps steps={def.workflow.steps.map((s) => ({ key: s.key, label: s.applicant_label || s.label }))} /></Card>
-          <Card title="Start your request">
-            {me.data?.user ? <Button fullWidth loading={start.isPending} onClick={() => start.mutate()}>Start request</Button> : <><ButtonLink to="/login" fullWidth>Sign in to start</ButtonLink>{me.data?.demo_mode && <p className="mt-3"><Link className="link" to="/demo">Try a fictional demo persona</Link></p>}</>}
-            {start.error && <ErrorAlert error={start.error} />}
-            <Alert title="Request first, decision later">{service.module === 'venue_booking' ? 'Your booking is confirmed separately after payment and Council review.' : 'Council will review your submitted request and let you know the outcome.'}</Alert>
-          </Card>
+          {me.data?.user?.kind === 'staff'
+            ? <Card title="Assisted request">
+              {hasRole(me.data, 'intake')
+                ? <><p className="mb-4">Record this service for an applicant who contacted Council by phone, post, email or in person.</p><ButtonLink to={`/staff/intake?service=${encodeURIComponent(service.slug)}`} fullWidth>Record assisted request</ButtonLink></>
+                : <p>Residents and businesses apply online. Intake officers record requests received by phone, post, email or in person.</p>}
+            </Card>
+            : <Card title="Start your request">
+              {me.data?.user ? <Button fullWidth loading={start.isPending} onClick={() => start.mutate()}>Start request</Button> : <><ButtonLink to="/login" fullWidth>Sign in to start</ButtonLink>{me.data?.demo_mode && <p className="mt-3"><Link className="link" to="/demo">Try a fictional demo persona</Link></p>}</>}
+              {start.error && <ErrorAlert error={start.error} />}
+              <Alert title="Request first, decision later">{service.module === 'venue_booking' ? 'Your booking is confirmed separately after payment and Council review.' : 'Council will review your submitted request and let you know the outcome.'}</Alert>
+            </Card>}
         </div>
       </div>
       <p className="mt-8 border-t border-line pt-4 text-sm text-muted">{DEMO_SCHEDULE_NOTE}</p>
