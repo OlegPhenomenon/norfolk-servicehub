@@ -26,7 +26,7 @@ async fn fixture() -> (AppState, tempfile::TempDir, i64, Actor, Actor, Actor) {
         .await
         .unwrap();
     sqlx::query("INSERT INTO services(id,slug,name,category,module,department,created_at) VALUES(1,'development-application','Development application','Planning','building','Planning',?)").bind(crate::time::now_str()).execute(&mut *tx).await.unwrap();
-    sqlx::query("INSERT INTO service_versions(id,service_id,version,status,definition_json,created_at) VALUES(1,1,1,'published','{}',?)").bind(crate::time::now_str()).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO service_versions(id,service_id,version,status,definition_json,created_at) VALUES(1,1,1,'published','{\"summary\":\"\",\"outcome\":\"\",\"workflow\":{\"steps\":[]},\"building_role\":\"project\"}',?)").bind(crate::time::now_str()).execute(&mut *tx).await.unwrap();
     let c = crate::cases::core::create_case(
         &mut tx,
         NewCase {
@@ -275,7 +275,7 @@ async fn project_creation_modification_links_and_supersession_reference_are_stab
     assert_eq!(n, 1);
     let did:i64=sqlx::query_scalar("INSERT INTO decisions(case_id,decision_type,outcome,reasons,status,prepared_by,created_at,issued_at) VALUES(?,'development_approval','approved','Fictional reasons','issued',2,?,?) RETURNING id").bind(cid).bind(crate::time::now_str()).bind(crate::time::now_str()).fetch_one(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO services(id,slug,name,category,module,department,created_at) VALUES(2,'modify-approval','Modify approval','Planning','building','Planning',?)").bind(crate::time::now_str()).execute(&mut *tx).await.unwrap();
-    sqlx::query("INSERT INTO service_versions(id,service_id,version,status,definition_json,created_at) VALUES(2,2,1,'published','{}',?)").bind(crate::time::now_str()).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO service_versions(id,service_id,version,status,definition_json,created_at) VALUES(2,2,1,'published','{\"summary\":\"\",\"outcome\":\"\",\"workflow\":{\"steps\":[]},\"building_role\":\"modification\"}',?)").bind(crate::time::now_str()).execute(&mut *tx).await.unwrap();
     let modified = crate::cases::core::create_case(
         &mut tx,
         NewCase {

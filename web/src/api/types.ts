@@ -205,6 +205,8 @@ export type FieldType =
   | 'equipment_request'
   | 'decision_ref'
   | 'group'
+  /** Building project reference or ID (string answer). */
+  | 'project_ref'
 
 /** Column types allowed inside a `group` field. */
 export type GroupColumnType = 'text' | 'textarea' | 'number' | 'date' | 'email' | 'phone' | 'select' | 'checkbox'
@@ -354,4 +356,8 @@ export interface ServiceDefinition {
   workflow: { steps: StepDef[] }
   deadlines: DeadlineDef[]
   pricing: PricingItem[]
+  /** Building module only: how a case relates to a building project. */
+  building_role?: BuildingRole
 }
+
+export type BuildingRole = 'project' | 'modification' | 'follow_up'

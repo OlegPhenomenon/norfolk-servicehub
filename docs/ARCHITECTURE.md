@@ -175,7 +175,9 @@ A planning-certificate style service instead uses `"pricing": [{ "item": "PLANNI
 Steps may set `"optional": true`; staff holding the step role may skip such a step with a recorded reason (event + audit).
 When a guard for a `payment`, `task` or `module` step becomes satisfied by a background event (webhook, task completion, refund confirmation), the owning module calls `cases::workflow::try_auto_advance(tx, case_id)`, which advances only if the current step's guard passes.
 
-Field types: `text`, `textarea`, `number`, `date`, `time`, `email`, `phone`, `select`, `multiselect`, `checkbox`, `property_ref` (Portion/Lot reference), `location` (map point + description), `booking_slot` (operations), `equipment_request` (operations), `decision_ref` (documents), `group` (repeating rows: `columns` of text/textarea/number/date/email/phone/select/checkbox fields, optional `min_items`/`max_items`; a required group needs at least one row). Conditional display: `show_if {field, equals}` — equality, or "the selection contains `equals`" when the earlier field is a multiselect; `required` applies only while the field is shown, and hidden fields are dropped from submitted answers (client and server). **No arbitrary expressions or code in definitions.**
+Field types: `text`, `textarea`, `number`, `date`, `time`, `email`, `phone`, `select`, `multiselect`, `checkbox`, `property_ref` (Portion/Lot reference), `location` (map point + description), `booking_slot` (operations), `equipment_request` (operations), `decision_ref` (documents), `project_ref` (documents: building project picker), `group` (repeating rows: `columns` of text/textarea/number/date/email/phone/select/checkbox fields, optional `min_items`/`max_items`; a required group needs at least one row). Conditional display: `show_if {field, equals}` — equality, or "the selection contains `equals`" when the earlier field is a multiselect; `required` applies only while the field is shown, and hidden fields are dropped from submitted answers (client and server). **No arbitrary expressions or code in definitions.**
+
+Building definitions carry `"building_role": "project" | "modification" | "follow_up"` (omitted elsewhere). On submission `documents::building::on_submit` dispatches on it: `project` creates a building project, `modification` links the chosen issued approval's project, `follow_up` links the project named by the definition's `project_ref` field. Publishing a `follow_up` definition requires a required `project_ref` field and the `intake`/`site`/`done` steps; a follow-up may only receive a `service_response` decision. Catalogue versions seeded before the field existed (`seed_hash='legacy'`) fall back to their seeded slug.
 
 Canonical answer values (identical in renderer, validator and hooks):
 
@@ -189,6 +191,7 @@ Canonical answer values (identical in renderer, validator and hooks):
 | `location` | `{ "lat": -29.04, "lng": 167.95, "description": "..." }` |
 | `decision_ref` | `{ "decision_id": 12 }` |
 | `group` | `[{ "<column key>": <column value>, … }, …]` — rows reduced to known, non-empty columns; cell errors are reported as `<field>.<row>.<column>` |
+| `project_ref` | string: a building project reference (`"BP-2026-000001"`) or ID |
 
 Workflow step kinds and their guards (checked by the workflow engine when staff press *Advance*):
 

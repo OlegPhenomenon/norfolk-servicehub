@@ -334,14 +334,23 @@ async fn catalogue_synonyms_and_idempotent_canonical_seed() {
     let mut tx = db::write_tx(&state.db).await.unwrap();
     super::seed(&mut tx, &state).await.unwrap();
     super::seed(&mut tx, &state).await.unwrap();
-    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM services").fetch_one(&mut *tx).await.unwrap(), 12);
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM services").fetch_one(&mut *tx).await.unwrap(), 18);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM service_versions WHERE seed_hash IS NOT NULL")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap(),
+        18
+    );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM service_search").fetch_one(&mut *tx).await.unwrap(),
-        11
+        17
     );
     for (query, expected) in [
         ("party", "rawson-hall-hire"),
         ("digger", "equipment-hire"),
+        ("conduit", "pipeline-conduit-crossing"),
+        ("stage", "builder-stage-c-notice"),
         ("pothole", "road-issue"),
         ("DA", "development-application"),
         ("certificate", "planning-certificate"),
