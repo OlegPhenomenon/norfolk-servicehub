@@ -174,3 +174,27 @@ test('an open exhibition blocks the request until it closes and every comment is
     await expect(page.getByRole('heading', { level: 1 }).locator('..')).toContainText('Completed');
   } finally { await Promise.all([olga.context.close(), priya.context.close(), helen.context.close(), tom.context.close()]); }
 });
+
+test('N-03 + Builder: moving the decision above the public exhibition cannot be published', async ({ page }) => {
+  test.setTimeout(120000);
+  await login(page, 'Mark');
+  const steps: { key: string }[] = (await call(page, 'GET', '/api/public/services/development-application')).definition.workflow.steps;
+  const decision = steps.findIndex((s) => s.key === 'decision');
+  expect(steps[decision - 1]?.key).toBe('exhibition');
+  await page.goto('/admin/services');
+  await page.getByRole('link', { name: 'Application for Development and/or Building Approval' }).click();
+  await page.getByRole('button', { name: 'New draft from published' }).click();
+  await expect(page.getByRole('button', { name: /Version \d+ — draft/ }).first()).toBeVisible();
+  await expect(page.getByText('Immutable version', { exact: true })).toHaveCount(0);
+  await page.getByRole('tab', { name: 'Workflow steps', exact: true }).click();
+  await page.getByRole('button', { name: `Move item ${decision + 1} up` }).click();
+  await expect(page.getByText(`Step ${decision}: Issue decisions`, { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Validate and publish' }).click();
+  await expect(page.getByRole('alert')).toContainText('Move the decision step below the exhibition step');
+  await expect(page.getByText('Immutable version', { exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Validate definition' }).click();
+  await expect(page.getByRole('tabpanel')).toContainText(`workflow.steps.${decision - 1}: Move the decision step below the exhibition step`);
+  // The public service still runs the published order.
+  const published: { key: string }[] = (await call(page, 'GET', '/api/public/services/development-application')).definition.workflow.steps;
+  expect(published.map((s) => s.key)).toEqual(steps.map((s) => s.key));
+});

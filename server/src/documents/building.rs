@@ -620,8 +620,8 @@ pub async fn issue_block(
     d: &super::decisions::Decision,
 ) -> AppResult<Option<String>> {
     let kind = approval_role(tx, case).await?;
+    let definition = crate::services::definition::load_for_case(tx, case).await?;
     if kind.is_some() && crate::finance::building_fees::applies(tx, case).await? {
-        let definition = crate::services::definition::load_for_case(tx, case).await?;
         let at_decision = case
             .current_step
             .as_deref()
@@ -640,6 +640,9 @@ pub async fn issue_block(
     if let Some(block) = super::exhibition::case_block(tx, case.id).await? {
         return Ok(Some(block));
     }
+    if let Some(block) = exhibition_unsettled(tx, case, &definition).await? {
+        return Ok(Some(block));
+    }
     if kind.is_some()
         && let Some(s) = scope(tx, case.id).await?
     {
@@ -653,6 +656,32 @@ pub async fn issue_block(
         }
     }
     Ok(None)
+}
+/// A route with a public exhibition step issues approvals only once the exhibition question is settled: a closed,
+/// formally terminated or reasoned withdrawal with every comment considered, a recorded "not required" decision, or
+/// (cases from before those records existed) the case having already left the exhibition step through the workflow.
+/// The stored step order is not trusted, so a decision step placed before the exhibition cannot issue early.
+async fn exhibition_unsettled(
+    tx: &mut SqliteConnection,
+    case: &CaseRow,
+    definition: &crate::services::definition::ServiceDefinition,
+) -> AppResult<Option<String>> {
+    let Some(step) =
+        definition.workflow.steps.iter().find(|s| s.handler.as_deref() == Some("documents.exhibition_closed"))
+    else {
+        return Ok(None);
+    };
+    let Some(block) = super::exhibition::step_block(tx, case.id).await? else {
+        return Ok(None);
+    };
+    let passed: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM workflow_step_runs WHERE case_id=? AND step_key=? AND left_reason IN ('advanced','skipped'))",
+    )
+    .bind(case.id)
+    .bind(&step.key)
+    .fetch_one(&mut *tx)
+    .await?;
+    Ok((!passed).then(|| format!("The public exhibition stage must be settled before approvals are issued. {block}")))
 }
 
 #[derive(serde::Deserialize)]

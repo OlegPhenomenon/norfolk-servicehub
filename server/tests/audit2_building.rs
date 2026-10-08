@@ -508,6 +508,120 @@ async fn builder_edits_cannot_remove_fee_payment_exhibition_or_decision_gates() 
     }
 }
 
+/// Reviewer regression (re-audit d0e5956): moving the decision above the public exhibition keeps every checkpoint
+/// present, required and correctly typed, but must still not be publishable.
+#[tokio::test]
+async fn builder_rejects_decision_before_exhibition() {
+    let (mut d, _dir) = support::fixture().await;
+    for (n, base_slug) in ["development-application", "modify-approval"].into_iter().enumerate() {
+        let base =
+            d.req("mark", "GET", &format!("/api/public/services/{base_slug}"), json!({})).await.unwrap()["definition"]
+                .clone();
+        let normal = builder_issues(&mut d, &format!("normal-order-{n}"), base.clone()).await;
+        assert!(normal.is_empty(), "Unchanged source definition should be valid: {normal:?}");
+
+        let mut reordered = base;
+        let steps = reordered["workflow"]["steps"].as_array_mut().unwrap();
+        let decision = steps.iter().position(|s| s["key"] == "decision").unwrap();
+        let exhibition = steps.iter().position(|s| s["key"] == "exhibition").unwrap();
+        steps.swap(decision, exhibition);
+        let problems = builder_issues(&mut d, &format!("wrong-order-{n}"), reordered).await;
+        assert!(
+            problems
+                .iter()
+                .any(|(path, m)| path == &format!("workflow.steps.{exhibition}")
+                    && m.contains("below the exhibition step")),
+            "{base_slug}: decision before exhibition must not be publishable; got {problems:?}"
+        );
+    }
+}
+
+/// A published version whose decision step comes before the exhibition (saved before the ordering rule, or written
+/// directly into the database) still cannot issue a DA, BA or modification approval until the exhibition question is
+/// settled; nothing is signed or notified on refusal, and a reasoned "not required" record lets the decisions issue.
+#[tokio::test]
+async fn stored_decision_before_exhibition_cannot_issue_until_the_exhibition_is_settled() {
+    let (mut d, _dir) = support::fixture().await;
+    let original = submit_da(&mut d, &["development_approval"], 60_000).await;
+    to_decision(&mut d, original, json!({"approvals":["development_approval"]})).await;
+    let da = d.decision(original, "development_approval", None).await.unwrap();
+    for slug in ["development-application", "modify-approval"] {
+        let mut def =
+            d.req("mark", "GET", &format!("/api/public/services/{slug}"), json!({})).await.unwrap()["definition"]
+                .clone();
+        let steps = def["workflow"]["steps"].as_array_mut().unwrap();
+        let decision = steps.iter().position(|s| s["key"] == "decision").unwrap();
+        let exhibition = steps.iter().position(|s| s["key"] == "exhibition").unwrap();
+        steps.swap(decision, exhibition);
+        let mut tx = servicehub::db::write_tx(&d.state.db).await.unwrap();
+        let service: i64 =
+            sqlx::query_scalar("SELECT id FROM services WHERE slug=?").bind(slug).fetch_one(&mut *tx).await.unwrap();
+        sqlx::query("UPDATE service_versions SET status='retired' WHERE service_id=? AND status='published'")
+            .bind(service)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO service_versions(service_id,version,status,definition_json,source_note,created_by,created_at,published_by,published_at) SELECT ?,MAX(version)+1,'published',?,'Misordered staff edit saved before the ordering rule',(SELECT id FROM users WHERE persona_key='mark'),'2026-01-05T00:00:00Z',(SELECT id FROM users WHERE persona_key='mark'),'2026-01-05T00:00:00Z' FROM service_versions WHERE service_id=?")
+            .bind(service)
+            .bind(def.to_string())
+            .bind(service)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let project = submit_da(&mut d, &BOTH, 60_000).await;
+    let modification = submit_modification(&mut d, &[da], &["conditions"]).await;
+    for (c, scope) in [(project, json!({"approvals":BOTH})), (modification, json!({"originals":[da]}))] {
+        scenarios::assess_fee(&mut d, c).await.unwrap();
+        d.pay("alexey", c, false).await.unwrap();
+        scenarios::confirm_scope(&mut d, c, scope).await.unwrap();
+        d.action("priya", c, "advance").await.unwrap();
+        assert_eq!(d.detail("olga", c).await.unwrap()["case"]["current_step"], "decision");
+    }
+    let held = [
+        (project, prepare(&mut d, project, "development_approval", None).await),
+        (project, prepare(&mut d, project, "building_approval", None).await),
+        (modification, prepare(&mut d, modification, "modification_approval", Some(da)).await),
+    ];
+    let notices = async |d: &Driver, c: i64| -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM notifications WHERE case_id=?")
+            .bind(c)
+            .fetch_one(&d.state.db)
+            .await
+            .unwrap()
+    };
+    for (c, id) in held {
+        let before = notices(&d, c).await;
+        let refused = issue(&mut d, c, id, 409).await;
+        assert!(
+            refused["error"]["message"].as_str().unwrap().contains("public exhibition stage must be settled"),
+            "{refused}"
+        );
+        let (status, output): (String, Option<i64>) =
+            sqlx::query_as("SELECT status,output_document_version_id FROM decisions WHERE id=?")
+                .bind(id)
+                .fetch_one(&d.state.db)
+                .await
+                .unwrap();
+        assert_ne!(status, "issued");
+        assert_eq!(output, None, "no signed result on refusal");
+        assert_eq!(notices(&d, c).await, before, "no issue notice on refusal");
+    }
+    for c in [project, modification] {
+        scenarios::exhibition_not_required(
+            &mut d,
+            c,
+            "Fictional demo: notified by letter; no public comment period applies.",
+        )
+        .await
+        .unwrap();
+    }
+    for (c, id) in held {
+        issue(&mut d, c, id, 200).await;
+    }
+}
+
 /// N-03: once an exhibition was prepared (draft, open, closed, withdrawn or terminated) it cannot be replaced by a
 /// "not required" record; a manager withdrawal needs a reason and, like a termination, every received comment still
 /// needs a consideration outcome before the exhibition step or a decision issue passes.

@@ -183,9 +183,17 @@ async fn every_builder_option_executes_in_every_module() {
                 .map(|s| s["key"].as_str().unwrap().to_owned())
                 .collect();
             // A building route assesses and collects its fee first (audit N-01): probe right after payment. A fee
-            // assessment probe goes before the payment that invoices it.
-            let at = match keys.iter().position(|k| k == "payment") {
-                Some(p) if module == "building" && !fee_probe => p + 1,
+            // assessment probe goes before the payment that invoices it. A DA/BA/modification decision is issued only
+            // after the assessment and a settled public exhibition (N-03), so that probe goes right after the
+            // exhibition, reached with the scope confirmed and the exhibition recorded as not required.
+            let scope = match (module, step["decision_types"][0].as_str()) {
+                ("building", Some("modification_approval")) => Some(json!({"originals":[approval]})),
+                ("building", Some(t)) if t != "service_response" => Some(json!({"approvals":[t]})),
+                _ => None,
+            };
+            let at = match (keys.iter().position(|k| k == "payment"), keys.iter().position(|k| k == "exhibition")) {
+                (_, Some(e)) if scope.is_some() => e + 1,
+                (Some(p), _) if module == "building" && !fee_probe => p + 1,
                 _ => 1,
             };
             def["workflow"]["steps"].as_array_mut().unwrap().insert(at, step.clone());
@@ -199,6 +207,14 @@ async fn every_builder_option_executes_in_every_module() {
                 if keys.iter().any(|k| k == "payment") {
                     d.pay("alexey", c, false).await.unwrap();
                 }
+            }
+            if let Some(scope) = scope {
+                scenarios::confirm_scope(&mut d, c, scope).await.unwrap();
+                d.action("priya", c, "advance").await.unwrap();
+                scenarios::exhibition_not_required(&mut d, c, "Fictional probe: no public comment period applies.")
+                    .await
+                    .unwrap();
+                d.action("priya", c, "advance").await.unwrap();
             }
             // Module checkpoints (booking, bond, equipment, exhibition) evaluate their own state; out of their
             // canonical position they may already pass (e.g. no bond invoiced yet) but must never error.
@@ -252,17 +268,7 @@ async fn every_builder_option_executes_in_every_module() {
                             .await;
                         }
                     } else {
-                        if module == "building" {
-                            // Decisions follow the confirmed approval scope (audit N-02); follow-ups have none.
-                            let scope = match t {
-                                "modification_approval" => Some(json!({"originals":[approval]})),
-                                "service_response" => None,
-                                _ => Some(json!({"approvals":[t]})),
-                            };
-                            if let Some(scope) = scope {
-                                scenarios::confirm_scope(&mut d, c, scope).await.unwrap();
-                            }
-                        }
+                        // Building approval scope was confirmed before the probe (audit N-02); follow-ups have none.
                         d.decision(c, t, None).await.unwrap();
                     }
                 }

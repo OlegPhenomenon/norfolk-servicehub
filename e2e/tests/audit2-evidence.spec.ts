@@ -586,3 +586,22 @@ test('N-05 stage notices and pipeline crossing in the catalogue, returned and ac
   await expect(ben.getByRole('link', { name: 'Download issued decision' })).toBeVisible();
   await capture(ben, 'n05-pipeline-decision.png');
 });
+
+test('N-03 re-audit: the Builder refuses a decision moved above the public exhibition', async ({ as }) => {
+  test.setTimeout(120000);
+  const mark = await as('Mark');
+  const steps: { key: string }[] = (await call(mark, 'GET', '/api/public/services/development-application')).definition.workflow.steps;
+  const decision = steps.findIndex((s) => s.key === 'decision');
+  await mark.goto('/admin/services');
+  await mark.getByRole('link', { name: 'Application for Development and/or Building Approval' }).click();
+  await mark.getByRole('button', { name: 'New draft from published' }).click();
+  await expect(mark.getByRole('button', { name: /Version \d+ — draft/ }).first()).toBeVisible();
+  await mark.getByRole('tab', { name: 'Workflow steps', exact: true }).click();
+  await mark.getByRole('button', { name: `Move item ${decision + 1} up` }).click();
+  await mark.getByRole('button', { name: 'Validate and publish' }).click();
+  await expect(mark.getByRole('alert')).toContainText('Move the decision step below the exhibition step');
+  await capture(mark, 'n03-builder-order-publish-refused.png');
+  await mark.getByRole('button', { name: 'Validate definition' }).click();
+  await expect(mark.getByRole('tabpanel')).toContainText('Move the decision step below the exhibition step');
+  await capture(mark, 'n03-builder-order-validation.png');
+});

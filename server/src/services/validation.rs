@@ -336,6 +336,26 @@ pub async fn validate_for_module(
             issue("workflow.steps".into(), &format!("The {key} checkpoint of a building approval cannot be optional."));
         }
     }
+    // Presence is not completion: a building approval is issued only after its fee is invoiced and paid, the
+    // assessment is done and the public exhibition is settled, so every decision step comes after those checkpoints.
+    // One issue per decision step (the publish error is keyed by path), naming the lowest checkpoint it must follow.
+    if approval_route {
+        for (i, s) in steps.iter().enumerate().filter(|(_, s)| s.kind == StepKind::Decision) {
+            if let Some(gate) = steps[i + 1..]
+                .iter()
+                .rev()
+                .find(|t| ["fees", "payment", "assessment", "exhibition"].contains(&t.key.as_str()))
+            {
+                issue(
+                    format!("workflow.steps.{i}"),
+                    &format!(
+                        "Move the {} step below the {} step: a building approval is issued only after the fee assessment, payment, assessment and public exhibition are settled.",
+                        s.key, gate.key
+                    ),
+                );
+            }
+        }
+    }
     for (i, p) in def.pricing.iter().enumerate() {
         let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM price_items WHERE code = ?)")
             .bind(&p.item)
