@@ -88,6 +88,80 @@ fn property() -> Vec<Value> {
         field("owner_name", "text", "Landowner's name", true),
     ]
 }
+fn labelled(key: &str, kind: &str, label: &str, required: bool, options: &[(&str, &str)]) -> Value {
+    let mut f = field(key, kind, label, required);
+    f["options"] = json!(options.iter().map(|(v, l)| json!({"value":v,"label":l})).collect::<Vec<_>>());
+    f
+}
+fn help(mut f: Value, text: &str) -> Value {
+    f["help"] = json!(text);
+    f
+}
+fn shown_when(mut f: Value, field: &str, equals: &str) -> Value {
+    f["show_if"] = json!({"field":field,"equals":equals});
+    f
+}
+fn group(key: &str, label: &str, columns: Vec<Value>) -> Value {
+    let mut f = field(key, "group", label, true);
+    f.as_object_mut().expect("field").remove("max_length");
+    f["columns"] = json!(columns);
+    f["min_items"] = json!(1);
+    f
+}
+/// Name and contact columns of the official form's applicant and landowner sections.
+fn person_columns() -> Vec<Value> {
+    vec![
+        field("first_name", "text", "First name", true),
+        field("last_name", "text", "Last name", true),
+        field("postal_address", "textarea", "Postal address", true),
+        field("phone", "phone", "Phone", false),
+        field("mobile", "phone", "Mobile", false),
+        field("email", "email", "Email", false),
+    ]
+}
+/// Application to Modify Development and/or Building Approval (form of 12 March 2024), section by section;
+/// mapping and requiredness basis in `docs/forms/modify-approval-mapping.md`. Keeps the approval-routing
+/// fields the building workflow owns (`original_approval`, `approvals_sought`) and the shared declaration.
+fn modify_approval_form(shared: Vec<Value>) -> (Vec<Value>, Vec<Value>) {
+    let kept = |key: &str| shared.iter().find(|f| f["key"] == key).cloned();
+    let mut fields: Vec<Value> = ["original_approval", "approvals_sought"].into_iter().filter_map(kept).collect();
+    let mut landowners = person_columns();
+    landowners.push(field("consent", "checkbox", "This landowner consents to lodging this modification (signed consent attached)", true));
+    fields.extend([
+        help(group("applicants", "Applicants", person_columns()), "Section 1. An applicant may be an agent acting on behalf of a landowner. Add a row for each applicant."),
+        labelled("landowners_are_applicants", "select", "Are all landowners listed above as applicants?", true, &[("yes", "Yes — every landowner is an applicant"), ("no", "No — list the landowners")]),
+        help(shown_when(group("landowners", "Landowners", landowners), "landowners_are_applicants", "no"), "Section 2. Add a row for each landowner. Their signatures are collected on the signed consent you upload under 'Signed consent of all landowners'; staff check it in the Documents tab."),
+        help(field("property_ref", "property_ref", "Property address", true), "Section 3: street address of the land."),
+        help(group("parcels", "Land parcels", vec![field("portion", "text", "Portion number", true), field("lot", "text", "Lot number", false), field("section", "text", "Section number", false), field("land_area", "text", "Land area (for example 2,000 m² or 1.2 ha)", false)]), "Section 3. Add a row for each portion, lot and section."),
+        select("land_tenure", "Land tenure", &["Freehold", "Crown Lease", "Vacant Crown Land", "Road Reserve", "Un-alienated Crown Land"]),
+        select("zoning", "Zoning", &["Rural", "Rural Residential", "Residential", "Mixed Use", "Business", "Light Industry", "Industry", "Open Space", "Conservation", "Special Use", "Airport", "Roads"]),
+        field("current_use", "textarea", "What is the land currently used for?", true),
+        help(labelled("use_types", "multiselect", "Type(s) of use, development and/or building included", true, &[("residential", "Residential (tourist accommodation units, dual occupancy, dwelling house, multiple dwelling)"), ("commercial", "Commercial (e.g. business premises, office, food premises, shop, tourist facility)"), ("industrial", "Industrial (general, light, rural, noxious/hazardous/offensive, extractive)"), ("home_industry", "Home industry or home occupation"), ("alterations_additions", "Alterations and additions to existing structure(s)"), ("ancillary", "Ancillary structures such as garage, verandah, shed"), ("change_of_use", "Change of use"), ("subdivision", "Subdivision (additional lots, boundary adjustment, amalgamation/consolidation)"), ("signage", "Advertising structure and/or signage"), ("community", "Community (e.g. educational establishment, hospital, public building)"), ("infrastructure", "Infrastructure (e.g. public works, electricity, waste, communications, roadworks)"), ("earthworks", "Earthworks (excavation, filling, site works)"), ("other", "Other")]), "Section 4. Tick all relevant boxes."),
+        shown_when(field("use_types_other", "text", "Other type of use or development", true), "use_types", "other"),
+        help(labelled("modification_types", "multiselect", "Type(s) of modification", true, &[("minor_error", "Minor error, misdescription or miscalculation"), ("conditions", "Modification to condition(s)"), ("lapse_date", "Change of approval lapse date"), ("other", "Any other modification")]), "Section 5. Tick every type that applies; each asks for its own description."),
+        shown_when(field("minor_error_description", "textarea", "Minor error: describe the modification and its expected impact", true), "modification_types", "minor_error"),
+        shown_when(field("conditions_description", "textarea", "Condition(s): describe the modification and its expected impact", true), "modification_types", "conditions"),
+        shown_when(field("proposed_lapse_date", "date", "Proposed approval lapse date", true), "modification_types", "lapse_date"),
+        shown_when(field("lapse_date_reasons", "textarea", "Reasons for requiring the change of lapse date", true), "modification_types", "lapse_date"),
+        shown_when(field("other_modification_description", "textarea", "Other modification: describe the modification and its expected impact", true), "modification_types", "other"),
+        help(field("modified_proposal", "textarea", "The proposed modified use or development, including all modifications made since the original approval", true), "Section 6: helps Council decide whether the modified use or development remains substantially the same as the approved one."),
+        field("external_environment_changes", "textarea", "Changes in the external environment since the original approval", true),
+        help(field("estimated_cost", "number", "Total estimated cost of building and works (AUD)", true), "Section 7: labour and materials. Council uses it to assess the modification fee."),
+        help(labelled("other_approvals", "multiselect", "Other approvals the modification may need", false, &[("epbc", "Environment Protection and Biodiversity Conservation Act 1999 (Cth)"), ("crown_lands", "Crown Lands Act 1996 (NI)"), ("local_government", "Local Government Act 1993 (NSW)(NI)"), ("trees", "Trees Act 1997 (NI)"), ("public_reserves", "Public Reserves Act 1997 (NI)"), ("subdivision", "Subdivision Act 2002 (NI)"), ("tourist_accommodation", "Tourist Accommodation Act 1984 (NI)"), ("sale_of_food", "Sale of Food Act 1950 (NI)"), ("liquor", "Liquor Act 2005 (NI)"), ("heritage", "Heritage Act 2002 (NI)"), ("roads", "Roads Act 2002 (NI)"), ("other", "Other approvals")]), "Section 8. If in doubt, contact the Planning Office."),
+        shown_when(field("other_approvals_details", "text", "Other approvals", true), "other_approvals", "other"),
+    ]);
+    fields.extend(kept("declaration").map(|mut d| {
+        d["label"] = json!("I/we, the applicant(s), declare that the information in this application is correct");
+        help(d, "Replaces the applicant signatures in section 1 of the paper form.")
+    }));
+    let documents = vec![
+        help(doc("title_search", "Copy of title search", true), "Section 3: a copy of the Title Search for the subject property."),
+        help(doc("owners_consent", "Signed consent of all landowners", true), "Section 2: every landowner signs to consent to lodging this modification only. If the applicants are the only landowners, upload the signed applicant page."),
+        help(doc("modification_plans", "Description of expected impacts, with relevant plans and drawings", true), "Section 5: a full description of the expected impacts of the proposed modifications, including relevant plans, drawings and compliance with relevant controls."),
+        help(doc("supporting", "Other supporting information (plans, drawings, photographs)", false), "Section 9: any additional material that shows what is proposed."),
+    ];
+    (fields, documents)
+}
 pub fn catalogue() -> Vec<(&'static str, &'static str, &'static str, &'static str, &'static str, Value, String)> {
     let entries = [
         (
@@ -192,7 +266,7 @@ pub fn catalogue() -> Vec<(&'static str, &'static str, &'static str, &'static st
                 fields.extend(property());fields.extend([select("land_tenure","Land tenure",&["Freehold","Crown Lease","Vacant Crown Land","Road Reserve","Un-alienated Crown Land"]),select("zoning","Zoning",&["Rural","Rural Residential","Residential","Mixed Use","Business","Light Industry","Industry","Open Space","Conservation","Special Use","Airport","Roads"]),field("current_use","textarea","What is the land currently used for?",true),field("proposal","textarea",if slug=="modify-approval"{"Description of proposed modification"}else{"Description of proposal"},true),field("estimated_cost","number","Total estimated cost of building and works (AUD)",true),field("owners_consent","checkbox","All landowners consent to lodging this application",true)]);
                 docs=vec![doc("title_search","Copy of title search",true),doc("owners_consent","Signed consent of all landowners",true),doc("site_plan","Site plan (at least 1:500)",true),doc("floor_plans","Plans and drawings (floor plans at least 1:100)",true),doc("environment","Environmental and heritage impact documentation",true),doc("earthworks","Earthworks plan, if earthworks exceed 50 cubic metres",false)];
                 if slug=="modify-approval"{
-                    fields.push(field("original_approval","decision_ref","Issued approval to modify",true));fields.extend([select("modification_type","Type of modification",&["Minor error","Conditions","Lapse date","Other"]),field("substantially_same","textarea","Explain why the use or development remains substantially the same",true)]);
+                    fields.push(field("original_approval","decision_ref","Issued approval to modify",true));
                     pricing.push(json!({"item":"MODIFICATION_FEE","quantity":1}));steps=vec![intake.clone(),assessment.clone(),decision(&["modification_approval"]),done()];
                 }else{
                     fields.extend([field("gross_floor_area","number","Gross floor area (square metres)",false),field("roof_area","number","Total roof area (square metres)",false),field("water_tank_litres","number","Total water storage (litres)",true),select("wastewater","Wastewater disposal",&["Sewer connection","Onsite system"]),field("earthworks_volume","number","Earthworks (cubic metres)",false),field("builder","text","Builder's details",false)]);
@@ -216,6 +290,7 @@ pub fn catalogue() -> Vec<(&'static str, &'static str, &'static str, &'static st
             _=>{fields.extend([field("dog_name","text","Dog's name",true),field("breed","text","Breed",true),field("microchip","text","Microchip number",false)]);("Draft demonstration service: dog registration rules need review before publishing.","A registration confirmation after staff review.",vec!["dog","registration"])},
         };
         fields.push(field("declaration","checkbox","I declare that the information is correct",true));
+        if slug=="modify-approval"{(fields,docs)=modify_approval_form(fields);}
         let first=steps.first().unwrap()["key"].as_str().unwrap();let second=steps.get(1).unwrap()["key"].as_str().unwrap();
         let deadlines=json!([{"kind":"completeness","label":"Initial check","days":if m=="building"{10}else{3},"basis":"business","starts":"submitted","stops":format!("step:{second}"),"pausable":false},{"kind":"response","label":"Reply","days":20,"basis":"business","starts":format!("step:{first}"),"stops":"closed","pausable":true,"max_pause_days":30}]);
         let calculation=match m {

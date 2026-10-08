@@ -32,8 +32,50 @@ pub fn handlers(module: &str) -> Vec<&'static str> {
     }
     handlers
 }
+/// What the Builder may offer for `module`. Every option listed here is executable end to end: the server has a
+/// guard/handler for it and the staff UI exposes the action that satisfies it (`tests/audit2_builder_forms.rs`).
 pub fn capabilities(module: &str) -> Value {
-    serde_json::json!({"step_kinds":["review","payment","decision","task","module","complete"],"handlers":handlers(module),"decision_types":decision_types(module),"task_kinds":task_kinds(module)})
+    let mut step_kinds = vec!["review", "payment", "decision"];
+    if !task_kinds(module).is_empty() {
+        step_kinds.push("task");
+    }
+    step_kinds.extend(["module", "complete"]);
+    serde_json::json!({"step_kinds":step_kinds,"handlers":handlers(module),"decision_types":decision_types(module),"task_kinds":task_kinds(module)})
+}
+/// Column types of a `group` field (contract: simple scalar inputs only).
+fn group_column_type(t: FieldType) -> bool {
+    matches!(
+        t,
+        FieldType::Text
+            | FieldType::Textarea
+            | FieldType::Number
+            | FieldType::Date
+            | FieldType::Email
+            | FieldType::Phone
+            | FieldType::Select
+            | FieldType::Checkbox
+    )
+}
+/// Label, option and range checks shared by top-level fields and group columns.
+fn field_shape_issues(p: &str, f: &FieldDef, module: &str) -> Vec<(String, &'static str)> {
+    let mut out = vec![];
+    if f.label.trim().is_empty() {
+        out.push((format!("{p}.label"), "Enter a field label."));
+    }
+    if matches!(f.field_type, FieldType::Select | FieldType::Multiselect)
+        && !(module == "complaint" && f.key == "staff_member_concerned")
+    {
+        let mut options = HashSet::new();
+        if f.options.is_empty() || f.options.iter().any(|o| o.value.is_empty() || !options.insert(&o.value)) {
+            out.push((format!("{p}.options"), "Provide unique, non-empty options."));
+        }
+    }
+    if let (Some(min), Some(max)) = (f.min, f.max)
+        && min > max
+    {
+        out.push((format!("{p}.min"), "Minimum cannot exceed maximum."));
+    }
+    out
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct ValidationIssue {
@@ -65,21 +107,42 @@ pub async fn validate_for_module(
         if f.key.trim().is_empty() || !fields.insert(f.key.clone()) {
             issue(format!("{p}.key"), "Field keys must be non-empty and unique.");
         }
-        if f.label.trim().is_empty() {
-            issue(format!("{p}.label"), "Enter a field label.");
+        for (path, message) in field_shape_issues(&p, f, module) {
+            issue(path, message);
         }
-        if matches!(f.field_type, FieldType::Select | FieldType::Multiselect)
-            && !(module == "complaint" && f.key == "staff_member_concerned")
-        {
-            let mut options = HashSet::new();
-            if f.options.is_empty() || f.options.iter().any(|o| o.value.is_empty() || !options.insert(&o.value)) {
-                issue(format!("{p}.options"), "Provide unique, non-empty options.");
+        if f.field_type == FieldType::Group {
+            if f.columns.is_empty() {
+                issue(format!("{p}.columns"), "Add at least one column to a repeating group.");
             }
-        }
-        if let (Some(min), Some(max)) = (f.min, f.max)
-            && min > max
-        {
-            issue(format!("{p}.min"), "Minimum cannot exceed maximum.");
+            if let (Some(min), Some(max)) = (f.min_items, f.max_items)
+                && min > max
+            {
+                issue(format!("{p}.min_items"), "Minimum rows cannot exceed maximum rows.");
+            }
+            if f.max_items == Some(0) {
+                issue(format!("{p}.max_items"), "Allow at least one row.");
+            }
+            let mut columns = HashSet::new();
+            for (j, c) in f.columns.iter().enumerate() {
+                let cp = format!("{p}.columns.{j}");
+                if c.key.trim().is_empty() || !columns.insert(c.key.as_str()) {
+                    issue(format!("{cp}.key"), "Column keys must be non-empty and unique.");
+                }
+                if !group_column_type(c.field_type) {
+                    issue(
+                        format!("{cp}.type"),
+                        "Use a text, long text, number, date, email, phone, select or checkbox column.",
+                    );
+                }
+                if c.show_if.is_some() || !c.columns.is_empty() {
+                    issue(cp.clone(), "Columns cannot be conditional or nested.");
+                }
+                for (path, message) in field_shape_issues(&cp, c, module) {
+                    issue(path, message);
+                }
+            }
+        } else if !f.columns.is_empty() || f.min_items.is_some() || f.max_items.is_some() {
+            issue(format!("{p}.columns"), "Only repeating groups have columns and row limits.");
         }
     }
     let mut documents = HashSet::new();
@@ -120,6 +183,16 @@ pub async fn validate_for_module(
                 || s.decision_types.iter().any(|d| !decision_types(module).contains(&d.as_str())))
         {
             issue(format!("{p}.decision_types"), "Choose registered decision types.");
+        }
+        // A modification decision supersedes the approval chosen in the request; without that field it can never
+        // be prepared ("Link the request to its original approval first").
+        if s.decision_types.iter().any(|d| d == "modification_approval")
+            && def.field("original_approval").is_none_or(|f| f.field_type != FieldType::DecisionRef)
+        {
+            issue(
+                format!("{p}.decision_types"),
+                "A modification approval needs an 'original_approval' issued-approval field in the form.",
+            );
         }
     }
     let trigger_valid = |t: &str| {
@@ -224,7 +297,10 @@ pub async fn validate_for_module(
 }
 
 pub fn visible(field: &FieldDef, answers: &Map<String, Value>) -> bool {
-    field.show_if.as_ref().is_none_or(|s| answers.get(&s.field) == Some(&s.equals))
+    field.show_if.as_ref().is_none_or(|s| s.matches(answers.get(&s.field)))
+}
+fn blank(v: &Value) -> bool {
+    v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty()) || v.as_array().is_some_and(Vec::is_empty)
 }
 /// Returns only known, visible answers; unknown and hidden input never enters the immutable snapshot.
 pub async fn validate_answers(
@@ -241,8 +317,17 @@ pub async fn validate_answers(
             continue;
         }
         let v = input.get(&f.key).unwrap_or(&Value::Null);
-        let empty =
-            v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty()) || v.as_array().is_some_and(Vec::is_empty);
+        let empty = blank(v);
+        if f.field_type == FieldType::Group {
+            if empty {
+                if f.required {
+                    errors.insert(f.key.clone(), "Add at least one row.".into());
+                }
+            } else if let Some(rows) = group_answer(f, v, &mut errors) {
+                cleaned.insert(f.key.clone(), rows);
+            }
+            continue;
+        }
         let error = if empty {
             f.required.then_some("This field is required.".to_owned())
         } else if f.required && f.field_type == FieldType::Checkbox && v != &Value::Bool(true) {
@@ -264,6 +349,61 @@ pub async fn validate_answers(
         return Err(AppError::validation(errors));
     }
     Ok(Value::Object(cleaned))
+}
+/// Validates a `group` answer row by row and returns the rows reduced to known, non-empty columns. Row problems
+/// are reported on the field and on `<field>.<row>.<column>` so the form can mark the exact cell.
+fn group_answer(f: &FieldDef, v: &Value, errors: &mut BTreeMap<String, String>) -> Option<Value> {
+    let Some(rows) = v.as_array() else {
+        errors.insert(f.key.clone(), "Enter a valid value for this field.".into());
+        return None;
+    };
+    let count = u32::try_from(rows.len()).unwrap_or(u32::MAX);
+    let mut field_error = None;
+    if let Some(min) = f.min_items.filter(|m| count < *m) {
+        field_error = Some(format!("Add at least {min} rows."));
+    }
+    if let Some(max) = f.max_items.filter(|m| count > *m) {
+        field_error = Some(format!("Enter no more than {max} rows."));
+    }
+    let mut cell_errors = false;
+    let mut cleaned = Vec::with_capacity(rows.len());
+    for (i, row) in rows.iter().enumerate() {
+        let Some(row) = row.as_object() else {
+            errors.insert(format!("{}.{i}", f.key), "Enter a valid row.".into());
+            cell_errors = true;
+            continue;
+        };
+        let mut clean = Map::new();
+        for c in &f.columns {
+            let cell = row.get(&c.key).unwrap_or(&Value::Null);
+            let empty = blank(cell);
+            let error = if empty {
+                c.required.then(|| "This field is required.".to_owned())
+            } else if c.required && c.field_type == FieldType::Checkbox && cell != &Value::Bool(true) {
+                Some("Confirm this item.".into())
+            } else {
+                value_error(c, cell)
+            };
+            if let Some(message) = error {
+                errors.insert(format!("{}.{i}.{}", f.key, c.key), message);
+                cell_errors = true;
+            }
+            if !empty {
+                clean.insert(c.key.clone(), cell.clone());
+            }
+        }
+        cleaned.push(Value::Object(clean));
+    }
+    if field_error.is_none() && cell_errors {
+        field_error = Some("Check the highlighted rows.".into());
+    }
+    match field_error {
+        Some(message) => {
+            errors.insert(f.key.clone(), message);
+            None
+        }
+        None => Some(Value::Array(cleaned)),
+    }
 }
 fn value_error(f: &FieldDef, v: &Value) -> Option<String> {
     let valid = match f.field_type {
@@ -311,6 +451,9 @@ fn value_error(f: &FieldDef, v: &Value) -> Option<String> {
     (!valid).then(|| "Enter a valid value for this field.".into())
 }
 
+/// Task kinds a step may create. Complaint cases are always confidential and field workers can never be given
+/// access to them (`authz::case_access`, `operations::tasks::eligible_worker`), so a field task there could never
+/// be finished; the Builder therefore offers no task steps for complaints.
 pub fn task_kinds(module: &str) -> Vec<&'static str> {
     let mut kinds = vec!["general"];
     match module {
@@ -318,6 +461,7 @@ pub fn task_kinds(module: &str) -> Vec<&'static str> {
         "equipment_hire" => kinds.push("equipment_job"),
         "building" => kinds.push("site_inspection"),
         "road_issue" => kinds.extend(["road_inspection", "road_repair"]),
+        "complaint" => kinds.clear(),
         _ => {}
     }
     kinds

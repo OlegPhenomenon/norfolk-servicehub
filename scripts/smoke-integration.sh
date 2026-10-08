@@ -75,23 +75,30 @@ for i,obj in enumerate(objects,1): offsets.append(len(pdf)); pdf+=f'{i} 0 obj\n'
 xref=len(pdf); pdf+=b'xref\n0 5\n0000000000 65535 f \n'+b''.join(f'{o:010} 00000 n \n'.encode() for o in offsets[1:])+f'trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n'.encode()
 fixture=data/'drawing.pdf'; fixture.write_bytes(pdf)
 
+def sample(f, persona):
+    kind=f['type']; key=f['key']
+    if kind=='checkbox': return True
+    if kind=='number': return 100
+    if kind=='select': return f['options'][0]['value']
+    if kind=='multiselect': return [f['options'][0]['value']]
+    if kind=='location': return {'lat':-29.04,'lng':167.95,'description':'Integration smoke: Taylors Road pothole'}
+    if kind=='date': return '2026-11-20'
+    if kind=='email': return 'alexey@example.invalid'
+    if kind=='phone': return '+672 3 55501'
+    if kind=='group': return [{c['key']:sample(c,persona) for c in f['columns'] if c.get('required')}]
+    return {'applicant_name':('Ben Carter' if persona=='ben' else 'Alexey Turner'),'first_name':('Ben' if persona=='ben' else 'Alexey'),'last_name':('Carter' if persona=='ben' else 'Turner'),'postal_address':'Fictional 44 Taylors Road','property_ref':'Portion DEMO-44, Taylors Road','portion':'DEMO-44','complaint':'Feedback about Olga; private integration smoke'}.get(key,'Integration smoke fixture')
+
 def submit(slug, extra=None, org=None, persona='alexey'):
     login(persona)
     definition=req(persona,'GET','/api/public/services/'+slug)['definition']; answers={}
     for f in definition['fields']:
         condition=f.get('show_if')
-        if condition and answers.get(condition['field'])!=condition['equals']: continue
+        if condition:
+            # show_if against a multiselect answer means "contains".
+            answer=answers.get(condition['field'])
+            if not (condition['equals'] in answer if isinstance(answer,list) else answer==condition['equals']): continue
         if not f.get('required'): continue
-        kind=f['type']; key=f['key']
-        if kind=='checkbox': value=True
-        elif kind=='number': value=100
-        elif kind=='select': value=f['options'][0]['value']
-        elif kind=='multiselect': value=[f['options'][0]['value']]
-        elif kind=='location': value={'lat':-29.04,'lng':167.95,'description':'Integration smoke: Taylors Road pothole'}
-        elif kind=='date': value='2026-11-20'
-        elif kind=='email': value='alexey@example.invalid'
-        else: value={'applicant_name':('Ben Carter' if persona=='ben' else 'Alexey Turner'),'postal_address':'Fictional 44 Taylors Road','property_ref':'Portion DEMO-44, Taylors Road','complaint':'Feedback about Olga; private integration smoke'}.get(key,'Integration smoke fixture')
-        answers[key]=value
+        answers[f['key']]=sample(f, persona)
     answers.update(extra or {})
     c=req(persona,'POST',f'/api/services/{slug}/drafts',{'applicant_org_id':org} if org else {})['id']
     req(persona,'PUT',f'/api/cases/{c}/draft',{'answers':answers})

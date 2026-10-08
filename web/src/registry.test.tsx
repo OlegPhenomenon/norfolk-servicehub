@@ -16,7 +16,7 @@ function detail(module: ServiceModule): CaseDetail {
   return {
     case: { id: 42, number: 'NSH-2026-000042', service_id: 1, service_name: 'Integration fixture', module, title: 'Integration fixture', status: 'in_progress', current_step: 'intake', applicant_name: 'Fictional applicant', confidential: module === 'complaint', revision: 1, created_at: '2026-10-07T00:00:00Z', submitted_at: '2026-10-07T00:00:00Z', updated_at: '2026-10-07T00:00:00Z', applicant_status_text: 'Under review', required_action: null },
     access: { kind: 'staff', can_manage: true }, step: null, steps: [],
-    definition: { summary: '', outcome: '', who_can_apply: '', price_note: '', keywords: [], fields: [], documents: [], workflow: { steps: [] }, deadlines: [], pricing: [] },
+    definition: { summary: '', outcome: '', who_can_apply: '', price_note: '', keywords: [], fields: [], documents: [], workflow: { steps: [{ key: 'visit', kind: 'task', task_kind: 'general', role: 'intake', label: 'Visit', applicant_label: 'Visit' }, { key: 'reply', kind: 'module', handler: 'documents.letter_issued:service_response', role: 'intake', label: 'Reply', applicant_label: 'Reply' }] }, deadlines: [], pricing: [] },
     answers: {}, allowed_actions: [], required_action: null, timeline: [], assignments: [], deadlines: [], applicant_status_text: 'Under review',
   }
 }
@@ -32,7 +32,7 @@ describe('cross-feature case workspaces', () => {
   for (const module of modules) {
     for (const audience of ['staff', 'applicant'] as const) {
       it(`mounts every registered ${module} panel on the ${audience} case route`, () => {
-        const d = detail(module), panels = panelsFor(d.case, audience)
+        const d = detail(module), panels = panelsFor(d.case, audience, d.definition)
         const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } })
         client.setQueryData(['cases', 'detail', '42'], d)
         const area = audience === 'staff' ? 'staff' : 'my'

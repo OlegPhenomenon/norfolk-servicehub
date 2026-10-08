@@ -6,7 +6,8 @@ test('catalogue is concise and service conditions stay available', async ({ page
   await page.goto('/services');
   await ready(page);
   const cards = page.locator('main section').filter({ has: page.getByRole('link', { name: 'View service', exact: true }) });
-  await expect(cards).toHaveCount(11);
+  // The seeded catalogue has 11 published services; earlier specs in the same run publish Builder-made ones.
+  await expect.poll(() => cards.count()).toBeGreaterThanOrEqual(11);
   for (const card of await cards.all()) {
     const paragraphs = card.locator('p');
     await expect(paragraphs).toHaveCount(2);

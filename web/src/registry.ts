@@ -55,7 +55,7 @@ export const staffNav: NavItem[] = NAVS.flatMap((m) => m.staffNav)
 export const adminNav: NavItem[] = NAVS.flatMap((m) => m.adminNav)
 export const residentNav: NavItem[] = NAVS.flatMap((m) => m.residentNav)
 
-/** All case-page tabs, in feature order. Filter with `panelsFor(caseSummary, audience)`. */
+/** All case-page tabs, in feature order. Filter with `panelsFor(caseSummary, audience, definition)`. */
 export const casePanels: CasePanel[] = [...casesPanels, ...servicesPanels, ...documentsPanels, ...operationsPanels, ...financePanels, ...recordsPanels]
 
 /** Form widgets by `FieldDef.type`. A later feature never silently overrides an earlier one (first wins, dev warning). */
@@ -76,6 +76,6 @@ export function visibleNav(items: NavItem[], roles: readonly Role[]): NavItem[] 
 }
 
 /** Case-page tabs for this case and viewer. */
-export function panelsFor(c: Parameters<CasePanel['applies']>[0], audience: 'staff' | 'applicant'): CasePanel[] {
-  return casePanels.filter((p) => (p.audience === 'both' || p.audience === audience) && p.applies(c))
+export function panelsFor(c: Parameters<CasePanel['applies']>[0], audience: 'staff' | 'applicant', definition: Parameters<CasePanel['applies']>[1]): CasePanel[] {
+  return casePanels.filter((p) => (p.audience === 'both' || p.audience === audience) && p.applies(c, definition))
 }

@@ -182,6 +182,7 @@ async fn grant_authority(
         "planning_certificate",
         "complaint_response",
         "road_response",
+        "service_response",
     ]
     .contains(&body.decision_type.as_str())
     {

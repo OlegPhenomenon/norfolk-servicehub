@@ -79,6 +79,8 @@ pub enum FieldType {
     EquipmentRequest,
     /// Documents: `{decision_id}`.
     DecisionRef,
+    /// Repeating rows: answer is an array of objects keyed by the `columns` keys.
+    Group,
 }
 
 /// One form field.
@@ -100,6 +102,14 @@ pub struct FieldDef {
     pub max: Option<f64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<SelectOption>,
+    /// `group` fields: the row columns (text/textarea/number/date/email/phone/select/checkbox only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<FieldDef>,
+    /// `group` fields: row count bounds (a required group needs at least one row regardless).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_items: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_items: Option<u32>,
     /// Conditional display; `required` only applies while shown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_if: Option<ShowIf>,
@@ -114,11 +124,22 @@ pub struct SelectOption {
     pub label: String,
 }
 
-/// `show_if {field, equals}`.
+/// `show_if {field, equals}`: shown when the earlier answer equals `equals`, or — for a multiselect answer —
+/// when the selected values contain `equals`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ShowIf {
     pub field: String,
     pub equals: Value,
+}
+
+impl ShowIf {
+    pub fn matches(&self, answer: Option<&Value>) -> bool {
+        match answer {
+            Some(Value::Array(selected)) => selected.contains(&self.equals),
+            Some(v) => v == &self.equals,
+            None => false,
+        }
+    }
 }
 
 /// A document the applicant uploads.
