@@ -21,13 +21,12 @@ export const casePanels: CasePanel[] = [
     Component: BookingPanel,
   },
   {
+    // Any service whose frozen workflow creates field tasks (task steps), whatever its module.
     key: 'operations.tasks',
     label: 'Tasks',
     audience: 'staff',
-    applies: (c) =>
-      ['venue_booking', 'equipment_hire', 'road_issue', 'building'].includes(
-        c.module,
-      ),
+    applies: (_c, definition) =>
+      definition.workflow.steps.some((s) => s.kind === 'task'),
     Component: TasksPanel,
   },
   {

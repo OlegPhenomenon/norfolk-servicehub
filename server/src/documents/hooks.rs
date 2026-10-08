@@ -91,11 +91,11 @@ pub async fn step_guard_handler(tx: &mut SqliteConnection, case: &CaseRow, handl
         return super::exhibition::step_block(tx, case.id).await;
     }
     if let Some(t) = handler.strip_prefix("documents.letter_issued:") {
-        if !matches!(t, "road_response" | "complaint_response") {
-            return Err(AppError::internal("Unknown letter handler."));
+        if !super::api::LETTER_TYPES.contains(&t) {
+            return Err(AppError::internal(format!("Unknown letter handler: {handler}")));
         }
         return Ok((!super::api::letter_issued(tx, case.id, t).await?)
-            .then(|| "Issue the response letter before continuing.".into()));
+            .then(|| format!("Issue the {} letter before continuing.", super::api::letter_label(t))));
     }
     Err(AppError::internal(format!("Unknown documents handler: {handler}")))
 }

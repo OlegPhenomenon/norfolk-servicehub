@@ -3,7 +3,7 @@
  *   import type { NavItem, CasePanel, FieldComponent } from '@/featureTypes'
  */
 import type { FC } from 'react'
-import type { CaseSummary, FieldDef, Role } from './api/types'
+import type { CaseSummary, FieldDef, Role, ServiceDefinition } from './api/types'
 import type { IconName } from './ui/Icon'
 
 /** A sidebar/menu entry. `to` is an absolute path (`/staff/bookings`). */
@@ -24,8 +24,8 @@ export interface CasePanel {
   label: string
   /** Who sees the tab: staff workspace, applicant (`/my`) view, or both. */
   audience: 'staff' | 'applicant' | 'both'
-  /** Show this panel for this case? Usually checks `c.module`. */
-  applies: (c: CaseSummary) => boolean
+  /** Show this panel for this case? Usually checks `c.module`; `definition` is the case's frozen service definition. */
+  applies: (c: CaseSummary, definition: ServiceDefinition) => boolean
   Component: FC<{ caseId: number }>
 }
 

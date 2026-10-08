@@ -226,35 +226,71 @@ impl Driver {
             if !f["required"].as_bool().unwrap_or(false) {
                 continue;
             }
-            if let Some(cond) = f.get("show_if")
-                && answers[cond["field"].as_str().unwrap()] != cond["equals"]
-            {
-                continue;
+            // `show_if` against a multiselect answer means "contains" (services::definition::ShowIf::matches).
+            if let Some(cond) = f.get("show_if") {
+                let answer = &answers[cond["field"].as_str().unwrap()];
+                let shown = match answer.as_array() {
+                    Some(selected) => selected.contains(&cond["equals"]),
+                    None => answer == &cond["equals"],
+                };
+                if !shown {
+                    continue;
+                }
             }
             let key = f["key"].as_str().unwrap();
-            answers[key] = match f["type"].as_str().unwrap() {
-                "checkbox" => json!(true),
-                "number" => json!(100),
-                "select" => f["options"][0]["value"].clone(),
-                "multiselect" => json!([f["options"][0]["value"]]),
-                "location" => json!({"lat":-29.04,"lng":167.95,"description":"Fictional pothole on Taylors Road"}),
-                "date" => json!(time::local_date(self.state.now()).to_string()),
-                "email" => json!("fictional@example.invalid"),
-                _ => json!(match key {
-                    "applicant_name" =>
-                        if who == "alexey" {
-                            "Alexey Turner"
-                        } else {
-                            "Ben Carter"
-                        },
-                    "postal_address" => "Fictional 44 Taylors Road",
-                    "property_ref" => "Portion DEMO-44, Taylors Road",
-                    "complaint" => "Confidential feedback about Olga",
-                    _ => "Fictional demonstration request",
-                }),
+            answers[key] = if f["type"] == "group" {
+                // One row with every required column filled.
+                let mut row = json!({});
+                for c in f["columns"].as_array().expect("group columns") {
+                    if c["required"] == true {
+                        row[c["key"].as_str().unwrap()] = self.sample(who, c);
+                    }
+                }
+                json!([row])
+            } else {
+                self.sample(who, f)
             };
         }
         Ok((def, answers))
+    }
+    /// A valid fictional value for a required field or group column.
+    fn sample(&self, who: &str, f: &Value) -> Value {
+        let key = f["key"].as_str().unwrap();
+        match f["type"].as_str().unwrap() {
+            "checkbox" => json!(true),
+            "number" => json!(100),
+            "select" => f["options"][0]["value"].clone(),
+            "multiselect" => json!([f["options"][0]["value"]]),
+            "location" => json!({"lat":-29.04,"lng":167.95,"description":"Fictional pothole on Taylors Road"}),
+            "date" => json!(time::local_date(self.state.now()).to_string()),
+            "email" => json!("fictional@example.invalid"),
+            "phone" => json!("+672 3 55501"),
+            _ => json!(match key {
+                "applicant_name" =>
+                    if who == "alexey" {
+                        "Alexey Turner"
+                    } else {
+                        "Ben Carter"
+                    },
+                "first_name" =>
+                    if who == "alexey" {
+                        "Alexey"
+                    } else {
+                        "Ben"
+                    },
+                "last_name" =>
+                    if who == "alexey" {
+                        "Turner"
+                    } else {
+                        "Carter"
+                    },
+                "postal_address" => "Fictional 44 Taylors Road",
+                "property_ref" => "Portion DEMO-44, Taylors Road",
+                "portion" => "DEMO-44",
+                "complaint" => "Confidential feedback about Olga",
+                _ => "Fictional demonstration request",
+            }),
+        }
     }
     pub async fn submit(
         &mut self,

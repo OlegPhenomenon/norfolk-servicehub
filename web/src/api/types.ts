@@ -204,13 +204,17 @@ export type FieldType =
   | 'booking_slot'
   | 'equipment_request'
   | 'decision_ref'
+  | 'group'
+
+/** Column types allowed inside a `group` field. */
+export type GroupColumnType = 'text' | 'textarea' | 'number' | 'date' | 'email' | 'phone' | 'select' | 'checkbox'
 
 export interface FieldOption {
   value: string
   label: string
 }
 
-/** Conditional display: show the field only while `answers[field] === equals`. */
+/** Conditional display: show the field only while `answers[field] === equals` (multiselect: the selection contains `equals`). */
 export interface ShowIf {
   field: string
   equals: string | number | boolean
@@ -230,6 +234,10 @@ export interface FieldDef {
   /** `select` / `multiselect`. */
   options?: FieldOption[]
   show_if?: ShowIf
+  /** `group`: row columns (see `GroupColumnType`), and row-count bounds. */
+  columns?: FieldDef[]
+  min_items?: number
+  max_items?: number
   /** Module-specific configuration, e.g. `venue: "Rawson Hall"` for `booking_slot`. */
   [extra: string]: unknown
 }
@@ -264,6 +272,9 @@ export interface DecisionRefValue {
   decision_id: number
 }
 
+/** `group`: one object per row, keyed by column key. */
+export type GroupRow = Record<string, string | number | boolean>
+
 /**
  * Answer value by field type:
  * text/textarea/email/phone/property_ref/select/time(`HH:MM`)/date(`YYYY-MM-DD`) → string;
@@ -278,6 +289,7 @@ export type AnswerValue =
   | EquipmentRequestValue
   | LocationValue
   | DecisionRefValue
+  | GroupRow[]
 
 /** Answers keyed by `FieldDef.key`. Hidden fields are dropped before submit. */
 export type Answers = Record<string, AnswerValue>
@@ -289,6 +301,8 @@ export interface DocumentRequirement {
   /** MIME types, e.g. `application/pdf`. */
   accept: string[]
   public_candidate: boolean
+  /** Shown with the upload slot and to staff reviewing the document. */
+  help?: string
 }
 
 export type StepKind = 'review' | 'payment' | 'decision' | 'task' | 'module' | 'complete'

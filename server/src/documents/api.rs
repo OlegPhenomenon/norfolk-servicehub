@@ -1,8 +1,9 @@
 //! Transaction-composable documents API.
 use crate::{
     auth::Actor,
-    cases::core::Visibility,
+    cases::core::{CaseRow, Visibility},
     error::{AppError, AppResult},
+    services::definition::StepDef,
     state::AppState,
     storage, time,
 };
@@ -54,6 +55,35 @@ pub(crate) async fn insert(
 pub async fn issued_decisions(tx: &mut SqliteConnection, case_id: i64) -> AppResult<Vec<DecisionSummary>> {
     Ok(sqlx::query_as("SELECT id,decision_type,outcome,status,issued_at,output_document_version_id FROM decisions WHERE case_id=? AND status='issued' ORDER BY id").bind(case_id).fetch_all(tx).await?)
 }
+/// Response letters a workflow `module` step can wait for (`documents.letter_issued:<type>`).
+pub const LETTER_TYPES: &[&str] = &["service_response", "road_response", "complaint_response"];
+/// Staff roles that may issue a response letter.
+pub const LETTER_ROLES: &[crate::authz::Role] = &[
+    crate::authz::Role::ComplaintsOfficer,
+    crate::authz::Role::Intake,
+    crate::authz::Role::Specialist,
+    crate::authz::Role::Manager,
+];
+pub fn letter_label(letter_type: &str) -> &'static str {
+    match letter_type {
+        "road_response" => "road issue response",
+        "complaint_response" => "complaint response",
+        _ => "service response",
+    }
+}
+/// `(step, letter type)` for every response-letter step of the case's frozen workflow.
+pub async fn letter_steps(tx: &mut SqliteConnection, case: &CaseRow) -> AppResult<Vec<(StepDef, String)>> {
+    let def = crate::services::definition::load_for_case(tx, case).await?;
+    Ok(def
+        .workflow
+        .steps
+        .into_iter()
+        .filter_map(|s| {
+            let t = s.handler.as_deref()?.strip_prefix("documents.letter_issued:")?.to_owned();
+            Some((s, t))
+        })
+        .collect())
+}
 #[allow(clippy::too_many_arguments)]
 pub async fn issue_letter(
     tx: &mut SqliteConnection,
@@ -64,25 +94,12 @@ pub async fn issue_letter(
     title: &str,
     body: &str,
 ) -> AppResult<DocumentId> {
-    if !matches!(letter_type, "complaint_response" | "road_response" | "service_response") {
-        return Err(AppError::field("letter_type", "Choose a complaint or road response."));
+    if !LETTER_TYPES.contains(&letter_type) {
+        return Err(AppError::field("letter_type", "Choose a response letter required by this service."));
     }
-    let case = super::manage(
-        tx,
-        actor,
-        case_id,
-        &[
-            crate::authz::Role::ComplaintsOfficer,
-            crate::authz::Role::Intake,
-            crate::authz::Role::Specialist,
-            crate::authz::Role::Manager,
-        ],
-    )
-    .await?;
-    if (letter_type == "complaint_response" && case.module != "complaint")
-        || (letter_type == "road_response" && case.module != "road_issue")
-    {
-        return Err(AppError::field("letter_type", "This letter does not match the service."));
+    let case = super::manage(tx, actor, case_id, LETTER_ROLES).await?;
+    if !letter_steps(tx, &case).await?.iter().any(|(_, t)| t == letter_type) {
+        return Err(AppError::field("letter_type", "This service has no workflow step for that letter."));
     }
     super::text("title", title, 200)?;
     super::text("body", body, 20000)?;

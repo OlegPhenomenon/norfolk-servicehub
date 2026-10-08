@@ -175,7 +175,7 @@ A planning-certificate style service instead uses `"pricing": [{ "item": "PLANNI
 Steps may set `"optional": true`; staff holding the step role may skip such a step with a recorded reason (event + audit).
 When a guard for a `payment`, `task` or `module` step becomes satisfied by a background event (webhook, task completion, refund confirmation), the owning module calls `cases::workflow::try_auto_advance(tx, case_id)`, which advances only if the current step's guard passes.
 
-Field types: `text`, `textarea`, `number`, `date`, `time`, `email`, `phone`, `select`, `multiselect`, `checkbox`, `property_ref` (Portion/Lot reference), `location` (map point + description), `booking_slot` (operations), `equipment_request` (operations), `decision_ref` (documents). Conditional display: `show_if {field, equals}`; `required` applies only while the field is shown, and hidden fields are dropped from submitted answers (client and server). **No arbitrary expressions or code in definitions.**
+Field types: `text`, `textarea`, `number`, `date`, `time`, `email`, `phone`, `select`, `multiselect`, `checkbox`, `property_ref` (Portion/Lot reference), `location` (map point + description), `booking_slot` (operations), `equipment_request` (operations), `decision_ref` (documents), `group` (repeating rows: `columns` of text/textarea/number/date/email/phone/select/checkbox fields, optional `min_items`/`max_items`; a required group needs at least one row). Conditional display: `show_if {field, equals}` — equality, or "the selection contains `equals`" when the earlier field is a multiselect; `required` applies only while the field is shown, and hidden fields are dropped from submitted answers (client and server). **No arbitrary expressions or code in definitions.**
 
 Canonical answer values (identical in renderer, validator and hooks):
 
@@ -188,6 +188,7 @@ Canonical answer values (identical in renderer, validator and hooks):
 | `equipment_request` | `{ "description": "...", "requested_hours": 4, "preferred_date": "YYYY-MM-DD", "site_text": "..." }` |
 | `location` | `{ "lat": -29.04, "lng": 167.95, "description": "..." }` |
 | `decision_ref` | `{ "decision_id": 12 }` |
+| `group` | `[{ "<column key>": <column value>, … }, …]` — rows reduced to known, non-empty columns; cell errors are reported as `<field>.<row>.<column>` |
 
 Workflow step kinds and their guards (checked by the workflow engine when staff press *Advance*):
 
@@ -211,7 +212,9 @@ Module step handlers (validated at publish time; unknown handler = invalid defin
 | `operations.usage_invoiced` | operations | actual usage approved and final invoice issued |
 | `finance.deposits_settled` | finance | `finance::api::deposits_settled` |
 | `documents.exhibition_closed` | documents | the case's exhibition is closed |
-| `documents.letter_issued:road_response` / `documents.letter_issued:complaint_response` | documents | `letter_issued(case, type)` |
+| `documents.letter_issued:service_response` (every module) / `…:road_response` / `…:complaint_response` | documents | `letter_issued(case, type)`; staff issue the letter from the case's *Response letters* tab (road: *Road response* tab) via `POST /api/cases/{id}/letters`, which only accepts letter types the case's workflow waits for |
+
+The Builder only offers what can run end to end (`GET /api/admin/services/capabilities/{module}`): `service_response` decisions and letters plus `general` field tasks for every module except that complaints (always confidential, never visible to field workers) get no task steps. The staff *Tasks* tab appears for any case whose workflow has a task step; staff reassign tasks there and field workers see them under *Field tasks*. `tests/audit2_builder_forms.rs` drives every offered option through a case.
 
 Deadline arithmetic (persisted in `deadlines.policy_json`): the trigger's local date is day 0 (start day excluded); day N is the Nth business day (or calendar day) after it; due at **17:00 Pacific/Norfolk** on day N; a due date falling on a non-business day under a business basis cannot happen by construction; a calendar-basis due date on a weekend/holiday rolls forward to the next business day. Pauses: `max_pause_days` counts **calendar** days cumulatively; on resume the due date moves forward by the number of business days (business basis) or calendar days (calendar basis) between the pause start date (exclusive) and the resume date (inclusive).
 

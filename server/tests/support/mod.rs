@@ -18,6 +18,7 @@ pub struct FixtureDir {
     _guard: tokio::sync::OwnedMutexGuard<()>,
 }
 impl FixtureDir {
+    #[allow(dead_code)] // Not every test binary needs the data directory.
     pub fn path(&self) -> &Path {
         self.dir.path()
     }

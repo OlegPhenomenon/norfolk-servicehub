@@ -121,5 +121,5 @@ const errors = isApiError(save.error) ? save.error.fields : {}
 - `@/auth/useMe`: `useMe()`, `hasRole(me, role)`, `hasAnyRole(me, roles)`, `useRefreshMe()`.
 - `@/layout/PageContainer`: standard width/padding for public pages.
 - `@/featureTypes`: `NavItem`, `CasePanel`, `FieldComponent`, `FieldComponentProps`.
-- `@/registry`: `panelsFor(caseSummary, 'staff' | 'applicant')`, `fieldTypes`, `visibleNav(items, roles)`.
+- `@/registry`: `panelsFor(caseSummary, 'staff' | 'applicant', definition)`, `fieldTypes`, `visibleNav(items, roles)`.
 - Query keys: start with your module name — `['operations', 'bookings', id]` — so invalidation stays local.

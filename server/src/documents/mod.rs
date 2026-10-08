@@ -4,6 +4,7 @@ pub mod building;
 pub mod decisions;
 pub mod exhibition;
 pub mod hooks;
+mod letters;
 mod seeds;
 #[cfg(test)]
 mod tests;
@@ -32,7 +33,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/cases/{id}/decisions", get(decisions::list).post(decisions::create))
         .route("/api/cases/{id}/decisions/{did}", put(decisions::update))
         .route("/api/cases/{id}/decisions/{did}/{action}", post(decisions::action))
-        .route("/api/cases/{id}/letters", post(decisions::letter))
+        .route("/api/cases/{id}/letters", get(letters::list).post(decisions::letter))
         .route("/api/decision-templates", get(decisions::templates))
         .route("/api/my/issued-approvals", get(building::approvals))
         .route("/api/building-projects/{id}", get(building::detail))
