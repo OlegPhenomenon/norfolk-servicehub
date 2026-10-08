@@ -194,6 +194,14 @@ pub async fn validate_for_module(
                 "A modification approval needs an 'original_approval' issued-approval field in the form.",
             );
         }
+        // A building project issues only its DA/BA, a modification only modification approvals and a follow-up
+        // notice only the permission to continue; any other type could never be prepared for the role.
+        if module == "building"
+            && def.building_role.is_some()
+            && s.decision_types.iter().any(|d| !crate::documents::building::role_permits(def.building_role, d))
+        {
+            issue(format!("{p}.decision_types"), "This decision type does not match the service's building role.");
+        }
     }
     let trigger_valid = |t: &str| {
         matches!(t, "submitted" | "decision_issued" | "closed")
@@ -226,7 +234,10 @@ pub async fn validate_for_module(
         "complaint" => &["triage", "investigation", "response", "done"],
         "building" => match def.building_role {
             Some(BuildingRole::FollowUp) => &["intake", "site", "done"],
-            _ => &["intake", "assessment", "decision", "done"],
+            Some(BuildingRole::Project | BuildingRole::Modification) => {
+                &["intake", "fees", "payment", "assessment", "exhibition", "decision", "done"]
+            }
+            None => &["intake", "assessment", "decision", "done"],
         },
         _ => &[],
     };
@@ -274,8 +285,15 @@ pub async fn validate_for_module(
             ("response", StepKind::Module, Some("documents.letter_issued:road_response")),
         ],
         "complaint" => &[("response", StepKind::Module, Some("documents.letter_issued:complaint_response"))],
+        "building" if matches!(def.building_role, Some(BuildingRole::Project | BuildingRole::Modification)) => &[
+            ("fees", StepKind::Module, Some(crate::finance::building_fees::HANDLER)),
+            ("payment", StepKind::Payment, None),
+            ("exhibition", StepKind::Module, Some("documents.exhibition_closed")),
+            ("decision", StepKind::Decision, None),
+        ],
         _ => &[],
     };
+    let approval_route = module == "building" && !checkpoints.is_empty();
     for (key, kind, handler) in checkpoints {
         if let Some(step) = def.step(key)
             && (step.kind != *kind || handler.is_some_and(|h| step.handler.as_deref() != Some(h)))
@@ -284,6 +302,10 @@ pub async fn validate_for_module(
                 "workflow.steps".into(),
                 &format!("The {key} checkpoint must retain its registered kind and handler."),
             );
+        }
+        // Fee, payment, public exhibition and decision gates of a building approval route cannot be skipped.
+        if approval_route && def.step(key).is_some_and(|s| s.optional) {
+            issue("workflow.steps".into(), &format!("The {key} checkpoint of a building approval cannot be optional."));
         }
     }
     for (i, p) in def.pricing.iter().enumerate() {

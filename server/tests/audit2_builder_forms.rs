@@ -1,7 +1,7 @@
 //! Audit 2, N-04 (every Builder option executes) and N-06 (modify-approval form fidelity, `group` fields).
 mod support;
 use serde_json::{Value, json};
-use servicehub::seed::driver::Driver;
+use servicehub::seed::{driver::Driver, scenarios};
 
 async fn req(d: &mut Driver, who: &str, method: &str, path: &str, body: Value) -> Value {
     d.req(who, method, path, body).await.unwrap()
@@ -118,28 +118,40 @@ async fn every_builder_option_executes_in_every_module() {
             probes.push(probe_step(role, json!({"kind":"decision","decision_types":[t]})));
         }
         assert_eq!(caps["step_kinds"].as_array().unwrap().contains(&json!("task")), module != "complaint");
+        // A building approval route assesses and collects its fee first (audit N-01): probe right after payment.
+        let at = if module == "building" {
+            base["workflow"]["steps"].as_array().unwrap().iter().position(|s| s["key"] == "payment").unwrap() + 1
+        } else {
+            1
+        };
         for step in probes {
             n += 1;
             let slug = format!("probe-{}-{n}", module.replace('_', "-"));
             let mut def = base.clone();
-            def["workflow"]["steps"].as_array_mut().unwrap().insert(1, step.clone());
-            if step["decision_types"] == json!(["modification_approval"]) {
-                // Only meaningful with an `original_approval` field (the approval being modified): rejected at
-                // publish otherwise, and it is the decision step of the seeded modification service.
-                let created = req(&mut d,"mark","POST","/api/admin/services",json!({"slug":slug,"name":"Modification probe","category":"Testing","department":"Planning","module":module})).await;
+            def["workflow"]["steps"].as_array_mut().unwrap().insert(at, step.clone());
+            // A decision type the base's building role cannot receive (a project issues only its DA/BA) is rejected at
+            // publish; it is the decision step of the seeded service with that role. A modification approval also
+            // needs an `original_approval` field (the approval being modified).
+            let other_role = match (module, step["decision_types"][0].as_str()) {
+                ("building", Some("modification_approval")) => Some("modify-approval"),
+                ("building", Some("service_response")) => Some("builder-stage-a-notice"),
+                _ => None,
+            };
+            if let Some(other) = other_role {
+                let created = req(&mut d,"mark","POST","/api/admin/services",json!({"slug":slug,"name":"Role probe","category":"Testing","department":"Planning","module":module})).await;
                 let path = format!("/api/admin/services/{}/versions/{}", created["id"], created["version_id"]);
                 req(&mut d, "mark", "PUT", &path, def).await;
                 let issues = req(&mut d, "mark", "POST", &format!("{path}/validate"), json!({})).await;
+                let expected = format!("workflow.steps.{at}.decision_types");
+                assert!(issues["issues"].as_array().unwrap().iter().any(|i| i["path"] == expected.as_str()), "{slug}");
+                let seeded = req(&mut d, "alexey", "GET", &format!("/api/public/services/{other}"), json!({})).await;
                 assert!(
-                    issues["issues"].as_array().unwrap().iter().any(|i| i["path"] == "workflow.steps.1.decision_types")
-                );
-                let modify = req(&mut d, "alexey", "GET", "/api/public/services/modify-approval", json!({})).await;
-                assert!(
-                    modify["definition"]["workflow"]["steps"]
+                    seeded["definition"]["workflow"]["steps"]
                         .as_array()
                         .unwrap()
                         .iter()
-                        .any(|s| s["decision_types"] == json!(["modification_approval"]))
+                        .any(|s| s["decision_types"] == step["decision_types"]),
+                    "{other}"
                 );
                 continue;
             }
@@ -153,6 +165,10 @@ async fn every_builder_option_executes_in_every_module() {
             };
             let (c, _) = d.submit("alexey", &slug, extra, None).await.unwrap();
             d.action(staff, c, "advance").await.unwrap();
+            if module == "building" {
+                scenarios::assess_fee(&mut d, c).await.unwrap();
+                d.pay("alexey", c, false).await.unwrap();
+            }
             // Module checkpoints (booking, bond, equipment, exhibition) evaluate their own state; out of their
             // canonical position they may already pass (e.g. no bond invoiced yet) but must never error.
             let checkpoint = step["handler"].as_str().is_some_and(|h| !h.starts_with("documents.letter_issued:"))
@@ -200,6 +216,10 @@ async fn every_builder_option_executes_in_every_module() {
                             .await;
                         }
                     } else {
+                        if module == "building" {
+                            // Decisions follow the confirmed approval scope (audit N-02).
+                            scenarios::confirm_scope(&mut d, c, json!({"approvals":[t]})).await.unwrap();
+                        }
                         d.decision(c, t, None).await.unwrap();
                     }
                 }
@@ -372,10 +392,17 @@ async fn group_fields_are_validated_in_definitions_and_answers() {
 async fn modify_approval_captures_every_form_section() {
     let (mut d, _dir) = support::fixture().await;
     let org = req(&mut d, "ben", "GET", "/api/my/organisations", json!({})).await[0]["id"].as_i64().unwrap();
-    let (da, _) = d.submit("ben", "development-application", json!({}), Some(org)).await.unwrap();
+    let both = json!(["development_approval", "building_approval"]);
+    let (da, _) =
+        d.submit("ben", "development-application", json!({"approvals_sought":both}), Some(org)).await.unwrap();
+    // Building approval route (audit N-01..N-03): fee assessed and paid, scope confirmed, no exhibition.
     d.action("olga", da, "advance").await.unwrap();
+    scenarios::assess_fee(&mut d, da).await.unwrap();
+    d.pay("ben", da, false).await.unwrap();
+    scenarios::confirm_scope(&mut d, da, json!({"approvals":both})).await.unwrap();
     d.action("priya", da, "advance").await.unwrap();
-    d.action("priya", da, "skip").await.unwrap();
+    scenarios::exhibition_not_required(&mut d, da, "Fictional demo: no public comment period applies.").await.unwrap();
+    d.action("priya", da, "advance").await.unwrap();
     d.decision(da, "development_approval", None).await.unwrap();
     let approval = d.decision(da, "building_approval", None).await.unwrap();
 

@@ -11,8 +11,9 @@ use crate::{
     authz::{self, CaseAccess, Role},
     cases::core::{self, CaseRow, Visibility},
     db,
-    documents::building::{self, RouteKind},
+    documents::building,
     error::{AppError, AppResult},
+    services::definition::BuildingRole,
     state::AppState,
     time,
     web::{Json, Path},
@@ -189,12 +190,12 @@ async fn scale_line(
 async fn propose(
     tx: &mut SqliteConnection,
     case: &CaseRow,
-    kind: Option<RouteKind>,
+    kind: Option<BuildingRole>,
     cost: Option<i64>,
     types: &[String],
 ) -> AppResult<Proposal> {
     let date = pricing_date(case)?;
-    if kind == Some(RouteKind::Modification) && types.len() == 1 && types[0] == "lapse_date" {
+    if kind == Some(BuildingRole::Modification) && types.len() == 1 && types[0] == "lapse_date" {
         let mut line = api::quote(tx, BASIC_ITEM, 1000, None, date).await?;
         line.calc = json!({"rule":"basic_modification","modification_types":types});
         let amount = line.amount_cents;
@@ -209,14 +210,14 @@ async fn propose(
         });
     }
     let prefix = match kind {
-        Some(RouteKind::Project) => "Building Development and Works scale. ",
-        Some(RouteKind::Modification) if types.is_empty() => {
+        Some(BuildingRole::Project) => "Building Development and Works scale. ",
+        Some(BuildingRole::Modification) if types.is_empty() => {
             return Err(AppError::field("modification_types", "Record the type of modification to calculate the fee."));
         }
-        Some(RouteKind::Modification) => {
+        Some(BuildingRole::Modification) => {
             "Standard modification (not only a lapse-date change) uses the Building Development and Works scale. "
         }
-        None => {
+        Some(BuildingRole::FollowUp) | None => {
             return Err(AppError::field(
                 "method",
                 "No schedule rule applies to this service; record a staff assessment with its basis.",
@@ -228,7 +229,7 @@ async fn propose(
     })?;
     let (line, explanation) = scale_line(tx, cost, date, prefix).await?;
     Ok(Proposal {
-        rule: if kind == Some(RouteKind::Project) { "building_works_scale" } else { "standard_modification" },
+        rule: if kind == Some(BuildingRole::Project) { "building_works_scale" } else { "standard_modification" },
         amount: line.amount_cents,
         lines: vec![line],
         explanation,
@@ -322,7 +323,7 @@ pub async fn record(
     if !crate::cases::workflow::is_open(case) {
         return Err(AppError::conflict("Reopen the request before assessing fees."));
     }
-    let kind = building::route_kind(tx, case).await?;
+    let kind = building::approval_role(tx, case).await?;
     let a = answers(tx, case.id).await?;
     let applied_cost = cost_cents(a.get("estimated_cost").unwrap_or(&Value::Null))?;
     let applied_types = answer_types(&a);
@@ -336,7 +337,7 @@ pub async fn record(
     }
     let previous = current(tx, case.id).await?;
     let reason = input.reason.trim().to_string();
-    let changed_inputs = cost != applied_cost || (kind == Some(RouteKind::Modification) && types != applied_types);
+    let changed_inputs = cost != applied_cost || (kind == Some(BuildingRole::Modification) && types != applied_types);
     if reason.chars().count() > 2000 {
         return Err(AppError::field("reason", "Use at most 2000 characters."));
     }
@@ -346,7 +347,7 @@ pub async fn record(
             "Record the basis: a staff assessment, a re-assessment or changed inputs need a reason.",
         ));
     }
-    let inputs = json!({"estimated_cost_cents":cost,"estimated_cost_source":if cost==applied_cost {"application"} else {"staff"},"application_estimated_cost_cents":applied_cost,"modification_types":if kind==Some(RouteKind::Modification){json!(types)}else{Value::Null},"modification_types_source":if types==applied_types {"application"} else {"staff"},"route":kind.map(RouteKind::as_str),"pricing_date":pricing_date(case)?.to_string()});
+    let inputs = json!({"estimated_cost_cents":cost,"estimated_cost_source":if cost==applied_cost {"application"} else {"staff"},"application_estimated_cost_cents":applied_cost,"modification_types":if kind==Some(BuildingRole::Modification){json!(types)}else{Value::Null},"modification_types_source":if types==applied_types {"application"} else {"staff"},"route":kind.map(BuildingRole::as_str),"pricing_date":pricing_date(case)?.to_string()});
     let (method, rule, lines, amount, explanation) = match input.method.as_str() {
         "schedule" => {
             let p = propose(tx, case, kind, cost, &types).await?;
@@ -542,7 +543,7 @@ pub async fn view(tx: &mut SqliteConnection, actor: &Actor, case: &CaseRow, acce
     if !applies(tx, case).await? {
         return Ok(json!({"applies":false}));
     }
-    let kind = building::route_kind(tx, case).await?;
+    let kind = building::approval_role(tx, case).await?;
     let a = answers(tx, case.id).await?;
     let cost = cost_cents(a.get("estimated_cost").unwrap_or(&Value::Null)).unwrap_or(None);
     let types = answer_types(&a);
@@ -575,7 +576,7 @@ pub async fn view(tx: &mut SqliteConnection, actor: &Actor, case: &CaseRow, acce
         && crate::cases::workflow::is_open(case)
         && roles.iter().any(|r| matches!(r, Role::Intake | Role::Specialist | Role::Finance | Role::Manager));
     Ok(
-        json!({"applies":true,"route":kind.map(RouteKind::as_str),"schedule_note":NOTE,"application":{"estimated_cost_cents":cost,"modification_types":types},"proposal":proposal,"proposal_error":proposal_error,"assessments":assessments,"invoiced":has_invoice(tx,case.id).await?,"settled":api::case_settled(tx,case.id).await?,"waivers":waivers.into_iter().map(|(c,a,r,n)|json!({"item_code":c,"amount_cents":a,"reason":r,"approved_by":n})).collect::<Vec<_>>(),"can_assess":can_assess}),
+        json!({"applies":true,"route":kind.map(BuildingRole::as_str),"schedule_note":NOTE,"application":{"estimated_cost_cents":cost,"modification_types":types},"proposal":proposal,"proposal_error":proposal_error,"assessments":assessments,"invoiced":has_invoice(tx,case.id).await?,"settled":api::case_settled(tx,case.id).await?,"waivers":waivers.into_iter().map(|(c,a,r,n)|json!({"item_code":c,"amount_cents":a,"reason":r,"approved_by":n})).collect::<Vec<_>>(),"can_assess":can_assess}),
     )
 }
 

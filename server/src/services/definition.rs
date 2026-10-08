@@ -51,6 +51,17 @@ pub enum BuildingRole {
     FollowUp,
 }
 
+impl BuildingRole {
+    /// Serialized name (`project`, `modification`, `follow_up`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BuildingRole::Project => "project",
+            BuildingRole::Modification => "modification",
+            BuildingRole::FollowUp => "follow_up",
+        }
+    }
+}
+
 impl ServiceDefinition {
     /// Parses `definition_json`.
     pub fn parse(json: &str) -> AppResult<ServiceDefinition> {

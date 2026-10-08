@@ -146,7 +146,12 @@ fn modify_approval_form(shared: Vec<Value>) -> (Vec<Value>, Vec<Value>) {
     let kept = |key: &str| shared.iter().find(|f| f["key"] == key).cloned();
     let mut fields: Vec<Value> = ["original_approval", "approvals_sought"].into_iter().filter_map(kept).collect();
     let mut landowners = person_columns();
-    landowners.push(field("consent", "checkbox", "This landowner consents to lodging this modification (signed consent attached)", true));
+    landowners.push(field(
+        "consent",
+        "checkbox",
+        "This landowner consents to lodging this modification (signed consent attached)",
+        true,
+    ));
     fields.extend([
         help(group("applicants", "Applicants", person_columns()), "Section 1. An applicant may be an agent acting on behalf of a landowner. Add a row for each applicant."),
         labelled("landowners_are_applicants", "select", "Are all landowners listed above as applicants?", true, &[("yes", "Yes — every landowner is an applicant"), ("no", "No — list the landowners")]),
@@ -175,10 +180,22 @@ fn modify_approval_form(shared: Vec<Value>) -> (Vec<Value>, Vec<Value>) {
         help(d, "Replaces the applicant signatures in section 1 of the paper form.")
     }));
     let documents = vec![
-        help(doc("title_search", "Copy of title search", true), "Section 3: a copy of the Title Search for the subject property."),
-        help(doc("owners_consent", "Signed consent of all landowners", true), "Section 2: every landowner signs to consent to lodging this modification only. If the applicants are the only landowners, upload the signed applicant page."),
-        help(doc("modification_plans", "Description of expected impacts, with relevant plans and drawings", true), "Section 5: a full description of the expected impacts of the proposed modifications, including relevant plans, drawings and compliance with relevant controls."),
-        help(doc("supporting", "Other supporting information (plans, drawings, photographs)", false), "Section 9: any additional material that shows what is proposed."),
+        help(
+            doc("title_search", "Copy of title search", true),
+            "Section 3: a copy of the Title Search for the subject property.",
+        ),
+        help(
+            doc("owners_consent", "Signed consent of all landowners", true),
+            "Section 2: every landowner signs to consent to lodging this modification only. If the applicants are the only landowners, upload the signed applicant page.",
+        ),
+        help(
+            doc("modification_plans", "Description of expected impacts, with relevant plans and drawings", true),
+            "Section 5: a full description of the expected impacts of the proposed modifications, including relevant plans, drawings and compliance with relevant controls.",
+        ),
+        help(
+            doc("supporting", "Other supporting information (plans, drawings, photographs)", false),
+            "Section 9: any additional material that shows what is proposed.",
+        ),
     ];
     (fields, documents)
 }

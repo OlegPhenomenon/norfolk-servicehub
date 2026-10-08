@@ -25,31 +25,11 @@ pub fn decision_ids(v: &Value) -> Option<Vec<i64>> {
         .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
         .map(|id| vec![id])
 }
-/// Building approval routes. Kept on slugs inside slice A; `role_of` (project/modification) replaces this match.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RouteKind {
-    Project,
-    Modification,
-}
-impl RouteKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            RouteKind::Project => "project",
-            RouteKind::Modification => "modification",
-        }
-    }
-}
-pub async fn route_kind(tx: &mut SqliteConnection, case: &CaseRow) -> AppResult<Option<RouteKind>> {
-    if case.module != "building" {
-        return Ok(None);
-    }
-    let slug: String =
-        sqlx::query_scalar("SELECT slug FROM services WHERE id=?").bind(case.service_id).fetch_one(&mut *tx).await?;
-    Ok(match slug.as_str() {
-        "development-application" => Some(RouteKind::Project),
-        "modify-approval" => Some(RouteKind::Modification),
-        _ => None,
-    })
+/// Role of a case that runs an approval route (a project's DA/BA or a modification of issued approvals):
+/// fee assessment, approval scope and exhibition rules apply. Follow-up notices and other building
+/// services have none.
+pub async fn approval_role(tx: &mut SqliteConnection, case: &CaseRow) -> AppResult<Option<BuildingRole>> {
+    Ok(role_of(tx, case).await?.filter(|r| matches!(r, BuildingRole::Project | BuildingRole::Modification)))
 }
 /// The case's building role, read from its frozen definition. Definitions seeded before `building_role`
 /// existed (catalogue versions marked `seed_hash='legacy'` by migration 0803) map their seeded slug.
@@ -77,12 +57,13 @@ async fn role_in(
         _ => None,
     }))
 }
-/// Decision types a building role may receive: a modification only a modification approval, a project
-/// never one, and a follow-up notice only the written permission to continue (`service_response`).
+/// Decision types a building role may receive: a project its development and/or building approval (its
+/// confirmed scope decides which), a modification only a modification approval, and a follow-up notice only
+/// the written permission to continue (`service_response`).
 pub fn role_permits(role: Option<BuildingRole>, decision_type: &str) -> bool {
     match role {
         Some(BuildingRole::Modification) => decision_type == "modification_approval",
-        Some(BuildingRole::Project) => decision_type != "modification_approval",
+        Some(BuildingRole::Project) => APPROVAL_TYPES.contains(&decision_type),
         Some(BuildingRole::FollowUp) => decision_type == "service_response",
         None => true,
     }
@@ -496,7 +477,7 @@ pub async fn decision_guard(
     step: &crate::services::definition::StepDef,
 ) -> AppResult<Option<String>> {
     let issued = super::api::issued_decisions(tx, case.id).await?;
-    let kind = route_kind(tx, case).await?;
+    let kind = approval_role(tx, case).await?;
     let scope = if kind.is_some() { scope(tx, case.id).await? } else { None };
     let Some(scope) = scope else {
         let missing: Vec<&str> = step
@@ -513,7 +494,7 @@ pub async fn decision_guard(
                 .into(),
         ));
     }
-    let missing: Vec<String> = if kind == Some(RouteKind::Modification) {
+    let missing: Vec<String> = if kind == Some(BuildingRole::Modification) {
         let mut missing = vec![];
         for original in &scope.originals {
             let done: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM decisions WHERE case_id=? AND decision_type='modification_approval' AND status='issued' AND supersedes_decision_id=?)")
@@ -546,7 +527,7 @@ pub async fn prepare_check(
     decision_type: &str,
     target: Option<i64>,
 ) -> AppResult<Option<i64>> {
-    let kind = route_kind(tx, case).await?;
+    let kind = approval_role(tx, case).await?;
     if decision_type == "modification_approval" {
         let originals = originals_in_scope(tx, case.id).await?;
         let target = match (target, originals.as_slice()) {
@@ -580,7 +561,7 @@ pub async fn prepare_check(
         }
         return Ok(Some(target));
     }
-    if kind == Some(RouteKind::Project)
+    if kind == Some(BuildingRole::Project)
         && let Some(s) = scope(tx, case.id).await?
         && !s.approvals.iter().any(|t| t == decision_type)
     {
@@ -597,7 +578,7 @@ pub async fn issue_block(
     case: &CaseRow,
     d: &super::decisions::Decision,
 ) -> AppResult<Option<String>> {
-    let kind = route_kind(tx, case).await?;
+    let kind = approval_role(tx, case).await?;
     if kind.is_some() && crate::finance::building_fees::applies(tx, case).await? {
         let definition = crate::services::definition::load_for_case(tx, case).await?;
         let at_decision = case
@@ -657,11 +638,10 @@ pub async fn set_scope(
     if !crate::cases::workflow::is_open(&case) {
         return Err(AppError::conflict("Reopen the request before changing its approval scope."));
     }
-    let kind =
-        route_kind(&mut tx, &case).await?.ok_or_else(|| AppError::conflict("This request has no approval scope."))?;
+    let kind = role_of(&mut tx, &case).await?;
     let issued = super::api::issued_decisions(&mut tx, id).await?;
     let (value, summary) = match kind {
-        RouteKind::Project => {
+        Some(BuildingRole::Project) => {
             let approvals: Vec<&str> =
                 APPROVAL_TYPES.into_iter().filter(|t| input.approvals.iter().any(|a| a == t)).collect();
             if approvals.is_empty() || approvals.len() != input.approvals.len() {
@@ -678,7 +658,7 @@ pub async fn set_scope(
             let names = approvals.iter().map(|t| label(t)).collect::<Vec<_>>().join(" and ");
             (json!({"approvals":approvals}), format!("Approval scope confirmed: {names}."))
         }
-        RouteKind::Modification => {
+        Some(BuildingRole::Modification) => {
             let linked: Vec<i64> = sqlx::query_scalar(
                 "SELECT decision_id FROM building_original_approvals WHERE case_id=? ORDER BY decision_id",
             )
@@ -706,6 +686,9 @@ pub async fn set_scope(
             }
             (json!({"originals":originals}), format!("Modification scope confirmed: {}.", names.join(" and ")))
         }
+        Some(BuildingRole::FollowUp) | None => {
+            return Err(AppError::conflict("This request has no approval scope."));
+        }
     };
     crate::cases::core::bump_revision(&mut tx, id, Some(input.expected_revision)).await?;
     record_scope(&mut tx, id, &value, actor.db_id(), input.reason.trim()).await?;
@@ -726,7 +709,7 @@ pub async fn route(State(state): State<AppState>, actor: Actor, Path(id): Path<i
     use crate::authz::Role;
     let mut c = state.db.acquire().await?;
     let (case, access) = super::access(&mut c, &actor, id).await?;
-    let kind = route_kind(&mut c, &case).await?;
+    let kind = approval_role(&mut c, &case).await?;
     let definition = crate::services::definition::load_for_case(&mut c, &case).await?;
     let roles = actor.roles_for_service(case.service_id);
     let open = crate::cases::workflow::is_open(&case);
@@ -765,7 +748,7 @@ pub async fn route(State(state): State<AppState>, actor: Actor, Path(id): Path<i
         definition.workflow.steps.iter().any(|s| s.handler.as_deref() == Some("documents.exhibition_closed"));
     let fee = crate::finance::building_fees::view(&mut c, &actor, &case, access).await?;
     Ok(Json(json!({
-        "route": kind.map(RouteKind::as_str),
+        "route": kind.map(BuildingRole::as_str),
         "revision": case.revision,
         "scope": current.as_ref().map(|s| json!({"approvals":s.approvals,"originals":s.originals,"confirmed":s.confirmed})),
         "scope_history": history,

@@ -430,3 +430,78 @@ async fn public_exhibition_blocks_skip_and_decisions_until_closed_and_considered
             .any(|e| e["summary"].as_str().unwrap().contains("Public exhibition is not required"))
     );
 }
+
+/// A Builder edit of a building approval route cannot drop or relabel the fee, payment, exhibition or decision
+/// gates, make them optional, or give the route a decision type its building role can never receive.
+#[tokio::test]
+async fn builder_edits_cannot_remove_fee_payment_exhibition_or_decision_gates() {
+    let (mut d, _dir) = support::fixture().await;
+    for (n, base_slug) in ["development-application", "modify-approval"].into_iter().enumerate() {
+        let base =
+            d.req("mark", "GET", &format!("/api/public/services/{base_slug}"), json!({})).await.unwrap()["definition"]
+                .clone();
+        let created = d
+            .req("mark","POST","/api/admin/services",json!({"slug":format!("route-edit-{n}"),"name":"Route edit","category":"Testing","department":"Planning","module":"building"}))
+            .await
+            .unwrap();
+        let path = format!("/api/admin/services/{}/versions/{}", created["id"], created["version_id"]);
+        let mut issues = async |def: Value| -> Vec<(String, String)> {
+            d.req("mark", "PUT", &path, def).await.unwrap();
+            let r = d.req("mark", "POST", &format!("{path}/validate"), json!({})).await.unwrap();
+            r["issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| (i["path"].as_str().unwrap().to_owned(), i["message"].as_str().unwrap().to_owned()))
+                .collect()
+        };
+        assert_eq!(issues(base.clone()).await, vec![], "{base_slug}");
+        let edit = |f: &dyn Fn(&mut Vec<Value>)| {
+            let mut def = base.clone();
+            f(def["workflow"]["steps"].as_array_mut().unwrap());
+            def
+        };
+        let position = |steps: &[Value], key: &str| steps.iter().position(|s| s["key"] == key).unwrap();
+        for key in ["fees", "payment", "exhibition", "decision"] {
+            let dropped = issues(edit(&|s| {
+                let i = position(s, key);
+                s.remove(i);
+            }))
+            .await;
+            assert!(
+                dropped.iter().any(|(_, m)| m == &format!("This module requires the {key} step.")),
+                "{base_slug} {key}"
+            );
+            let relabelled = issues(edit(&|s| {
+                let i = position(s, key);
+                s[i]["kind"] = json!("review");
+                s[i].as_object_mut().unwrap().remove("handler");
+                s[i].as_object_mut().unwrap().remove("decision_types");
+            }))
+            .await;
+            assert!(
+                relabelled
+                    .iter()
+                    .any(|(_, m)| m == &format!("The {key} checkpoint must retain its registered kind and handler.")),
+                "{base_slug} {key}: {relabelled:?}"
+            );
+            let optional = issues(edit(&|s| {
+                let i = position(s, key);
+                s[i]["optional"] = json!(true);
+            }))
+            .await;
+            assert!(
+                optional
+                    .iter()
+                    .any(|(_, m)| m == &format!("The {key} checkpoint of a building approval cannot be optional.")),
+                "{base_slug} {key}: {optional:?}"
+            );
+        }
+        let wrong_type = issues(edit(&|s| {
+            let i = position(s, "decision");
+            s[i]["decision_types"] = json!(["service_response"]);
+        }))
+        .await;
+        assert!(wrong_type.iter().any(|(p, _)| p.ends_with(".decision_types")), "{base_slug}: {wrong_type:?}");
+    }
+}

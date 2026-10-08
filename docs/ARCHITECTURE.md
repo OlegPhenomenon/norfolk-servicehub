@@ -179,6 +179,8 @@ Field types: `text`, `textarea`, `number`, `date`, `time`, `email`, `phone`, `se
 
 Building definitions carry `"building_role": "project" | "modification" | "follow_up"` (omitted elsewhere). On submission `documents::building::on_submit` dispatches on it: `project` creates a building project, `modification` links the chosen issued approval's project, `follow_up` links the project named by the definition's `project_ref` field. Publishing a `follow_up` definition requires a required `project_ref` field and the `intake`/`site`/`done` steps; a follow-up may only receive a `service_response` decision. Catalogue versions seeded before the field existed (`seed_hash='legacy'`) fall back to their seeded slug.
 
+The role is the only switch for the building approval route (`documents::building::approval_role` = `project` or `modification`): fee assessment (`finance::building_fees`), approval scope, per-original modification decisions and issue-time guards apply to exactly those cases. Publishing a `project`/`modification` definition requires the `intake`, `fees` (module `finance.fee_assessed`), `payment` (kind `payment`), `assessment`, `exhibition` (module `documents.exhibition_closed`), `decision` (kind `decision`) and `done` steps; the fee, payment, exhibition and decision checkpoints keep their kind/handler and cannot be optional. A `project` decides only `development_approval`/`building_approval` (its confirmed scope picks which), a `modification` only `modification_approval` (`documents::building::role_permits`).
+
 Canonical answer values (identical in renderer, validator and hooks):
 
 | type | JSON value |

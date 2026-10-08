@@ -220,10 +220,16 @@ impl Driver {
         Ok(serde_json::from_slice(&raw)?)
     }
     pub async fn answers(&mut self, who: &str, slug: &str) -> AppResult<(Value, Value)> {
+        self.answers_with(who, slug, json!({})).await
+    }
+    /// `extra` answers plus a sample for every other required field, judging `show_if` against the extras so
+    /// conditional fields follow the given choices.
+    async fn answers_with(&mut self, who: &str, slug: &str, extra: Value) -> AppResult<(Value, Value)> {
         let def = self.req(who, "GET", &format!("/api/public/services/{slug}"), json!({})).await?["definition"].clone();
-        let mut answers = json!({});
+        let mut answers = extra;
         for f in def["fields"].as_array().expect("fields") {
-            if !f["required"].as_bool().unwrap_or(false) {
+            let key = f["key"].as_str().unwrap();
+            if !f["required"].as_bool().unwrap_or(false) || answers.get(key).is_some() {
                 continue;
             }
             // `show_if` against a multiselect answer means "contains" (services::definition::ShowIf::matches).
@@ -237,7 +243,6 @@ impl Driver {
                     continue;
                 }
             }
-            let key = f["key"].as_str().unwrap();
             answers[key] = if f["type"] == "group" {
                 // One row with every required column filled.
                 let mut row = json!({});
@@ -299,10 +304,7 @@ impl Driver {
         extra: Value,
         org: Option<i64>,
     ) -> AppResult<(i64, BTreeMap<String, Value>)> {
-        let (def, mut answers) = self.answers(who, slug).await?;
-        for (key, v) in extra.as_object().expect("extra answers") {
-            answers[key] = v.clone();
-        }
+        let (def, answers) = self.answers_with(who, slug, extra).await?;
         let c = self.req(who, "POST", &format!("/api/services/{slug}/drafts"), json!({"applicant_org_id":org})).await?
             ["id"]
             .as_i64()
