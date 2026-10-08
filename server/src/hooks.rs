@@ -103,7 +103,9 @@ pub async fn on_step_entered(
 ) -> AppResult<()> {
     match step.kind {
         StepKind::Payment => {
-            finance::api::ensure_invoice_for_step(tx, state, actor, case).await?;
+            if finance::api::ensure_invoice_for_step(tx, state, actor, case).await?.is_some() {
+                finance::building_fees::invoice_issued(tx, case).await?;
+            }
         }
         StepKind::Task => {
             operations::api::create_step_task(tx, case, step, step_run_id, actor.db_id()).await?;
@@ -118,11 +120,28 @@ pub async fn on_step_entered(
     }
 }
 
+/// Called before a staff `skip` of `step`. `Some(reason)` blocks the skip. Building cases never leave an open
+/// exhibition or unconsidered comments behind; a skipped exhibition step is recorded as "not required".
+pub async fn on_skip(
+    tx: &mut SqliteConnection,
+    actor: &Actor,
+    case: &CaseRow,
+    step: &StepDef,
+    reason: &str,
+) -> AppResult<Option<String>> {
+    match owner_of(&case.module) {
+        HookOwner::Documents => documents::hooks::on_skip(tx, actor, case, step, reason).await,
+        _ => Ok(None),
+    }
+}
+
 /// The guard to leave `step` (ARCHITECTURE §5). `Some(reason)` blocks, `None` lets the case advance.
 ///
 /// * `review` / `complete`: no automatic guard (staff decide).
 /// * `payment`: `finance::api::case_settled`.
-/// * `decision`: an issued decision for every type in `decision_types` (refusal routing is the workflow's job).
+/// * `decision`: the documents module names the required issued decisions — for building approval routes the
+///   case's confirmed scope (DA, BA, both, or one modification per original), else `decision_types`
+///   (refusal routing is the workflow's job).
 /// * `task`: all tasks of the current open step run are done.
 /// * `module`: dispatched on `step.handler` prefix to `<owner>::hooks::step_guard_handler`.
 ///
@@ -148,16 +167,7 @@ pub async fn step_guard(tx: &mut SqliteConnection, case: &CaseRow, step: &StepDe
         StepKind::Payment => {
             (!finance::api::case_settled(tx, case.id).await?).then(|| "Payment has not been received yet.".to_string())
         }
-        StepKind::Decision => {
-            let issued = documents::api::issued_decisions(tx, case.id).await?;
-            let missing: Vec<&str> = step
-                .decision_types
-                .iter()
-                .filter(|t| !issued.iter().any(|d| &d.decision_type == *t && d.status == "issued"))
-                .map(String::as_str)
-                .collect();
-            (!missing.is_empty()).then(|| format!("Waiting for an issued decision: {}.", missing.join(", ")))
-        }
+        StepKind::Decision => documents::building::decision_guard(tx, case, step).await?,
         StepKind::Task => {
             let run: Option<i64> = sqlx::query_scalar(
                 "SELECT id FROM workflow_step_runs WHERE case_id = ? AND step_key = ? AND left_at IS NULL ORDER BY id DESC LIMIT 1",

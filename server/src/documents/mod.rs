@@ -36,6 +36,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/decision-templates", get(decisions::templates))
         .route("/api/my/issued-approvals", get(building::approvals))
         .route("/api/building-projects/{id}", get(building::detail))
+        .route("/api/cases/{id}/building-route", get(building::route))
+        .route("/api/cases/{id}/approval-scope", post(building::set_scope))
         .merge(exhibition::routes())
         .layer(DefaultBodyLimit::max(crate::storage::MAX_BYTES + 1024 * 1024))
 }

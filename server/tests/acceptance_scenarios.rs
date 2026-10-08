@@ -89,8 +89,18 @@ async fn new_service_new_resident_and_immutable_v1_after_v2_publication() {
 async fn building_v2_separate_approvals_modification_and_image_only_public_pdf() {
     let (mut d, dir) = support::fixture().await;
     let org = d.req("ben", "GET", "/api/my/organisations", json!({})).await.unwrap()[0]["id"].as_i64().unwrap();
-    let (c, docs) = d.submit("ben", "development-application", json!({}), Some(org)).await.unwrap();
+    let (c, docs) = d
+        .submit(
+            "ben",
+            "development-application",
+            json!({"approvals_sought":["development_approval","building_approval"],"estimated_cost":120000}),
+            Some(org),
+        )
+        .await
+        .unwrap();
     d.action("olga", c, "advance").await.unwrap();
+    scenarios::assess_fee(&mut d, c).await.unwrap();
+    d.pay("ben", c, false).await.unwrap();
     let drawing = &docs["floor_plans"];
     let original = drawing["version_id"].as_i64().unwrap();
     let old_pdf = pdf(&mut d, "ben", &format!("/api/document-versions/{original}/download")).await;
@@ -118,6 +128,9 @@ async fn building_v2_separate_approvals_modification_and_image_only_public_pdf()
     assert!(detail["required_action"].is_null());
     assert!(detail["deadlines"].as_array().unwrap().iter().all(|v| v["status"] != "paused"));
     assert_eq!(pdf(&mut d, "ben", &format!("/api/document-versions/{original}/download")).await, old_pdf);
+    scenarios::confirm_scope(&mut d, c, json!({"approvals":["development_approval","building_approval"]}))
+        .await
+        .unwrap();
     d.action("priya", c, "advance").await.unwrap();
     let now = d.state.now();
     let (exhibit, item) =
@@ -141,9 +154,65 @@ async fn building_v2_separate_approvals_modification_and_image_only_public_pdf()
     let fonts = tokio::process::Command::new("pdffonts").arg(&public_path).output().await.unwrap();
     assert!(fonts.status.success());
     assert_eq!(String::from_utf8_lossy(&fonts.stdout).lines().count(), 2, "Public PDF retains fonts/text layer");
-    // Optional exhibition checkpoint can be skipped with a recorded reason; the public window remains open.
-    d.action("priya", c, "skip").await.unwrap();
-    let development = d.decision(c, "development_approval", Some(vec![v2])).await.unwrap();
+    // The open exhibition (with a public comment) cannot be bypassed: no skip, no advance, no decision issue.
+    scenarios::public_comment(&mut d, exhibit, "Fictional objection about the veranda height.").await.unwrap();
+    let revision = d.revision("priya", c).await.unwrap();
+    assert!(!d.detail("priya", c).await.unwrap()["allowed_actions"].as_array().unwrap().iter().any(|a| a == "skip"));
+    d.expect(
+        "priya",
+        "POST",
+        &format!("/api/cases/{c}/actions/skip"),
+        json!({"expected_revision":revision,"reason":"Not needed"}),
+        403,
+    )
+    .await
+    .unwrap();
+    d.expect("priya", "POST", &format!("/api/cases/{c}/actions/advance"), json!({"expected_revision":revision}), 409)
+        .await
+        .unwrap();
+    let templates = d.req("priya", "GET", "/api/decision-templates", json!({})).await.unwrap();
+    let template = templates.as_array().unwrap().iter().find(|t| t["decision_type"] == "development_approval").unwrap()
+        ["id"]
+        .clone();
+    let development = d.req("priya","POST",&format!("/api/cases/{c}/decisions"),json!({"decision_type":"development_approval","outcome":"approved","reasons":"Fictional specialist assessment completed.","conditions":"","template_id":template,"evidence_version_ids":[v2],"expected_revision":revision})).await.unwrap()["id"].as_i64().unwrap();
+    let revision = d.revision("priya", c).await.unwrap();
+    d.req(
+        "priya",
+        "POST",
+        &format!("/api/cases/{c}/decisions/{development}/submit"),
+        json!({"expected_revision":revision}),
+    )
+    .await
+    .unwrap();
+    let revision = d.revision("helen", c).await.unwrap();
+    d.expect(
+        "helen",
+        "POST",
+        &format!("/api/cases/{c}/decisions/{development}/issue"),
+        json!({"expected_revision":revision}),
+        409,
+    )
+    .await
+    .unwrap();
+    // After the window closes the comment still needs a recorded consideration outcome.
+    d.seed_time(now + Duration::days(15)).await.unwrap();
+    let revision = d.revision("priya", c).await.unwrap();
+    d.expect("priya", "POST", &format!("/api/cases/{c}/actions/advance"), json!({"expected_revision":revision}), 409)
+        .await
+        .unwrap();
+    scenarios::consider_all(&mut d, exhibit, "Considered: height complies with the fictional plan control.")
+        .await
+        .unwrap();
+    d.action("priya", c, "advance").await.unwrap();
+    let revision = d.revision("helen", c).await.unwrap();
+    d.req(
+        "helen",
+        "POST",
+        &format!("/api/cases/{c}/decisions/{development}/issue"),
+        json!({"expected_revision":revision}),
+    )
+    .await
+    .unwrap();
     assert_ne!(d.detail("ben", c).await.unwrap()["case"]["status"], "completed");
     let building = d.decision(c, "building_approval", Some(vec![v2])).await.unwrap();
     assert_ne!(development, building);

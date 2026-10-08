@@ -331,8 +331,17 @@ try:
     trial_balance()
     print('ok   all four plant rates: estimate 4 h → actual 07:30–13:30 / 30 min downtime → one final invoice 330 min × rate / 60 + $12.34 expenses → PDF/basis → paid → completed; global ledger zero-sum')
 
-    building,docs=submit('development-application')
+    building,docs=submit('development-application',{'approvals_sought':['development_approval','building_approval'],'estimated_cost':120000})
     action('olga',building,'advance'); login('priya')
+    # Fee step: nothing is invoiced or decided without an explained assessment and confirmed payment.
+    action('olga',building,'advance',status=409)
+    fee=req('olga','GET',f'/api/cases/{building}/building-fee'); assert fee['proposal']['amount_cents']==88000, fee
+    req('olga','POST',f'/api/cases/{building}/building-fee',{'method':'schedule','expected_revision':revision('olga',building)})
+    action('olga',building,'advance')
+    assert [i['total_cents'] for i in money('alexey',building)['invoices'] if i['kind']=='invoice']==[88000]
+    action('tom',building,'advance',status=409)
+    pay_invoice('alexey',building)
+    assert detail('olga',building)['case']['current_step']=='assessment'
     drawing=docs['floor_plans']; vid=drawing['version_id']
     comment=req('priya','POST',f'/api/document-versions/{vid}/comments',{'expected_revision':revision('priya',building),'body':'Please replace drawing A-101 with the corrected dimensions.','visibility':'applicant','request_new_version':True})['id']
     d=detail('alexey',building); assert d['required_action'] and any(x['status']=='paused' for x in d['deadlines'])
@@ -343,7 +352,10 @@ try:
     d=detail('alexey',building); assert d['required_action'] is None and d['case']['status']=='in_progress'
     assert all(x['status']!='paused' for x in d['deadlines'])
     assert req('alexey','GET',f'/api/document-versions/{vid}/download',binary=True)==pdf
-    action('priya',building,'advance'); action('priya',building,'skip','Exhibition is not required for this fictional test application.')
+    req('priya','POST',f'/api/cases/{building}/approval-scope',{'approvals':['development_approval','building_approval'],'reason':'Both approvals needed for this fictional test application.','expected_revision':revision('priya',building)})
+    action('priya',building,'advance'); action('priya',building,'skip','Hidden bypass',status=403)
+    req('priya','POST',f'/api/cases/{building}/exhibition-not-required',{'reason':'Exhibition is not required for this fictional test application.','expected_revision':revision('priya',building)})
+    action('priya',building,'advance')
     login('helen')
     templates=req('priya','GET','/api/decision-templates')
     for decision_type in ['development_approval','building_approval']:
@@ -353,12 +365,12 @@ try:
             approver = 'helen' if command == 'issue' else 'priya'
             req(approver,'POST',f'/api/cases/{building}/decisions/{did}/{command}',{'expected_revision':revision(approver,building)})
     assert detail('alexey',building)['case']['status']=='completed'
-    print('ok   building intake → replacement request → text reply keeps action → v2 clears action/resumes clock → two independently issued approvals → completed')
+    print('ok   building intake → fee assessed $880 (scale) → invoice → paid → replacement request → v2 clears action → scope confirmed → exhibition recorded as not required (no skip) → two independently issued approvals → completed')
 
     approvals=req('alexey','GET','/api/my/issued-approvals')
     approval=next(a for a in approvals if a['decision_type']=='building_approval')
     project=req('alexey','GET',f'/api/building-projects/{approval["project_id"]}')
-    modification,_=submit('modify-approval',{'original_approval':{'decision_id':approval['id']}})
+    modification,_=submit('modify-approval',{'original_approval':{'decision_ids':[approval['id']]}})
     commencement,_=submit('building-commencement-notice',{'project_reference':project['reference']})
     completion,_=submit('building-completion-notice',{'project_reference':str(project['id'])})
     linked=req('alexey','GET',f'/api/building-projects/{project["id"]}')

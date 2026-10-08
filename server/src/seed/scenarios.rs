@@ -44,8 +44,17 @@ pub async fn run(state: &AppState) -> AppResult<()> {
     // Island Builders' revised plans and separate approvals, followed by linked requests.
     d.seed_time(present - Duration::days(20)).await?;
     let org: i64 = sqlx::query_scalar("SELECT organisation_id FROM memberships WHERE user_id=(SELECT id FROM users WHERE persona_key='ben') AND status='active'").fetch_one(&state.db).await?;
-    let (building, docs) = d.submit("ben", "development-application", json!({}), Some(org)).await?;
+    let (building, docs) = d
+        .submit(
+            "ben",
+            "development-application",
+            json!({"approvals_sought":["development_approval","building_approval"],"estimated_cost":180000}),
+            Some(org),
+        )
+        .await?;
     d.action("olga", building, "advance").await?;
+    assess_fee(&mut d, building).await?;
+    d.pay("ben", building, false).await?;
     let drawing = &docs["floor_plans"];
     let revision = d.revision("priya", building).await?;
     let comment = d.req("priya", "POST", &format!("/api/document-versions/{}/comments", drawing["version_id"]), json!({"expected_revision":revision,"body":"Please replace drawing A-101 with corrected veranda dimensions.","visibility":"applicant","request_new_version":true})).await?["id"].clone();
@@ -65,9 +74,17 @@ pub async fn run(state: &AppState) -> AppResult<()> {
         .await?["version_id"]
         .as_i64()
         .unwrap();
+    confirm_scope(&mut d, building, json!({"approvals":["development_approval","building_approval"]})).await?;
     d.action("priya", building, "advance").await?;
-    d.action("priya", building, "skip").await?;
+    // A short, already finished exhibition with one public comment that staff considered before decisions.
+    let (exhibit, _) =
+        publish_exhibition(&mut d, building, v2, present - Duration::days(18), present - Duration::days(16)).await?;
+    d.seed_time(present - Duration::days(17)).await?;
+    public_comment(&mut d, exhibit, "Please keep the fictional veranda clear of the shared boundary path.").await?;
     d.seed_time(present - Duration::days(15)).await?;
+    consider_all(&mut d, exhibit, "Considered: the approved plans keep the veranda 3 m from the boundary path.")
+        .await?;
+    d.action("priya", building, "advance").await?;
     d.decision(building, "development_approval", Some(vec![v2])).await?;
     let approval = d.decision(building, "building_approval", Some(vec![v2])).await?;
     let approvals = d.req("ben", "GET", "/api/my/issued-approvals", json!({})).await?;
@@ -79,8 +96,10 @@ pub async fn run(state: &AppState) -> AppResult<()> {
     d.action("olga", notice, "advance").await?;
     d.action("olga", notice, "skip").await?;
     let (modification, _) =
-        d.submit("ben", "modify-approval", json!({"original_approval":{"decision_id":approval}}), Some(org)).await?;
+        d.submit("ben", "modify-approval", json!({"original_approval":{"decision_ids":[approval]}}), Some(org)).await?;
     d.action("olga", modification, "advance").await?;
+    assess_fee(&mut d, modification).await?;
+    d.pay("ben", modification, false).await?;
     // Exhibition belongs to the still-open modification, rather than a completed approval.
     let public_plan = d
         .upload(
@@ -325,6 +344,74 @@ pub async fn publish_exhibition(
     d.req("helen", "POST", &format!("/api/exhibitions/{exhibit}/publish"), json!({"expected_revision":revision}))
         .await?;
     Ok((exhibit, item))
+}
+/// Olga records the schedule fee assessment and leaves the fee step; entering payment issues the invoice.
+pub async fn assess_fee(d: &mut Driver, case: i64) -> AppResult<Value> {
+    let revision = d.revision("olga", case).await?;
+    let assessment = d
+        .req(
+            "olga",
+            "POST",
+            &format!("/api/cases/{case}/building-fee"),
+            json!({"method":"schedule","expected_revision":revision}),
+        )
+        .await?;
+    d.action("olga", case, "advance").await?;
+    Ok(assessment)
+}
+/// Priya confirms the approval scope (`{"approvals":[..]}` or `{"originals":[..]}`) with a reason.
+pub async fn confirm_scope(d: &mut Driver, case: i64, scope: Value) -> AppResult<()> {
+    let mut body = scope;
+    body["reason"] = json!("Fictional demonstration: scope checked against the submitted plans.");
+    body["expected_revision"] = json!(d.revision("priya", case).await?);
+    d.req("priya", "POST", &format!("/api/cases/{case}/approval-scope"), body).await?;
+    Ok(())
+}
+/// Priya records that public exhibition is not required for this request, with the reason.
+pub async fn exhibition_not_required(d: &mut Driver, case: i64, reason: &str) -> AppResult<()> {
+    let revision = d.revision("priya", case).await?;
+    d.req(
+        "priya",
+        "POST",
+        &format!("/api/cases/{case}/exhibition-not-required"),
+        json!({"reason":reason,"expected_revision":revision}),
+    )
+    .await?;
+    Ok(())
+}
+/// A member of the public sends a written submission to an open exhibition.
+pub async fn public_comment(d: &mut Driver, exhibition: i64, body: &str) -> AppResult<i64> {
+    d.req("stranger", "GET", "/api/me", json!({})).await?;
+    let id = d
+        .req(
+            "stranger",
+            "POST",
+            &format!("/api/public/exhibitions/{exhibition}/submissions"),
+            json!({"name":"Fictional neighbour","email":"neighbour@example.invalid","body":body}),
+        )
+        .await?["id"]
+        .as_i64()
+        .unwrap();
+    Ok(id)
+}
+/// Priya records the same consideration outcome for every submission still without one.
+pub async fn consider_all(d: &mut Driver, exhibition: i64, outcome: &str) -> AppResult<()> {
+    let rows = d.req("priya", "GET", &format!("/api/exhibitions/{exhibition}/submissions"), json!({})).await?;
+    let case =
+        d.req("priya", "GET", &format!("/api/exhibitions/{exhibition}"), json!({})).await?["exhibition"]["case_id"]
+            .as_i64()
+            .unwrap();
+    for row in rows.as_array().unwrap().iter().filter(|r| r["status"] == "received") {
+        let revision = d.revision("priya", case).await?;
+        d.req(
+            "priya",
+            "POST",
+            &format!("/api/exhibitions/{exhibition}/submissions/{}/consider", row["id"]),
+            json!({"outcome":outcome,"expected_revision":revision}),
+        )
+        .await?;
+    }
+    Ok(())
 }
 pub async fn integration_recovery(d: &mut Driver) -> AppResult<()> {
     d.drain().await?; // Finish earlier deliveries so the outage affects exactly this story.

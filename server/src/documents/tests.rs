@@ -533,6 +533,7 @@ async fn issued_pdf_pins_evidence_refusals_and_separate_approvals() {
                 template_id: template,
                 evidence_version_ids: None,
                 expected_revision: revision,
+                supersedes_decision_id: None,
             }),
         )
         .await

@@ -3,7 +3,7 @@ use crate::{
     cases::core::CaseRow,
     error::{AppError, AppResult},
     finance::api::QuoteLine,
-    services::definition::{FieldDef, FieldType, StepDef},
+    services::definition::{FieldDef, FieldType, StepDef, StepKind},
     state::AppState,
 };
 use chrono::NaiveDate;
@@ -18,11 +18,31 @@ pub async fn validate_field(
     if field.field_type != FieldType::DecisionRef {
         return Ok(None);
     }
-    let Some(id) = value.get("decision_id").and_then(Value::as_i64) else {
+    let Some(ids) = super::building::decision_ids(value).filter(|ids| !ids.is_empty()) else {
         return Ok(Some("Choose an issued approval.".into()));
     };
-    let valid:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM decisions WHERE id=? AND status='issued' AND outcome IN ('approved','approved_with_conditions') AND decision_type IN ('development_approval','building_approval','modification_approval'))").bind(id).fetch_one(tx).await?;
-    Ok((!valid).then(|| "Choose an issued approval.".into()))
+    if ids.len() > 1 && field.extra.get("multiple") != Some(&Value::Bool(true)) {
+        return Ok(Some("Choose one issued approval.".into()));
+    }
+    let mut unique = ids.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    if unique.len() != ids.len() {
+        return Ok(Some("Choose each approval only once.".into()));
+    }
+    for id in ids {
+        let valid: bool = sqlx::query_scalar(&format!(
+            "SELECT EXISTS(SELECT 1 FROM decisions d WHERE d.id=? AND {})",
+            super::building::CURRENT_APPROVAL
+        ))
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !valid {
+            return Ok(Some("Choose an issued approval that is still current.".into()));
+        }
+    }
+    Ok(None)
 }
 pub async fn on_submit(
     tx: &mut SqliteConnection,
@@ -46,18 +66,29 @@ pub async fn on_step_entered(
 ) -> AppResult<()> {
     Ok(())
 }
-pub async fn step_guard(_tx: &mut SqliteConnection, _case: &CaseRow, _step: &StepDef) -> AppResult<Option<String>> {
+pub async fn step_guard(tx: &mut SqliteConnection, case: &CaseRow, step: &StepDef) -> AppResult<Option<String>> {
+    if step.kind == StepKind::Payment {
+        return crate::finance::building_fees::payment_block(tx, case).await;
+    }
+    Ok(None)
+}
+/// A skip never leaves an open exhibition or unconsidered comments behind; a skipped (legacy optional)
+/// exhibition step is recorded as "not required" with the skip reason.
+pub async fn on_skip(
+    tx: &mut SqliteConnection,
+    actor: &Actor,
+    case: &CaseRow,
+    step: &StepDef,
+    reason: &str,
+) -> AppResult<Option<String>> {
+    if step.handler.as_deref() == Some("documents.exhibition_closed") {
+        return super::exhibition::on_skip(tx, actor.db_id(), case.id, reason).await;
+    }
     Ok(None)
 }
 pub async fn step_guard_handler(tx: &mut SqliteConnection, case: &CaseRow, handler: &str) -> AppResult<Option<String>> {
     if handler == "documents.exhibition_closed" {
-        super::exhibition::close_due(tx, &crate::time::now_str()).await?;
-        let states: Vec<String> =
-            sqlx::query_scalar("SELECT status FROM exhibitions WHERE case_id=? AND status<>'withdrawn'")
-                .bind(case.id)
-                .fetch_all(&mut *tx)
-                .await?;
-        return Ok((states.is_empty()||states.iter().any(|s|s!="closed")).then(||"Close the public exhibition, or skip this optional step with a recorded reason if exhibition is not required.".into()));
+        return super::exhibition::step_block(tx, case.id).await;
     }
     if let Some(t) = handler.strip_prefix("documents.letter_issued:") {
         if !matches!(t, "road_response" | "complaint_response") {
@@ -69,8 +100,8 @@ pub async fn step_guard_handler(tx: &mut SqliteConnection, case: &CaseRow, handl
     Err(AppError::internal(format!("Unknown documents handler: {handler}")))
 }
 pub async fn pricing_lines(
-    _tx: &mut SqliteConnection,
-    _case: &CaseRow,
+    tx: &mut SqliteConnection,
+    case: &CaseRow,
 ) -> AppResult<Option<(NaiveDate, Vec<QuoteLine>)>> {
-    Ok(None)
+    crate::finance::building_fees::pricing_lines(tx, case).await
 }

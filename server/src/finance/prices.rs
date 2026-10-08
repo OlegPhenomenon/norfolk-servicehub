@@ -15,6 +15,13 @@ pub async fn seed(tx: &mut SqliteConnection, _state: &AppState) -> AppResult<()>
         ("DA_LODGEMENT", "Development lodgement — illustrative demo price", "each", "fee", 57000),
         ("BA_LODGEMENT", "Building lodgement — illustrative demo price", "each", "fee", 57000),
         ("MODIFICATION_FEE", "Basic lapse-date modification (demo schedule)", "each", "fee", 25000),
+        (
+            "BUILDING_WORKS_FEE",
+            "Building development and works fee — scale by estimated cost, from $570 (FY2026-27 demo schedule)",
+            "each",
+            "fee",
+            57000,
+        ),
         ("PLANNING_CERT", "Planning Certificate — s.98 Planning Act 2002 (demo schedule)", "each", "fee", 18113),
         ("DRIVEWAY_APPLICATION", "Driveway crossover application — illustrative demo price", "each", "fee", 12500),
         ("RECORD_COPY", "Council record copy — illustrative demo price", "each", "fee", 3500),
@@ -60,7 +67,9 @@ pub async fn list(tx: &mut SqliteConnection) -> AppResult<Value> {
             .await?;
         result.push(json!({"id":id,"code":r.get::<String,_>("code"),"name":r.get::<String,_>("name"),"unit":r.get::<String,_>("unit"),"kind":r.get::<String,_>("kind"),"versions":versions.iter().map(|v|json!({"id":v.get::<i64,_>("id"),"amount_cents":v.get::<i64,_>("amount_cents"),"effective_from":v.get::<String,_>("effective_from"),"effective_to":v.get::<Option<String>,_>("effective_to")})).collect::<Vec<_>>()}));
     }
-    Ok(json!({"schedule_note":"FY2026-27 schedule (demo copy — confirm with Council)","items":result}))
+    Ok(
+        json!({"schedule_note":"FY2026-27 schedule (demo copy — confirm with Council)","items":result,"fee_scales":super::building_fees::scale_rows(tx).await?}),
+    )
 }
 pub async fn schedule(
     tx: &mut SqliteConnection,

@@ -380,10 +380,20 @@ impl Driver {
         Ok(())
     }
     pub async fn decision(&mut self, case: i64, kind: &str, evidence: Option<Vec<i64>>) -> AppResult<i64> {
+        self.decision_for(case, kind, evidence, None).await
+    }
+    /// Prepare (Priya), submit and issue (Helen); `supersedes` names the original a modification replaces.
+    pub async fn decision_for(
+        &mut self,
+        case: i64,
+        kind: &str,
+        evidence: Option<Vec<i64>>,
+        supersedes: Option<i64>,
+    ) -> AppResult<i64> {
         let templates = self.req("priya", "GET", "/api/decision-templates", json!({})).await?;
         let template = templates.as_array().unwrap().iter().find(|t| t["decision_type"] == kind).expect("template");
         let revision = self.revision("priya", case).await?;
-        let id = self.req("priya","POST",&format!("/api/cases/{case}/decisions"),json!({"decision_type":kind,"outcome":"approved","reasons":"Fictional specialist assessment completed.","conditions":"Follow approved drawing A-101 v2.","template_id":template["id"],"evidence_version_ids":evidence,"expected_revision":revision})).await?["id"].as_i64().unwrap();
+        let id = self.req("priya","POST",&format!("/api/cases/{case}/decisions"),json!({"decision_type":kind,"outcome":"approved","reasons":"Fictional specialist assessment completed.","conditions":"Follow approved drawing A-101 v2.","template_id":template["id"],"evidence_version_ids":evidence,"supersedes_decision_id":supersedes,"expected_revision":revision})).await?["id"].as_i64().unwrap();
         for action in ["submit", "issue"] {
             let person = if action == "issue" { "helen" } else { "priya" };
             let revision = self.revision(person, case).await?;

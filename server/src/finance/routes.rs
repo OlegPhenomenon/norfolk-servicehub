@@ -45,6 +45,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/finance/deposits", get(deposit_queue))
         .route("/api/cases/{id}/refund-credit", post(refund_credit))
         .route("/api/cases/{id}/price-waivers", post(waiver))
+        .route("/api/cases/{id}/building-fee", get(super::building_fees::get).post(super::building_fees::post))
         .route("/api/finance/payments/{id}/unmatch", post(unmatch))
         .route("/api/cases/{id}/deposit-decision", post(deposit_decision))
         .route("/api/finance/refunds", get(refund_queue))

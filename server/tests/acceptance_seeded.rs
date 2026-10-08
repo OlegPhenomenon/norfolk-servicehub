@@ -63,8 +63,19 @@ async fn seeded_history_is_complete_balanced_repeatable_and_leaves_the_visitor_s
             "SELECT COUNT(*) FROM exhibition_items WHERE published_blob_id IS NOT NULL AND redactions_json<>'[]'"
         )
         .await,
+        2
+    );
+    // Seeded building route (audit N-01..N-03): fee assessed and paid, scope confirmed, exhibition closed and
+    // its comment considered before the decisions; the modification is assessed, paid and on exhibition.
+    assert_eq!(scalar(&state, "SELECT COUNT(*) FROM building_fee_assessments").await, 2);
+    assert_eq!(scalar(&state, "SELECT COUNT(*) FROM cases c JOIN services s ON s.id=c.service_id WHERE s.slug IN ('development-application','modify-approval') AND NOT EXISTS(SELECT 1 FROM finance_line_balances l JOIN invoices i ON i.id=l.invoice_id WHERE i.case_id=c.id AND l.amount_cents-l.credited_cents-l.paid_cents>0) AND EXISTS(SELECT 1 FROM invoices i WHERE i.case_id=c.id AND i.kind='invoice')").await, 2);
+    assert_eq!(scalar(&state, "SELECT COUNT(*) FROM building_approval_scopes WHERE source='staff'").await, 1);
+    assert_eq!(
+        scalar(&state, "SELECT COUNT(*) FROM public_submissions WHERE status='considered' AND outcome IS NOT NULL")
+            .await,
         1
     );
+    assert_eq!(scalar(&state, "SELECT COUNT(*) FROM cases c JOIN services s ON s.id=c.service_id WHERE s.slug='development-application' AND c.status='completed' AND EXISTS(SELECT 1 FROM building_approval_scopes b WHERE b.case_id=c.id AND b.source='staff') AND EXISTS(SELECT 1 FROM building_fee_assessments f WHERE f.case_id=c.id)").await, 1);
     assert_eq!(
         scalar(&state, "SELECT COUNT(*) FROM decisions WHERE decision_type='planning_certificate' AND status='issued'")
             .await,

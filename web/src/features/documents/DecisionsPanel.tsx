@@ -4,7 +4,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useMe } from '@/auth/useMe'
 import { api, isApiError } from '@/api/client'
 import { Card, QueryView, EmptyState, DateTime, Badge, StatusPill, Alert, Button, Field, Textarea, Select, Checkbox, ErrorAlert, useToast } from '@/ui'
-import type { Decision, DecisionList, Document, Template } from './types'
+import type { BuildingRoute, Decision, DecisionList, Document, Template } from './types'
+import { approvalLabel } from './labels'
 
 export function DecisionsPanel({ caseId }: { caseId: number }) {
   const actorId = useMe().data?.user?.id
@@ -24,14 +25,19 @@ export function DecisionsPanel({ caseId }: { caseId: number }) {
 function DecisionEditor({ allowedTypes, caseId, revision, decision }: { allowedTypes: string[]; caseId: number; revision: number; decision?: Decision }) {
   const [type, setType] = useState(decision?.decision_type ?? ''), [templateId, setTemplate] = useState(String(decision?.template_id ?? '')), [outcome, setOutcome] = useState(decision?.outcome ?? 'approved'), [reasons, setReasons] = useState(decision?.reasons ?? ''), [conditions, setConditions] = useState(decision?.conditions ?? ''), [selected, setSelected] = useState<number[] | null>(decision?.evidence.map(e => e.id) ?? null)
   const templates = useQuery({ queryKey: ['documents', 'templates'], queryFn: () => api.get<Template[]>('/api/decision-templates') })
+  const route = useQuery({ queryKey: ['cases', 'route', caseId], queryFn: () => api.get<BuildingRoute>(`/api/cases/${caseId}/building-route`) })
+  const [supersedes, setSupersedes] = useState(String(decision?.supersedes_decision_id ?? ''))
   const docs = useQuery({ queryKey: ['documents', 'case', caseId], queryFn: () => api.get<Document[]>(`/api/cases/${caseId}/documents`) })
   const latest = (docs.data ?? []).filter(d => d.visibility === 'applicant' && !['decision', 'letter', 'certificate'].includes(d.category)).flatMap(d => d.versions.at(-1)?.id ?? [])
   const evidence = selected ?? latest, qc = useQueryClient(), toast = useToast()
-  const mutation = useMutation({ mutationFn: () => { const input = { decision_type: type, template_id: Number(templateId), outcome, reasons, conditions, evidence_version_ids: evidence, expected_revision: revision }; return decision ? api.put(`/api/cases/${caseId}/decisions/${decision.id}`, input) : api.post(`/api/cases/${caseId}/decisions`, input) }, onSuccess: async () => { toast.success('Draft decision saved.'); await qc.invalidateQueries({ queryKey: ['documents'] }); await qc.invalidateQueries({ queryKey: ['cases'] }) } })
+  const mutation = useMutation({ mutationFn: () => { const input = { decision_type: type, template_id: Number(templateId), outcome, reasons, conditions, evidence_version_ids: evidence, supersedes_decision_id: supersedes ? Number(supersedes) : null, expected_revision: revision }; return decision ? api.put(`/api/cases/${caseId}/decisions/${decision.id}`, input) : api.post(`/api/cases/${caseId}/decisions`, input) }, onSuccess: async () => { toast.success('Draft decision saved.'); await qc.invalidateQueries({ queryKey: ['documents'] }); await qc.invalidateQueries({ queryKey: ['cases'] }) } })
   const errors = isApiError(mutation.error) ? mutation.error.fields : {}
-  const types = [...new Set((templates.data ?? []).filter(t => allowedTypes.includes(t.decision_type)).map(t => t.decision_type))]
+  // Building applications offer only the approvals in the confirmed scope (DA only, BA only or both).
+  const scope = route.data?.route === 'project' ? route.data.scope?.approvals : undefined
+  const types = [...new Set((templates.data ?? []).filter(t => allowedTypes.includes(t.decision_type) && (!scope || scope.includes(t.decision_type) || !['development_approval', 'building_approval'].includes(t.decision_type))).map(t => t.decision_type))]
   return <form className="space-y-4 mt-4" onSubmit={e => { e.preventDefault(); mutation.mutate() }}>
     {templates.error && <ErrorAlert error={templates.error} />}<Field label="Decision type" required error={errors.decision_type}><Select disabled={!!decision} placeholder="Choose an approval" value={type} onChange={e => { setType(e.target.value); setTemplate('') }} options={types.map(t => ({ value: t, label: t.replaceAll('_', ' ') }))} /></Field>
+    {type === 'modification_approval' && <Field label="Original approval this decision supersedes" required hint="Each original approval in scope gets its own modification decision; other approvals stay current." error={errors.supersedes_decision_id}><Select disabled={!!decision} placeholder="Choose the original approval" value={supersedes} onChange={e => setSupersedes(e.target.value)} options={(route.data?.originals ?? []).filter(o => o.in_scope).map(o => ({ value: String(o.decision_id), label: `${approvalLabel(o.approval_type)} #${o.decision_id} (${o.case_number ?? ''})` }))} /></Field>}
     <Field label="Versioned template" required error={errors.template_id}><Select placeholder="Choose a template" value={templateId} onChange={e => setTemplate(e.target.value)} options={(templates.data ?? []).filter(t => t.decision_type === type).map(t => ({ value: String(t.id), label: t.name }))} /></Field>
     {templateId && <details><summary className="py-2 cursor-pointer">Template text</summary><pre className="break-words whitespace-pre-wrap text-sm">{templates.data?.find(t => t.id === Number(templateId))?.body_template}</pre></details>}
     <Field label="Outcome" required error={errors.outcome}><Select value={outcome} onChange={e => setOutcome(e.target.value)} options={[{ value: 'approved', label: 'Approved' }, { value: 'approved_with_conditions', label: 'Approved with conditions' }, { value: 'refused', label: 'Refused' }]} /></Field>

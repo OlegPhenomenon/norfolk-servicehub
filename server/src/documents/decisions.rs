@@ -60,6 +60,9 @@ pub struct Input {
     pub template_id: i64,
     pub evidence_version_ids: Option<Vec<i64>>,
     pub expected_revision: i64,
+    /// Modification decisions: the original approval (in the case's scope) that this decision supersedes.
+    #[serde(default)]
+    pub supersedes_decision_id: Option<i64>,
 }
 #[derive(Deserialize)]
 pub struct ActionInput {
@@ -200,17 +203,8 @@ pub async fn create(
     let case = super::manage(&mut tx, &actor, case_id, &[Role::Specialist, Role::Manager]).await?;
     let ids = validate(&mut tx, &case, &input).await?;
     crate::cases::core::bump_revision(&mut tx, case_id, Some(input.expected_revision)).await?;
-    let supersedes: Option<i64> = if input.decision_type == "modification_approval" {
-        sqlx::query_scalar("SELECT decision_id FROM building_original_approvals WHERE case_id=?")
-            .bind(case_id)
-            .fetch_optional(&mut *tx)
-            .await?
-    } else {
-        None
-    };
-    if input.decision_type == "modification_approval" && supersedes.is_none() {
-        return Err(AppError::field("decision_type", "Link the request to its original approval first."));
-    }
+    let supersedes =
+        super::building::prepare_check(&mut tx, &case, &input.decision_type, input.supersedes_decision_id).await?;
     let id:i64=sqlx::query_scalar("INSERT INTO decisions(case_id,decision_type,outcome,reasons,conditions,status,template_id,prepared_by,supersedes_decision_id,created_at) VALUES(?,?,?,?,?,'draft',?,?,?,?) RETURNING id").bind(case_id).bind(&input.decision_type).bind(input.outcome).bind(input.reasons).bind(input.conditions).bind(input.template_id).bind(actor.user_id).bind(supersedes).bind(time::now_str()).fetch_one(&mut *tx).await?;
     set_evidence(&mut tx, id, ids).await?;
     super::changed(
@@ -355,6 +349,13 @@ pub async fn action(
                         "Complete payment and specialist preparation before issuing the planning certificate.",
                     ));
                 }
+            }
+            if matches!(
+                d.decision_type.as_str(),
+                "development_approval" | "building_approval" | "modification_approval"
+            ) && let Some(block) = super::building::issue_block(&mut tx, &case, &d).await?
+            {
+                return Err(AppError::conflict(block));
             }
             issue_document(&mut tx, &state, &actor, &case, d).await?;
             crate::deadlines::api::on_trigger(&mut tx, case.id, "decision_issued").await?;

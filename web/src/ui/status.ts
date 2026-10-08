@@ -51,6 +51,10 @@ export const STATUS_STYLES: Record<string, { label: string; tone: Tone }> = {
   invited: { label: 'Invited', tone: 'info' },
   published: { label: 'Published', tone: 'success' },
   retired: { label: 'Retired', tone: 'neutral' },
+  current: { label: 'Current', tone: 'success' },
+  superseded: { label: 'Superseded', tone: 'neutral' },
+  terminated: { label: 'Terminated early', tone: 'warning' },
+  considered: { label: 'Considered', tone: 'success' },
 }
 
 /** `waiting_on_applicant` → `Waiting on applicant` */

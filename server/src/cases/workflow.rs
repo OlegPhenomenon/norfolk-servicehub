@@ -134,6 +134,8 @@ async fn transition(
         if let Some(reason) = hooks::step_guard(tx, case, step).await? {
             return Err(AppError::conflict(reason));
         }
+    } else if let Some(block) = hooks::on_skip(tx, actor, case, step, reason).await? {
+        return Err(AppError::conflict(block));
     }
     sqlx::query("UPDATE workflow_step_runs SET left_at=?,left_reason=? WHERE case_id=? AND left_at IS NULL")
         .bind(time::fmt(state.now()))

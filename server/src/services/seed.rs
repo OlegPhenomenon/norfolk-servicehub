@@ -72,6 +72,25 @@ fn payment() -> Value {
 fn done() -> Value {
     step("done", "complete", None, "Completed", "Your request is complete.")
 }
+/// Building approval route checkpoints (audit N-01/N-03): fee determination at acceptance, then payment.
+fn fee_step() -> Value {
+    let mut s = step("fees", "module", Some("intake"), "Determine fees", "We are confirming your application fee.");
+    s["handler"] = json!("finance.fee_assessed");
+    s
+}
+fn exhibition_step() -> Value {
+    let mut s = step(
+        "exhibition",
+        "module",
+        Some("specialist"),
+        "Public exhibition and comments",
+        "We are deciding on, or running, public exhibition of your proposal.",
+    );
+    s["handler"] = json!("documents.exhibition_closed");
+    s
+}
+const DA_FEE_NOTE: &str = "Building Development and Works scale on the total estimated cost: $570 up to $50,000; above that $600 + $4.00 per $1,000 over $50,000, with further bands (FY2026-27 demo schedule — confirm with Council). Council records the fee assessment when accepting the application and invoices it before assessment.";
+const MOD_FEE_NOTE: &str = "Basic modification (lapse date only) $250; any other modification uses the Building Development and Works scale on the total estimated cost (FY2026-27 demo schedule — confirm with Council). Council records the fee assessment when accepting the application and invoices it before assessment.";
 fn contact() -> Vec<Value> {
     vec![
         field("applicant_name", "text", "Name of applicant", true),
@@ -192,11 +211,14 @@ pub fn catalogue() -> Vec<(&'static str, &'static str, &'static str, &'static st
                 fields.extend(property());fields.extend([select("land_tenure","Land tenure",&["Freehold","Crown Lease","Vacant Crown Land","Road Reserve","Un-alienated Crown Land"]),select("zoning","Zoning",&["Rural","Rural Residential","Residential","Mixed Use","Business","Light Industry","Industry","Open Space","Conservation","Special Use","Airport","Roads"]),field("current_use","textarea","What is the land currently used for?",true),field("proposal","textarea",if slug=="modify-approval"{"Description of proposed modification"}else{"Description of proposal"},true),field("estimated_cost","number","Total estimated cost of building and works (AUD)",true),field("owners_consent","checkbox","All landowners consent to lodging this application",true)]);
                 docs=vec![doc("title_search","Copy of title search",true),doc("owners_consent","Signed consent of all landowners",true),doc("site_plan","Site plan (at least 1:500)",true),doc("floor_plans","Plans and drawings (floor plans at least 1:100)",true),doc("environment","Environmental and heritage impact documentation",true),doc("earthworks","Earthworks plan, if earthworks exceed 50 cubic metres",false)];
                 if slug=="modify-approval"{
-                    fields.push(field("original_approval","decision_ref","Issued approval to modify",true));fields.extend([select("modification_type","Type of modification",&["Minor error","Conditions","Lapse date","Other"]),field("substantially_same","textarea","Explain why the use or development remains substantially the same",true)]);
-                    pricing.push(json!({"item":"MODIFICATION_FEE","quantity":1}));steps=vec![intake.clone(),assessment.clone(),decision(&["modification_approval"]),done()];
+                    let mut original=field("original_approval","decision_ref","Issued approval(s) to modify — choose the development and/or building approval",true);original["multiple"]=json!(true);
+                    fields.push(original);fields.extend([select("modification_type","Type of modification",&["Minor error","Conditions","Lapse date","Other"]),field("substantially_same","textarea","Explain why the use or development remains substantially the same",true)]);
+                    steps=vec![intake.clone(),fee_step(),payment(),assessment.clone(),exhibition_step(),decision(&["modification_approval"]),done()];
                 }else{
                     fields.extend([field("gross_floor_area","number","Gross floor area (square metres)",false),field("roof_area","number","Total roof area (square metres)",false),field("water_tank_litres","number","Total water storage (litres)",true),select("wastewater","Wastewater disposal",&["Sewer connection","Onsite system"]),field("earthworks_volume","number","Earthworks (cubic metres)",false),field("builder","text","Builder's details",false)]);
-                    docs.push(doc("clause12","Clause 12 Norfolk Island Plan checklist",true));pricing.extend([json!({"item":"DA_LODGEMENT","quantity":1}),json!({"item":"BA_LODGEMENT","quantity":1})]);steps=vec![intake.clone(),assessment.clone(),module("exhibition","documents.exhibition_closed","specialist","Public exhibition and comments",true),decision(&["development_approval","building_approval"]),done()];
+                    let mut sought=field("approvals_sought","multiselect","Approvals sought",true);sought["options"]=json!([{"value":"development_approval","label":"Development approval"},{"value":"building_approval","label":"Building approval"}]);sought["help"]=json!("Council confirms which approvals your proposal needs.");
+                    let at=fields.iter().position(|f|f["key"]=="current_use").expect("current_use");fields.insert(at,sought);
+                    docs.push(doc("clause12","Clause 12 Norfolk Island Plan checklist",true));steps=vec![intake.clone(),fee_step(),payment(),assessment.clone(),exhibition_step(),decision(&["development_approval","building_approval"]),done()];
                 }
                 if slug=="modify-approval"{("Apply to modify an issued approval with landowner consent and supporting plans.","A modification decision linked to the original approval.",vec!["development","building","modification","approval"])}else{("Apply for planning and building decisions with landowner consent, plans and supporting information.","Separate development and building decisions; approval is required before relevant work starts.",vec!["development","building","permit","DA","plans"])}
             },
@@ -223,7 +245,7 @@ pub fn catalogue() -> Vec<(&'static str, &'static str, &'static str, &'static st
             "equipment_hire"=>"Final charges use actual approved minutes and any agreed pass-through expenses. Rates include fuel, oil and the operator's ordinary-time wages.",
             _=>"Council will confirm the fee before payment.",
         };
-        let price_note=if matches!(slug,"road-issue"|"complaint"){"No fee applies."}else{calculation};
+        let price_note=match slug {"road-issue"|"complaint"=>"No fee applies.","development-application"=>DA_FEE_NOTE,"modify-approval"=>MOD_FEE_NOTE,_=>calculation};
         let def=json!({"module":m,"summary":summary,"conditions":conditions,"outcome":outcome,"who_can_apply":"Residents and businesses, or an authorised representative.","price_note":price_note,"keywords":keywords,"fields":fields,"documents":docs,"workflow":{"steps":steps},"deadlines":deadlines,"pricing":pricing});
         let source=if url.is_empty(){"https://www.nirc.gov.au/Customer-Service/Customer-Service-Forms".into()}else{format!("{ROOT}{url}")};
         (slug,name,category,m,department,def,source)

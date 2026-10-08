@@ -25,7 +25,7 @@ pub fn handlers(module: &str) -> Vec<&'static str> {
     match module {
         "venue_booking" => handlers.extend(["operations.booking_confirmed", "finance.deposits_settled"]),
         "equipment_hire" => handlers.extend(["operations.equipment_scheduled", "operations.usage_invoiced"]),
-        "building" => handlers.push("documents.exhibition_closed"),
+        "building" => handlers.extend(["documents.exhibition_closed", "finance.fee_assessed"]),
         "road_issue" => handlers.push("documents.letter_issued:road_response"),
         "complaint" => handlers.push("documents.letter_issued:complaint_response"),
         _ => {}
@@ -305,7 +305,12 @@ fn value_error(f: &FieldDef, v: &Value) -> Option<String> {
                 && v["preferred_date"].as_str().is_some_and(|s| crate::time::parse_date(s).is_ok())
                 && v["requested_hours"].as_f64().is_some_and(|n| n > 0.0 && n.is_finite())
         }
-        FieldType::DecisionRef => v["decision_id"].as_i64().is_some_and(|n| n > 0),
+        FieldType::DecisionRef => {
+            v["decision_id"].as_i64().is_some_and(|n| n > 0)
+                || v["decision_ids"]
+                    .as_array()
+                    .is_some_and(|a| !a.is_empty() && a.iter().all(|n| n.as_i64().is_some_and(|n| n > 0)))
+        }
         _ => v.as_str().is_some_and(|s| f.max_length.is_none_or(|n| s.chars().count() <= n as usize)),
     };
     (!valid).then(|| "Enter a valid value for this field.".into())

@@ -44,6 +44,10 @@ pub struct Exhibition {
     pub prepared_by: i64,
     pub approved_by: Option<i64>,
     pub created_at: String,
+    /// Formal early termination (status stays `closed`; projections report `terminated`).
+    pub terminated_at: Option<String>,
+    pub termination_reason: Option<String>,
+    pub consideration_summary: Option<String>,
 }
 #[derive(Clone, Serialize, sqlx::FromRow)]
 pub struct Item {
@@ -81,6 +85,18 @@ pub struct Submission {
     pub email: String,
     pub body: String,
 }
+#[derive(Deserialize)]
+pub struct ReasonInput {
+    #[serde(default)]
+    pub reason: String,
+    pub expected_revision: i64,
+}
+#[derive(Deserialize)]
+pub struct ConsiderInput {
+    #[serde(default)]
+    pub outcome: String,
+    pub expected_revision: i64,
+}
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/exhibitions", get(list).post(create))
@@ -94,6 +110,9 @@ pub fn routes() -> Router<AppState> {
         .route("/api/exhibitions/{id}/publish", post(publish))
         .route("/api/exhibitions/{id}/submissions", get(submissions))
         .route("/api/exhibitions/{id}/submissions/{sid}/consider", post(consider))
+        .route("/api/exhibitions/{id}/terminate", post(terminate))
+        .route("/api/exhibitions/{id}/consideration", post(consideration_summary))
+        .route("/api/cases/{id}/exhibition-not-required", post(not_required))
         .route("/api/public/exhibitions", get(public_list))
         .route("/api/public/exhibitions/{id}", get(public_detail))
         .route("/api/public/exhibitions/{id}/items/{item}/file", get(public_file))
@@ -664,7 +683,7 @@ fn public(e: &Exhibition, now: chrono::DateTime<chrono::Utc>) -> bool {
             .is_some_and(|d| d > now - chrono::Duration::days(90))
 }
 fn public_projection(e: &Exhibition) -> Value {
-    json!({"id":e.id,"title":e.title,"summary":e.summary,"status":e.status,"opens_at":e.opens_at,"closes_at":e.closes_at})
+    json!({"id":e.id,"title":e.title,"summary":e.summary,"status":display_status(e),"opens_at":e.opens_at,"closes_at":e.closes_at,"terminated_at":e.terminated_at,"termination_reason":e.termination_reason})
 }
 pub async fn public_list(State(state): State<AppState>) -> AppResult<Json<Vec<Value>>> {
     close_read(&state).await?;
@@ -779,29 +798,33 @@ pub async fn submissions(
     let mut c = state.db.acquire().await?;
     staff(&mut c, &actor, id).await?;
     let rows = sqlx::query(
-        "SELECT id,name,email,body,status,created_at FROM public_submissions WHERE exhibition_id=? ORDER BY id",
+        "SELECT s.id,s.name,s.email,s.body,s.status,s.created_at,s.outcome,s.considered_at,u.display_name considered_by FROM public_submissions s LEFT JOIN users u ON u.id=s.considered_by WHERE s.exhibition_id=? ORDER BY s.id",
     )
     .bind(id)
     .fetch_all(&mut *c)
     .await?;
-    Ok(Json(rows.iter().map(|r|json!({"id":r.get::<i64,_>("id"),"name":r.get::<String,_>("name"),"email":r.get::<String,_>("email"),"body":r.get::<String,_>("body"),"status":r.get::<String,_>("status"),"created_at":r.get::<String,_>("created_at")})).collect()))
+    Ok(Json(rows.iter().map(|r|json!({"id":r.get::<i64,_>("id"),"name":r.get::<String,_>("name"),"email":r.get::<String,_>("email"),"body":r.get::<String,_>("body"),"status":r.get::<String,_>("status"),"created_at":r.get::<String,_>("created_at"),"outcome":r.get::<Option<String>,_>("outcome"),"considered_at":r.get::<Option<String>,_>("considered_at"),"considered_by":r.get::<Option<String>,_>("considered_by")})).collect()))
 }
 pub async fn consider(
     State(state): State<AppState>,
     actor: Actor,
     Path((id, sid)): Path<(i64, i64)>,
-    Json(input): Json<Revision>,
+    Json(input): Json<ConsiderInput>,
 ) -> AppResult<Json<Value>> {
+    super::text("outcome", &input.outcome, 5000)?;
     let mut tx = write_tx(&state.db).await?;
     let e = staff(&mut tx, &actor, id).await?;
     crate::cases::core::bump_revision(&mut tx, e.case_id, Some(input.expected_revision)).await?;
-    let r = sqlx::query("UPDATE public_submissions SET status='considered' WHERE id=? AND exhibition_id=?")
+    let r = sqlx::query("UPDATE public_submissions SET status='considered',outcome=?,considered_by=?,considered_at=? WHERE id=? AND exhibition_id=? AND status='received'")
+        .bind(input.outcome.trim())
+        .bind(actor.user_id)
+        .bind(state.now().to_rfc3339())
         .bind(sid)
         .bind(id)
         .execute(&mut *tx)
         .await?;
     if r.rows_affected() != 1 {
-        return Err(AppError::not_found());
+        return Err(AppError::conflict("This submission already has a recorded consideration outcome."));
     }
     super::changed(
         &mut tx,
@@ -809,11 +832,226 @@ pub async fn consider(
         e.case_id,
         "documents.submission_considered",
         Visibility::Staff,
-        "Public submission reviewed and marked considered.",
+        &format!("Public submission {sid} considered. Outcome: {}", input.outcome.trim()),
     )
     .await?;
     tx.commit().await?;
     Ok(Json(json!({"id":sid})))
+}
+/// Formal early termination of an open exhibition. Comments already received still need consideration.
+async fn terminate(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path(id): Path<i64>,
+    Json(input): Json<ReasonInput>,
+) -> AppResult<Json<Value>> {
+    super::text("reason", &input.reason, 5000)?;
+    let mut tx = write_tx(&state.db).await?;
+    close_due(&mut tx, &state.now().to_rfc3339()).await?;
+    let e = staff(&mut tx, &actor, id).await?;
+    if e.status != "open" {
+        return Err(AppError::conflict("Only an open exhibition can be terminated early."));
+    }
+    crate::cases::core::bump_revision(&mut tx, e.case_id, Some(input.expected_revision)).await?;
+    sqlx::query("UPDATE exhibitions SET status='closed',terminated_at=?,terminated_by=?,termination_reason=? WHERE id=? AND status='open'")
+        .bind(state.now().to_rfc3339())
+        .bind(actor.user_id)
+        .bind(input.reason.trim())
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    super::changed(
+        &mut tx,
+        actor.db_id(),
+        e.case_id,
+        "documents.exhibition_terminated",
+        Visibility::Applicant,
+        &format!("The public exhibition was formally terminated early. Reason: {}", input.reason.trim()),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Json(json!({"id":id})))
+}
+/// One recorded consideration covering every submission still without an individual outcome.
+async fn consideration_summary(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path(id): Path<i64>,
+    Json(input): Json<ReasonInput>,
+) -> AppResult<Json<Value>> {
+    super::text("reason", &input.reason, 20000)?;
+    let mut tx = write_tx(&state.db).await?;
+    close_due(&mut tx, &state.now().to_rfc3339()).await?;
+    let e = staff(&mut tx, &actor, id).await?;
+    if e.status != "closed" {
+        return Err(AppError::conflict("Record the consideration summary after the comment window has closed."));
+    }
+    crate::cases::core::bump_revision(&mut tx, e.case_id, Some(input.expected_revision)).await?;
+    let now = state.now().to_rfc3339();
+    sqlx::query("UPDATE exhibitions SET consideration_summary=?,considered_by=?,considered_at=? WHERE id=?")
+        .bind(input.reason.trim())
+        .bind(actor.user_id)
+        .bind(&now)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    let covered = sqlx::query("UPDATE public_submissions SET status='considered',outcome=?,considered_by=?,considered_at=? WHERE exhibition_id=? AND status='received'")
+        .bind(format!("Covered by the consideration summary: {}", input.reason.trim()))
+        .bind(actor.user_id)
+        .bind(&now)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    super::changed(
+        &mut tx,
+        actor.db_id(),
+        e.case_id,
+        "documents.exhibition_considered",
+        Visibility::Applicant,
+        &format!("Consideration of public submissions recorded ({covered} covered by the summary)."),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Json(json!({"id":id,"covered":covered})))
+}
+/// "Exhibition not required for this case", with its mandatory reason (history + visible to the applicant).
+async fn not_required(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path(case_id): Path<i64>,
+    Json(input): Json<ReasonInput>,
+) -> AppResult<Json<Value>> {
+    super::text("reason", &input.reason, 5000)?;
+    let mut tx = write_tx(&state.db).await?;
+    let case = super::manage(&mut tx, &actor, case_id, &[Role::Specialist, Role::Manager]).await?;
+    if case.module != "building" || !crate::cases::workflow::is_open(&case) {
+        return Err(AppError::conflict("Only an open building request has a public exhibition stage."));
+    }
+    close_due(&mut tx, &state.now().to_rfc3339()).await?;
+    let open: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM exhibitions WHERE case_id=? AND status='open')")
+        .bind(case_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if open {
+        return Err(AppError::conflict(
+            "A public exhibition is open on this request. Formally terminate it with a reason instead.",
+        ));
+    }
+    crate::cases::core::bump_revision(&mut tx, case_id, Some(input.expected_revision)).await?;
+    record_not_required(&mut tx, actor.db_id(), case_id, input.reason.trim(), &state.now().to_rfc3339()).await?;
+    tx.commit().await?;
+    Ok(Json(json!({"ok":true})))
+}
+async fn record_not_required(
+    tx: &mut SqliteConnection,
+    actor: Option<i64>,
+    case_id: i64,
+    reason: &str,
+    now: &str,
+) -> AppResult<()> {
+    sqlx::query("INSERT INTO exhibition_not_required(case_id,reason,decided_by,decided_at) VALUES(?,?,?,?)")
+        .bind(case_id)
+        .bind(reason)
+        .bind(actor)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+    super::changed(
+        tx,
+        actor,
+        case_id,
+        "documents.exhibition_not_required",
+        Visibility::Applicant,
+        &format!("Public exhibition is not required for this request. Reason: {reason}"),
+    )
+    .await
+}
+/// Blocks while an exhibition on the case is open or any public submission lacks a consideration outcome.
+pub async fn case_block(tx: &mut SqliteConnection, case_id: i64) -> AppResult<Option<String>> {
+    close_due(tx, &crate::time::now_str()).await?;
+    let open: Option<String> = sqlx::query_scalar(
+        "SELECT closes_at FROM exhibitions WHERE case_id=? AND status='open' ORDER BY closes_at DESC LIMIT 1",
+    )
+    .bind(case_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(closes) = open {
+        return Ok(Some(format!(
+            "A public exhibition on this request is open until {closes}. Wait for it to close, or formally terminate it with a reason."
+        )));
+    }
+    let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM public_submissions s JOIN exhibitions e ON e.id=s.exhibition_id WHERE e.case_id=? AND s.status='received'")
+        .bind(case_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    Ok((pending > 0).then(|| {
+        format!("{pending} public submission(s) still need a recorded consideration outcome (per comment or a consideration summary).")
+    }))
+}
+/// Guard of the exhibition step: closed (or formally terminated) exhibition with every comment considered, or
+/// a recorded "not required" decision.
+pub async fn step_block(tx: &mut SqliteConnection, case_id: i64) -> AppResult<Option<String>> {
+    if let Some(block) = case_block(tx, case_id).await? {
+        return Ok(Some(block));
+    }
+    let handled: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM exhibitions WHERE case_id=? AND status='closed') OR EXISTS(SELECT 1 FROM exhibition_not_required WHERE case_id=?)")
+        .bind(case_id)
+        .bind(case_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    Ok((!handled).then(|| {
+        "Publish the public exhibition and let it close, or record that exhibition is not required for this request with the reason.".into()
+    }))
+}
+/// Legacy definitions marked the exhibition step optional: a skip is only allowed when nothing is open or
+/// unconsidered, and it is recorded as an explicit "not required" decision.
+pub async fn on_skip(
+    tx: &mut SqliteConnection,
+    actor: Option<i64>,
+    case_id: i64,
+    reason: &str,
+) -> AppResult<Option<String>> {
+    if let Some(block) = case_block(tx, case_id).await? {
+        return Ok(Some(block));
+    }
+    let closed: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM exhibitions WHERE case_id=? AND status='closed')")
+            .bind(case_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if !closed {
+        record_not_required(tx, actor, case_id, reason, &crate::time::now_str()).await?;
+    }
+    Ok(None)
+}
+pub fn display_status(e: &Exhibition) -> &str {
+    if e.terminated_at.is_some() { "terminated" } else { &e.status }
+}
+/// Exhibition state of one case for the building route panel.
+pub async fn case_view(tx: &mut SqliteConnection, case_id: i64) -> AppResult<Value> {
+    close_due(tx, &crate::time::now_str()).await?;
+    let rows: Vec<Exhibition> = sqlx::query_as("SELECT * FROM exhibitions WHERE case_id=? ORDER BY id")
+        .bind(case_id)
+        .fetch_all(&mut *tx)
+        .await?;
+    let mut out = vec![];
+    for e in &rows {
+        let (total, pending): (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*),COALESCE(SUM(status='received'),0) FROM public_submissions WHERE exhibition_id=?",
+        )
+        .bind(e.id)
+        .fetch_one(&mut *tx)
+        .await?;
+        out.push(json!({"id":e.id,"title":e.title,"status":display_status(e),"opens_at":e.opens_at,"closes_at":e.closes_at,"terminated_at":e.terminated_at,"termination_reason":e.termination_reason,"consideration_summary":e.consideration_summary,"submissions":total,"pending_submissions":pending}));
+    }
+    let not_required: Option<(String, String, Option<String>)> = sqlx::query_as("SELECT r.reason,r.decided_at,u.display_name FROM exhibition_not_required r LEFT JOIN users u ON u.id=r.decided_by WHERE r.case_id=? ORDER BY r.id DESC LIMIT 1")
+        .bind(case_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    Ok(
+        json!({"exhibitions":out,"not_required":not_required.map(|(reason,at,by)|json!({"reason":reason,"decided_at":at,"decided_by":by})),"block":step_block(tx,case_id).await?}),
+    )
 }
 
 static RENDERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);

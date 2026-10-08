@@ -356,6 +356,8 @@ async fn seeded_module_handlers_and_task_kinds_reach_their_owner_implementations
                     crate::operations::hooks::step_guard_handler(&mut tx, &c, handler).await.unwrap();
                 } else if handler.starts_with("documents.") {
                     documents::hooks::step_guard_handler(&mut tx, &c, handler).await.unwrap();
+                } else if handler == crate::finance::building_fees::HANDLER {
+                    crate::finance::hooks::step_guard_handler(&mut tx, &c, handler).await.unwrap();
                 } else {
                     assert_eq!(handler, "finance.deposits_settled", "Only finance is deferred");
                 }
@@ -410,7 +412,7 @@ async fn seeded_module_handlers_and_task_kinds_reach_their_owner_implementations
         }
     }
     assert_eq!(tasks.len(), 6);
-    assert_eq!(handlers.len(), 7);
+    assert_eq!(handlers.len(), 8);
     tx.rollback().await.unwrap();
 }
 

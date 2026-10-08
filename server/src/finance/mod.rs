@@ -1,5 +1,6 @@
 //! Prices, receipts, allocations, deposits and a balanced integer ledger.
 pub mod api;
+pub mod building_fees;
 mod deposits;
 pub mod hooks;
 pub(crate) mod ledger;
@@ -21,7 +22,8 @@ pub fn routes() -> axum::Router<AppState> {
     routes::routes()
 }
 pub async fn seed(tx: &mut SqliteConnection, state: &AppState) -> AppResult<()> {
-    prices::seed(tx, state).await
+    prices::seed(tx, state).await?;
+    building_fees::seed_scale(tx).await
 }
 pub async fn handle_job(state: &AppState, kind: &str, payload: &Value) -> AppResult<()> {
     match kind {
