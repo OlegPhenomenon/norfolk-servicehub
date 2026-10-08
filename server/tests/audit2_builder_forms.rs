@@ -69,10 +69,37 @@ fn probe_step(role: &str, extra: Value) -> Value {
     }
     step
 }
+const FEE_HANDLER: &str = "finance.fee_assessed";
+async fn public_definition(d: &mut Driver, slug: &str) -> Value {
+    req(d, "alexey", "GET", &format!("/api/public/services/{slug}"), json!({})).await["definition"].clone()
+}
+/// Alexey's development application through the whole approval route; returns the issued development approval
+/// and the reference of the building project it created.
+async fn issued_development_approval(d: &mut Driver) -> (i64, String) {
+    let da = json!(["development_approval"]);
+    let (c, _) = d.submit("alexey", "development-application", json!({"approvals_sought":da}), None).await.unwrap();
+    d.action("olga", c, "advance").await.unwrap();
+    scenarios::assess_fee(d, c).await.unwrap();
+    d.pay("alexey", c, false).await.unwrap();
+    scenarios::confirm_scope(d, c, json!({"approvals":da})).await.unwrap();
+    d.action("priya", c, "advance").await.unwrap();
+    scenarios::exhibition_not_required(d, c, "Fictional demo: no public comment period applies.").await.unwrap();
+    d.action("priya", c, "advance").await.unwrap();
+    let approval = d.decision(c, "development_approval", None).await.unwrap();
+    let project: String = sqlx::query_scalar(
+        "SELECT p.reference FROM building_projects p JOIN cases c ON c.building_project_id=p.id WHERE c.id=?",
+    )
+    .bind(c)
+    .fetch_one(&d.state.db)
+    .await
+    .unwrap();
+    (approval, project)
+}
 
 /// For every module: each offered handler, task kind and decision type is published in a Builder-created
-/// definition (probe step right after the first step), blocks with a human reason (never an internal error) and,
-/// for every option a case can satisfy at that point, passes after the staff action. Module checkpoints whose
+/// definition (probe step right after the first step; for building after the fee payment, on a copy of the seeded
+/// service whose building role can receive the decision type), blocks with a human reason (never an internal error)
+/// and, for every option a case can satisfy at that point, passes after the staff action. Module checkpoints whose
 /// prerequisites only exist later in the module's own flow must already be part of that module's seeded
 /// workflow, which `acceptance_scenarios.rs` drives to completion.
 #[tokio::test]
@@ -97,6 +124,10 @@ async fn every_builder_option_executes_in_every_module() {
         ("complaint", "complaint", "ruth"),
     ];
     let mut n = 0;
+    // Building probes run on a Builder-made copy of the seeded service whose building role can receive the option:
+    // a project's DA/BA, a modification's modification approval (of this issued DA), a follow-up notice's service
+    // response (on this DA's project).
+    let (approval, project) = issued_development_approval(&mut d).await;
     for (module, base_slug, staff) in bases {
         let caps = req(&mut d, "mark", "GET", &format!("/api/admin/services/capabilities/{module}"), json!({})).await;
         let base =
@@ -118,60 +149,61 @@ async fn every_builder_option_executes_in_every_module() {
             probes.push(probe_step(role, json!({"kind":"decision","decision_types":[t]})));
         }
         assert_eq!(caps["step_kinds"].as_array().unwrap().contains(&json!("task")), module != "complaint");
-        // A building approval route assesses and collects its fee first (audit N-01): probe right after payment.
-        let at = if module == "building" {
-            base["workflow"]["steps"].as_array().unwrap().iter().position(|s| s["key"] == "payment").unwrap() + 1
-        } else {
-            1
-        };
         for step in probes {
             n += 1;
             let slug = format!("probe-{}-{n}", module.replace('_', "-"));
-            let mut def = base.clone();
-            def["workflow"]["steps"].as_array_mut().unwrap().insert(at, step.clone());
-            // A decision type the base's building role cannot receive (a project issues only its DA/BA) is rejected at
-            // publish; it is the decision step of the seeded service with that role. A modification approval also
-            // needs an `original_approval` field (the approval being modified).
-            let other_role = match (module, step["decision_types"][0].as_str()) {
-                ("building", Some("modification_approval")) => Some("modify-approval"),
-                ("building", Some("service_response")) => Some("builder-stage-a-notice"),
-                _ => None,
-            };
-            if let Some(other) = other_role {
-                let created = req(&mut d,"mark","POST","/api/admin/services",json!({"slug":slug,"name":"Role probe","category":"Testing","department":"Planning","module":module})).await;
-                let path = format!("/api/admin/services/{}/versions/{}", created["id"], created["version_id"]);
-                req(&mut d, "mark", "PUT", &path, def).await;
-                let issues = req(&mut d, "mark", "POST", &format!("{path}/validate"), json!({})).await;
-                let expected = format!("workflow.steps.{at}.decision_types");
-                assert!(issues["issues"].as_array().unwrap().iter().any(|i| i["path"] == expected.as_str()), "{slug}");
-                let seeded = req(&mut d, "alexey", "GET", &format!("/api/public/services/{other}"), json!({})).await;
-                assert!(
-                    seeded["definition"]["workflow"]["steps"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .any(|s| s["decision_types"] == step["decision_types"]),
-                    "{other}"
-                );
-                continue;
-            }
-            publish(&mut d, &slug, module, def).await;
-            let extra = match module {
-                "venue_booking" => d.hall("rawson-main", 30 + n * 2),
-                "equipment_hire" => {
-                    json!({"request":{"description":"Probe excavation","requested_hours":2,"preferred_date":"2026-10-20","site_text":"Fictional depot"}})
+            let fee_probe = step["handler"] == FEE_HANDLER;
+            let (mut def, extra) = match (module, step["decision_types"][0].as_str()) {
+                ("building", Some("modification_approval")) => (
+                    public_definition(&mut d, "modify-approval").await,
+                    json!({"original_approval":{"decision_ids":[approval]},"modification_types":["conditions"]}),
+                ),
+                ("building", Some("service_response")) => {
+                    let def = public_definition(&mut d, "builder-stage-a-notice").await;
+                    let key =
+                        def["fields"].as_array().unwrap().iter().find(|f| f["type"] == "project_ref").unwrap()["key"]
+                            .as_str()
+                            .unwrap()
+                            .to_owned();
+                    let mut extra = json!({});
+                    extra[key] = json!(project);
+                    (def, extra)
                 }
-                _ => json!({}),
+                ("venue_booking", _) => (base.clone(), d.hall("rawson-main", 30 + n * 2)),
+                ("equipment_hire", _) => (
+                    base.clone(),
+                    json!({"request":{"description":"Probe excavation","requested_hours":2,"preferred_date":"2026-10-20","site_text":"Fictional depot"}}),
+                ),
+                _ => (base.clone(), json!({})),
             };
+            let keys: Vec<String> = def["workflow"]["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s["key"].as_str().unwrap().to_owned())
+                .collect();
+            // A building route assesses and collects its fee first (audit N-01): probe right after payment. A fee
+            // assessment probe goes before the payment that invoices it.
+            let at = match keys.iter().position(|k| k == "payment") {
+                Some(p) if module == "building" && !fee_probe => p + 1,
+                _ => 1,
+            };
+            def["workflow"]["steps"].as_array_mut().unwrap().insert(at, step.clone());
+            publish(&mut d, &slug, module, def).await;
             let (c, _) = d.submit("alexey", &slug, extra, None).await.unwrap();
             d.action(staff, c, "advance").await.unwrap();
-            if module == "building" {
-                scenarios::assess_fee(&mut d, c).await.unwrap();
-                d.pay("alexey", c, false).await.unwrap();
+            if module == "building" && !fee_probe {
+                if keys.iter().any(|k| k == "fees") {
+                    scenarios::assess_fee(&mut d, c).await.unwrap();
+                }
+                if keys.iter().any(|k| k == "payment") {
+                    d.pay("alexey", c, false).await.unwrap();
+                }
             }
             // Module checkpoints (booking, bond, equipment, exhibition) evaluate their own state; out of their
             // canonical position they may already pass (e.g. no bond invoiced yet) but must never error.
             let checkpoint = step["handler"].as_str().is_some_and(|h| !h.starts_with("documents.letter_issued:"))
+                && !fee_probe
                 || step["task_kind"] == "equipment_job";
             if checkpoint {
                 let detail = d.detail(staff, c).await.unwrap();
@@ -185,6 +217,10 @@ async fn every_builder_option_executes_in_every_module() {
                     issue_letter(&mut d, staff, c, h.trim_start_matches("documents.letter_issued:")).await;
                     let docs = req(&mut d, "alexey", "GET", &format!("/api/cases/{c}/documents"), json!({})).await;
                     assert!(docs.as_array().unwrap().iter().any(|doc| doc["category"] == "letter"), "{slug}");
+                }
+                ("module", Some(FEE_HANDLER), _) => {
+                    scenarios::assess_fee(&mut d, c).await.unwrap();
+                    d.action(staff, c, "advance").await.unwrap();
                 }
                 ("module", Some(h), _) => {
                     assert!(base_handlers.contains(&h), "{slug}: {h} must be a checkpoint of the module flow");
@@ -217,8 +253,15 @@ async fn every_builder_option_executes_in_every_module() {
                         }
                     } else {
                         if module == "building" {
-                            // Decisions follow the confirmed approval scope (audit N-02).
-                            scenarios::confirm_scope(&mut d, c, json!({"approvals":[t]})).await.unwrap();
+                            // Decisions follow the confirmed approval scope (audit N-02); follow-ups have none.
+                            let scope = match t {
+                                "modification_approval" => Some(json!({"originals":[approval]})),
+                                "service_response" => None,
+                                _ => Some(json!({"approvals":[t]})),
+                            };
+                            if let Some(scope) = scope {
+                                scenarios::confirm_scope(&mut d, c, scope).await.unwrap();
+                            }
                         }
                         d.decision(c, t, None).await.unwrap();
                     }
@@ -520,4 +563,199 @@ async fn modify_approval_captures_every_form_section() {
     // Group answers are searchable by staff.
     let found = req(&mut d, "priya", "GET", "/api/staff/cases?q=Oscar", json!({})).await;
     assert!(found["items"].as_array().unwrap().iter().any(|i| i["id"] == c));
+}
+
+/// N-06: the landowners' consent is asked for only when some landowners are not applicants (form section 2
+/// "if not the Applicant"); a Builder document condition must reference a field of the form.
+#[tokio::test]
+async fn modify_approval_owner_consent_only_when_landowners_differ() {
+    let (mut d, _dir) = support::fixture().await;
+    let org = req(&mut d, "ben", "GET", "/api/my/organisations", json!({})).await[0]["id"].as_i64().unwrap();
+    let both = json!(["development_approval", "building_approval"]);
+    let (da, _) =
+        d.submit("ben", "development-application", json!({"approvals_sought":both}), Some(org)).await.unwrap();
+    d.action("olga", da, "advance").await.unwrap();
+    scenarios::assess_fee(&mut d, da).await.unwrap();
+    d.pay("ben", da, false).await.unwrap();
+    scenarios::confirm_scope(&mut d, da, json!({"approvals":both})).await.unwrap();
+    d.action("priya", da, "advance").await.unwrap();
+    scenarios::exhibition_not_required(&mut d, da, "Fictional demo: no public comment period applies.").await.unwrap();
+    d.action("priya", da, "advance").await.unwrap();
+    d.decision(da, "development_approval", None).await.unwrap();
+    let approval = d.decision(da, "building_approval", None).await.unwrap();
+
+    let form = req(&mut d, "ben", "GET", "/api/public/services/modify-approval", json!({})).await["definition"].clone();
+    let consent = form["documents"].as_array().unwrap().iter().find(|r| r["key"] == "owners_consent").unwrap().clone();
+    assert_eq!(consent["show_if"], json!({"field":"landowners_are_applicants","equals":"no"}));
+
+    let person = json!({"first_name":"Ben","last_name":"Carter","postal_address":"PO Box 1, Norfolk Island 2899","phone":"+672 3 22001","mobile":"+672 5 12345","email":"ben@example.invalid"});
+    let mut answers = json!({
+        "original_approval":{"decision_id":approval},
+        "applicants":[person],
+        "landowners_are_applicants":"yes",
+        "property_ref":"44 Taylors Road, Burnt Pine",
+        "parcels":[{"portion":"44h"}],
+        "land_tenure":"Freehold","zoning":"Rural","current_use":"Dwelling house",
+        "use_types":["alterations_additions"],
+        "modification_types":["conditions"],
+        "conditions_description":"Condition 4 asks for a 20,000 L tank; request 15,000 L.",
+        "modified_proposal":"Same dwelling with a smaller tank","external_environment_changes":"None",
+        "estimated_cost":45000,"other_approvals":["trees"],"declaration":true});
+    /// A draft with the always-required attachments but no landowner consent.
+    async fn draft(d: &mut Driver, org: i64, answers: &Value) -> i64 {
+        let pdf = servicehub::pdf::simple_document("Fictional attachment", &[], &[("Body", "Fictional".into())]);
+        let c =
+            req(d, "ben", "POST", "/api/services/modify-approval/drafts", json!({"applicant_org_id":org})).await["id"]
+                .as_i64()
+                .unwrap();
+        req(d, "ben", "PUT", &format!("/api/cases/{c}/draft"), json!({"answers":answers})).await;
+        for (key, title) in [("title_search", "Title search"), ("modification_plans", "Impact statement and plans")] {
+            d.upload(
+                "ben",
+                &format!("/api/cases/{c}/documents"),
+                &[("requirement_key", key.into()), ("title", title.into())],
+                &pdf,
+            )
+            .await
+            .unwrap();
+        }
+        c
+    }
+    // Every landowner is an applicant: the consent page is not asked for again.
+    let c = draft(&mut d, org, &answers).await;
+    req(&mut d, "ben", "POST", &format!("/api/cases/{c}/submit"), json!({})).await;
+    let panel = req(&mut d, "priya", "GET", &format!("/api/cases/{c}/decisions"), json!({})).await;
+    let row = panel["document_requirements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["key"] == "owners_consent")
+        .unwrap()
+        .clone();
+    assert_eq!(row["applicable"], false);
+
+    // Other landowners: their signed consent is required.
+    answers["landowners_are_applicants"] = json!("no");
+    answers["landowners"] = json!([{"first_name":"Olive","last_name":"Owner","postal_address":"PO Box 2, Norfolk Island 2899","phone":"+672 3 22002","mobile":"+672 5 12346","email":"olive@example.invalid","consent":true}]);
+    let c = draft(&mut d, org, &answers).await;
+    let refused = d.expect("ben", "POST", &format!("/api/cases/{c}/submit"), json!({}), 422).await.unwrap();
+    assert!(refused["error"]["fields"].get("documents.owners_consent").is_some(), "{}", refused["error"]["fields"]);
+
+    // Builder: a document condition must reference a field of the form.
+    let created = req(
+        &mut d,
+        "mark",
+        "POST",
+        "/api/admin/services",
+        json!({"slug":"doc-condition-probe","name":"Audit probe doc condition","category":"Testing","department":"Customer Care","module":"generic"}),
+    )
+    .await;
+    let base = format!("/api/admin/services/{}/versions/{}", created["id"], created["version_id"]);
+    let def = json!({"module":"generic","summary":"Fictional probe","outcome":"A written response","fields":[{"key":"name","type":"text","label":"Name","required":true}],"workflow":{"steps":[{"key":"intake","kind":"review","role":"intake","label":"Check","applicant_label":"Checking"},{"key":"done","kind":"complete","label":"Done","applicant_label":"Done"}]},"documents":[{"key":"plan","label":"Site plan","required":true,"accept":["application/pdf"],"public_candidate":false,"show_if":{"field":"nowhere","equals":"yes"}}]});
+    req(&mut d, "mark", "PUT", &base, def).await;
+    let issues = req(&mut d, "mark", "POST", &format!("{base}/validate"), json!({})).await["issues"].clone();
+    assert!(issues.as_array().unwrap().iter().any(|i| i["path"] == "documents.0.show_if"), "{issues}");
+}
+
+/// Audit 2, N-04 review: a response letter is accepted only at its own letter step and satisfies only that step
+/// run; a later step waiting for the same letter type needs its own letter.
+#[tokio::test]
+async fn letter_steps_need_their_own_letter_at_their_own_step() {
+    let (mut d, _dir) = support::fixture().await;
+    let def = json!({"module":"generic","summary":"Fictional two-reply request","outcome":"Two written responses","fields":[{"key":"purpose","type":"text","label":"Purpose","required":true}],"documents":[],"workflow":{"steps":[
+        {"key":"intake","kind":"review","role":"intake","label":"Check request","applicant_label":"Checking"},
+        {"key":"reply1","kind":"module","handler":"documents.letter_issued:service_response","role":"intake","label":"First response","applicant_label":"Preparing a first response"},
+        {"key":"visit","kind":"task","task_kind":"general","role":"intake","label":"Site visit","applicant_label":"Site visit"},
+        {"key":"reply2","kind":"module","handler":"documents.letter_issued:service_response","role":"intake","label":"Final response","applicant_label":"Preparing the final response"},
+        {"key":"done","kind":"complete","label":"Complete","applicant_label":"Complete"}]},"deadlines":[],"pricing":[]});
+    publish(&mut d, "two-replies", "generic", def).await;
+    let (c, _) = d.submit("alexey", "two-replies", json!({"purpose":"Fencing"}), None).await.unwrap();
+    let letter = |r: i64| json!({"letter_type":"service_response","title":"Early response","body":"Too early.","expected_revision":r});
+
+    // At intake no letter step is current: the form is not offered and the server refuses the letter.
+    let letters = req(&mut d, "olga", "GET", &format!("/api/cases/{c}/letters"), json!({})).await;
+    assert_eq!(letters["can_issue"], false);
+    assert!(letters["steps"].as_array().unwrap().iter().all(|s| s["can_issue"] == false && s["current"] == false));
+    let r = rev(&mut d, "olga", c).await;
+    let refused = d.expect("olga", "POST", &format!("/api/cases/{c}/letters"), letter(r), 409).await.unwrap();
+    assert!(refused["error"]["message"].as_str().unwrap().contains("has not reached"), "{refused}");
+    assert_eq!(req(&mut d, "olga", "GET", &format!("/api/cases/{c}/letters"), json!({})).await["issued"], json!([]));
+
+    // reply1: blocked until its letter is issued; the letter advances the case to the site visit.
+    d.action("olga", c, "advance").await.unwrap();
+    let detail = d.detail("olga", c).await.unwrap();
+    assert_eq!(detail["case"]["current_step"], "reply1");
+    assert_eq!(detail["guard_reason"], "Issue the service response letter before continuing.");
+    issue_letter(&mut d, "olga", c, "service_response").await;
+    assert_eq!(d.detail("olga", c).await.unwrap()["case"]["current_step"], "visit");
+    // The later reply step cannot be answered in advance either.
+    let r = rev(&mut d, "olga", c).await;
+    d.expect("olga", "POST", &format!("/api/cases/{c}/letters"), letter(r), 409).await.unwrap();
+
+    // Completing the task does not carry reply1's letter over: the case stops at reply2 with the guard reason.
+    d.complete_task(c, "general").await.unwrap();
+    let detail = d.detail("olga", c).await.unwrap();
+    assert_eq!(detail["case"]["current_step"], "reply2");
+    assert_eq!(detail["case"]["status"], "in_progress");
+    let reason = detail["guard_reason"].as_str().unwrap().to_owned();
+    assert_eq!(reason, "Issue the service response letter before continuing.");
+    let r = rev(&mut d, "olga", c).await;
+    let blocked = d
+        .expect(
+            "olga",
+            "POST",
+            &format!("/api/cases/{c}/actions/advance"),
+            json!({"expected_revision":r,"reason":"Already answered once"}),
+            409,
+        )
+        .await
+        .unwrap();
+    assert_eq!(blocked["error"]["message"], reason.as_str());
+    let letters = req(&mut d, "olga", "GET", &format!("/api/cases/{c}/letters"), json!({})).await;
+    let step = |key: &str| letters["steps"].as_array().unwrap().iter().find(|s| s["step_key"] == key).unwrap().clone();
+    assert_eq!(step("reply1")["issued"], true);
+    assert_eq!(step("reply1")["can_issue"], false);
+    assert_eq!(step("reply2")["issued"], false);
+    assert_eq!(step("reply2")["current"], true);
+    assert_eq!(step("reply2")["can_issue"], true);
+
+    // The second letter, issued at reply2, completes the case.
+    issue_letter(&mut d, "olga", c, "service_response").await;
+    assert_eq!(d.detail("alexey", c).await.unwrap()["case"]["status"], "completed");
+    let letters = req(&mut d, "olga", "GET", &format!("/api/cases/{c}/letters"), json!({})).await;
+    let issued: Vec<&str> =
+        letters["issued"].as_array().unwrap().iter().map(|l| l["step_key"].as_str().unwrap()).collect();
+    assert_eq!(issued, ["reply1", "reply2"]);
+    assert!(letters["steps"].as_array().unwrap().iter().all(|s| s["issued"] == true && s["can_issue"] == false));
+    assert_eq!(letters["can_issue"], false);
+}
+
+/// Rows without any filled-in cell (the form's "Add row" starts empty) are not answers: they do not satisfy a
+/// required group or its minimum, are not validated and are not stored; errors keep the row's position.
+#[tokio::test]
+async fn empty_group_rows_do_not_count_as_answers() {
+    let (mut d, _dir) = support::fixture().await;
+    let def = json!({"module":"generic","summary":"s","outcome":"o","fields":[
+        {"key":"contacts","type":"group","label":"Contacts","required":true,"min_items":2,"columns":[
+            {"key":"name","type":"text","label":"Name"},{"key":"email","type":"email","label":"Email"},{"key":"ok","type":"checkbox","label":"Agrees"}]}],
+        "documents":[],"workflow":{"steps":[{"key":"intake","kind":"review","role":"intake","label":"Check","applicant_label":"Checking"},{"key":"done","kind":"complete","label":"Done","applicant_label":"Done"}]}});
+    let created = req(&mut d,"mark","POST","/api/admin/services",json!({"slug":"empty-rows","name":"Empty rows","category":"Testing","department":"Customer Care","module":"generic"})).await;
+    let base = format!("/api/admin/services/{}/versions/{}", created["id"], created["version_id"]);
+    req(&mut d, "mark", "PUT", &base, def).await;
+    let preview = async |d: &mut Driver, answers: Value| {
+        req(d, "mark", "POST", &format!("{base}/preview-answers"), json!({"answers":answers})).await
+    };
+    let r = preview(&mut d, json!({"contacts":[{}, {"name":" ","ok":false}]})).await;
+    assert_eq!(r["fields"]["contacts"], "Add at least one row.");
+    let r = preview(&mut d, json!({"contacts":[{}, {"name":"Ann"}]})).await;
+    assert_eq!(r["fields"]["contacts"], "Add at least 2 rows.");
+    let r = preview(&mut d, json!({"contacts":[{"name":"Ann"}, {}, {"email":"not-an-email"}]})).await;
+    assert!(r["fields"].get("contacts.2.email").is_some(), "{}", r["fields"]);
+    assert!(r["fields"].get("contacts.1.email").is_none());
+    req(&mut d, "mark", "POST", &format!("{base}/publish"), json!({})).await;
+    let (c, _) = d
+        .submit("alexey", "empty-rows", json!({"contacts":[{"name":"Ann"}, {"ok":false}, {"name":"Bo"}]}), None)
+        .await
+        .unwrap();
+    assert_eq!(d.detail("olga", c).await.unwrap()["answers"]["contacts"], json!([{"name":"Ann"}, {"name":"Bo"}]));
 }

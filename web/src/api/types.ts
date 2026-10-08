@@ -296,6 +296,9 @@ export type AnswerValue =
 /** Answers keyed by `FieldDef.key`. Hidden fields are dropped before submit. */
 export type Answers = Record<string, AnswerValue>
 
+/** Labels of the approvals named by `decision_ref` answers, keyed by decision id (case detail `decision_refs`). */
+export type DecisionRefLabels = Record<string, { approval_type: string; decision_type: string; case_number: string | null }>
+
 export interface DocumentRequirement {
   key: string
   label: string
@@ -305,6 +308,10 @@ export interface DocumentRequirement {
   public_candidate: boolean
   /** Shown with the upload slot and to staff reviewing the document. */
   help?: string
+  /** Same rule as a field `show_if`: while it does not match the answers the document is hidden and not required. */
+  show_if?: ShowIf
+  /** Staff document list only: false when `show_if` does not match this case's answers. */
+  applicable?: boolean
 }
 
 export type StepKind = 'review' | 'payment' | 'decision' | 'task' | 'module' | 'complete'

@@ -181,6 +181,10 @@ pub struct DocumentRequirement {
     pub public_candidate: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub help: Option<String>,
+    /// Same semantics as a field `show_if`: when the condition does not match the answers the document is
+    /// hidden from the applicant and never required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_if: Option<ShowIf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

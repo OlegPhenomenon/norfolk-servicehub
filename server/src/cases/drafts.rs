@@ -124,11 +124,75 @@ async fn create(
     tx.commit().await?;
     Ok(Json(case))
 }
+/// Where a draft's pinned service version stands. Publishing a version (staff, or a catalogue upgrade) retires
+/// the previous one; a draft started on it moves to the current version before it is saved or submitted, so
+/// no request is ever submitted on a retired version. Submitted cases keep their version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pinned {
+    /// The draft is on the published version.
+    Current,
+    /// The draft's version (number `from`) was retired; `id`/`version` is the published version of the service.
+    Replaced { from: i64, id: i64, version: i64 },
+    /// The service has no published version: the draft is kept but cannot be submitted.
+    Unavailable,
+}
+pub async fn pinned(conn: &mut SqliteConnection, case: &CaseRow) -> AppResult<Pinned> {
+    let (status, from): (String, i64) = sqlx::query_as("SELECT status,version FROM service_versions WHERE id=?")
+        .bind(case.service_version_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    if status == "published" {
+        return Ok(Pinned::Current);
+    }
+    let current: Option<(i64, i64)> =
+        sqlx::query_as("SELECT id,version FROM service_versions WHERE service_id=? AND status='published'")
+            .bind(case.service_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    Ok(current.map_or(Pinned::Unavailable, |(id, version)| Pinned::Replaced { from, id, version }))
+}
+/// Moves a draft off a retired version onto the current published version of its service (inside the caller's
+/// write transaction) and tells the applicant to review the answers. Only drafts are ever rebound.
+pub async fn rebind(tx: &mut SqliteConnection, actor: &Actor, case: &CaseRow) -> AppResult<Pinned> {
+    if case.status != "draft" {
+        return Ok(Pinned::Current);
+    }
+    let pinned = pinned(tx, case).await?;
+    if let Pinned::Replaced { from, id, version } = pinned {
+        sqlx::query("UPDATE cases SET service_version_id=?,updated_at=? WHERE id=? AND status='draft'")
+            .bind(id)
+            .bind(time::now_str())
+            .bind(case.id)
+            .execute(&mut *tx)
+            .await?;
+        record(
+            tx,
+            actor,
+            case.id,
+            "draft.version_updated",
+            Visibility::Applicant,
+            "The form was updated to the current version; please review your answers.",
+            json!({"from_version":from,"to_version":version}),
+        )
+        .await?;
+    }
+    Ok(pinned)
+}
+/// Client flags for a draft whose form changed since it was started.
+fn form_update(pinned: Pinned) -> Value {
+    match pinned {
+        Pinned::Replaced { from, version, .. } => {
+            json!({"form_updated":true,"version_changed_from":from,"version":version})
+        }
+        Pinned::Current | Pinned::Unavailable => json!({"form_updated":false}),
+    }
+}
 #[derive(Deserialize)]
 pub struct DraftAnswers {
     pub answers: Value,
 }
-pub async fn save_answers(tx: &mut SqliteConnection, actor: &Actor, id: i64, answers: &Value) -> AppResult<()> {
+/// Saves draft answers as given (validation happens on submission). Returns the rebind outcome.
+pub async fn save_answers(tx: &mut SqliteConnection, actor: &Actor, id: i64, answers: &Value) -> AppResult<Pinned> {
     let case = require_edit(tx, actor, id).await?;
     if case.status != "draft" {
         return Err(AppError::conflict("Only drafts can be edited."));
@@ -136,6 +200,7 @@ pub async fn save_answers(tx: &mut SqliteConnection, actor: &Actor, id: i64, ans
     if !answers.is_object() {
         return Err(AppError::field("answers", "Answers must be an object."));
     }
+    let pinned = rebind(tx, actor, &case).await?;
     sqlx::query("UPDATE case_drafts SET answers_json=?,updated_at=? WHERE case_id=?")
         .bind(answers.to_string())
         .bind(time::now_str())
@@ -144,7 +209,8 @@ pub async fn save_answers(tx: &mut SqliteConnection, actor: &Actor, id: i64, ans
         .await?;
     core::bump_revision(tx, id, None).await?;
     core::reindex_search(tx, id).await?;
-    record(tx, actor, id, "draft.saved", Visibility::Applicant, "Request draft saved.", json!({})).await
+    record(tx, actor, id, "draft.saved", Visibility::Applicant, "Request draft saved.", json!({})).await?;
+    Ok(pinned)
 }
 async fn save(
     State(state): State<AppState>,
@@ -153,10 +219,14 @@ async fn save(
     Json(input): Json<DraftAnswers>,
 ) -> AppResult<Json<Value>> {
     let mut tx = db::write_tx(&state.db).await?;
-    save_answers(&mut tx, &actor, id, &input.answers).await?;
+    let pinned = save_answers(&mut tx, &actor, id, &input.answers).await?;
     tx.commit().await?;
-    Ok(Json(json!({"saved":true})))
+    let mut body = form_update(pinned);
+    body["saved"] = json!(true);
+    Ok(Json(body))
 }
+/// Read-only: a draft on a retired version is shown with the current published definition and flagged
+/// `form_updated`; the next save or the submission moves it onto that version.
 async fn load(State(state): State<AppState>, actor: Actor, Path(id): Path<i64>) -> AppResult<Json<Value>> {
     let mut tx = state.db.acquire().await?;
     let case = require_edit(&mut tx, &actor, id).await?;
@@ -165,8 +235,18 @@ async fn load(State(state): State<AppState>, actor: Actor, Path(id): Path<i64>) 
     }
     let answers: String =
         sqlx::query_scalar("SELECT answers_json FROM case_drafts WHERE case_id=?").bind(id).fetch_one(&mut *tx).await?;
-    let def = definition::load_for_case(&mut tx, &case).await?;
-    Ok(Json(json!({"case":case,"definition":def,"answers":serde_json::from_str::<Value>(&answers)?})))
+    let pinned = pinned(&mut tx, &case).await?;
+    let def = match pinned {
+        Pinned::Replaced { id, .. } => {
+            definition::load_for_case(&mut tx, &CaseRow { service_version_id: id, ..case.clone() }).await?
+        }
+        Pinned::Current | Pinned::Unavailable => definition::load_for_case(&mut tx, &case).await?,
+    };
+    let mut body = form_update(pinned);
+    body["case"] = json!(case);
+    body["definition"] = json!(def);
+    body["answers"] = serde_json::from_str::<Value>(&answers)?;
+    Ok(Json(body))
 }
 async fn remove(State(state): State<AppState>, actor: Actor, Path(id): Path<i64>) -> AppResult<Json<Value>> {
     let mut tx = db::write_tx(&state.db).await?;

@@ -48,6 +48,9 @@ pub struct Exhibition {
     pub terminated_at: Option<String>,
     pub termination_reason: Option<String>,
     pub consideration_summary: Option<String>,
+    /// Manager withdrawal (status `withdrawn`) with its mandatory reason; treated like a termination.
+    pub withdrawn_at: Option<String>,
+    pub withdrawal_reason: Option<String>,
 }
 #[derive(Clone, Serialize, sqlx::FromRow)]
 pub struct Item {
@@ -674,6 +677,8 @@ pub async fn publish(
     tx.commit().await?;
     Ok(Json(json!({"id":id})))
 }
+/// A withdrawal is a takedown: withdrawn exhibitions leave the public register (the reason is in the applicant's
+/// case history), unlike a formal termination, whose notice stays public with its reason.
 fn public(e: &Exhibition, now: chrono::DateTime<chrono::Utc>) -> bool {
     matches!(e.status.as_str(), "open" | "closed")
         && e.opens_at.as_deref().and_then(|s| crate::time::parse(s).ok()).is_some_and(|d| d <= now)
@@ -883,8 +888,10 @@ async fn consideration_summary(
     let mut tx = write_tx(&state.db).await?;
     close_due(&mut tx, &state.now().to_rfc3339()).await?;
     let e = staff(&mut tx, &actor, id).await?;
-    if e.status != "closed" {
-        return Err(AppError::conflict("Record the consideration summary after the comment window has closed."));
+    if !matches!(e.status.as_str(), "closed" | "withdrawn") {
+        return Err(AppError::conflict(
+            "Record the consideration summary after the comment window has closed or the exhibition was withdrawn.",
+        ));
     }
     crate::cases::core::bump_revision(&mut tx, e.case_id, Some(input.expected_revision)).await?;
     let now = state.now().to_rfc3339();
@@ -915,7 +922,8 @@ async fn consideration_summary(
     tx.commit().await?;
     Ok(Json(json!({"id":id,"covered":covered})))
 }
-/// "Exhibition not required for this case", with its mandatory reason (history + visible to the applicant).
+/// "Exhibition not required for this case", with its mandatory reason (history + visible to the applicant). Refused
+/// once any exhibition was prepared: a started procedure ends by closing, formal termination or withdrawal.
 async fn not_required(
     State(state): State<AppState>,
     actor: Actor,
@@ -929,13 +937,13 @@ async fn not_required(
         return Err(AppError::conflict("Only an open building request has a public exhibition stage."));
     }
     close_due(&mut tx, &state.now().to_rfc3339()).await?;
-    let open: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM exhibitions WHERE case_id=? AND status='open')")
+    let any: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM exhibitions WHERE case_id=?)")
         .bind(case_id)
         .fetch_one(&mut *tx)
         .await?;
-    if open {
+    if any {
         return Err(AppError::conflict(
-            "A public exhibition is open on this request. Formally terminate it with a reason instead.",
+            "A public exhibition has already been prepared for this request. Publish it and let it close, formally terminate it, or have a manager withdraw it with a reason; then record the consideration of its comments.",
         ));
     }
     crate::cases::core::bump_revision(&mut tx, case_id, Some(input.expected_revision)).await?;
@@ -989,19 +997,24 @@ pub async fn case_block(tx: &mut SqliteConnection, case_id: i64) -> AppResult<Op
         format!("{pending} public submission(s) still need a recorded consideration outcome (per comment or a consideration summary).")
     }))
 }
-/// Guard of the exhibition step: closed (or formally terminated) exhibition with every comment considered, or
-/// a recorded "not required" decision.
+/// Guard of the exhibition step: closed, formally terminated or withdrawn exhibition with every comment considered,
+/// or a recorded "not required" decision.
 pub async fn step_block(tx: &mut SqliteConnection, case_id: i64) -> AppResult<Option<String>> {
     if let Some(block) = case_block(tx, case_id).await? {
         return Ok(Some(block));
     }
-    let handled: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM exhibitions WHERE case_id=? AND status='closed') OR EXISTS(SELECT 1 FROM exhibition_not_required WHERE case_id=?)")
+    let (handled, any): (bool, bool) = sqlx::query_as("SELECT EXISTS(SELECT 1 FROM exhibitions WHERE case_id=? AND status IN ('closed','withdrawn')) OR EXISTS(SELECT 1 FROM exhibition_not_required WHERE case_id=?),EXISTS(SELECT 1 FROM exhibitions WHERE case_id=?)")
+        .bind(case_id)
         .bind(case_id)
         .bind(case_id)
         .fetch_one(&mut *tx)
         .await?;
     Ok((!handled).then(|| {
-        "Publish the public exhibition and let it close, or record that exhibition is not required for this request with the reason.".into()
+        if any {
+            "Publish the prepared public exhibition and let it close (or formally terminate it), or have a manager withdraw it with a reason.".into()
+        } else {
+            "Publish the public exhibition and let it close, or record that exhibition is not required for this request with the reason.".into()
+        }
     }))
 }
 /// Legacy definitions marked the exhibition step optional: a skip is only allowed when nothing is open or
@@ -1015,14 +1028,22 @@ pub async fn on_skip(
     if let Some(block) = case_block(tx, case_id).await? {
         return Ok(Some(block));
     }
-    let closed: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM exhibitions WHERE case_id=? AND status='closed')")
-            .bind(case_id)
-            .fetch_one(&mut *tx)
-            .await?;
-    if !closed {
-        record_not_required(tx, actor, case_id, reason, &crate::time::now_str()).await?;
+    let (finished, any): (bool, bool) = sqlx::query_as(
+        "SELECT EXISTS(SELECT 1 FROM exhibitions WHERE case_id=? AND status IN ('closed','withdrawn')),EXISTS(SELECT 1 FROM exhibitions WHERE case_id=?)",
+    )
+    .bind(case_id)
+    .bind(case_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if finished {
+        return Ok(None);
     }
+    if any {
+        return Ok(Some(
+            "A public exhibition has been prepared for this request. Publish it and let it close, or have a manager withdraw it with a reason.".into(),
+        ));
+    }
+    record_not_required(tx, actor, case_id, reason, &crate::time::now_str()).await?;
     Ok(None)
 }
 pub fn display_status(e: &Exhibition) -> &str {
@@ -1043,7 +1064,7 @@ pub async fn case_view(tx: &mut SqliteConnection, case_id: i64) -> AppResult<Val
         .bind(e.id)
         .fetch_one(&mut *tx)
         .await?;
-        out.push(json!({"id":e.id,"title":e.title,"status":display_status(e),"opens_at":e.opens_at,"closes_at":e.closes_at,"terminated_at":e.terminated_at,"termination_reason":e.termination_reason,"consideration_summary":e.consideration_summary,"submissions":total,"pending_submissions":pending}));
+        out.push(json!({"id":e.id,"title":e.title,"status":display_status(e),"opens_at":e.opens_at,"closes_at":e.closes_at,"terminated_at":e.terminated_at,"termination_reason":e.termination_reason,"withdrawn_at":e.withdrawn_at,"withdrawal_reason":e.withdrawal_reason,"consideration_summary":e.consideration_summary,"submissions":total,"pending_submissions":pending}));
     }
     let not_required: Option<(String, String, Option<String>)> = sqlx::query_as("SELECT r.reason,r.decided_at,u.display_name FROM exhibition_not_required r LEFT JOIN users u ON u.id=r.decided_by WHERE r.case_id=? ORDER BY r.id DESC LIMIT 1")
         .bind(case_id)
@@ -1072,20 +1093,33 @@ async fn redacted_preview(
     let (copy, name) = redacted(&bytes, &row.mime, &rects).await?;
     render_bytes(&copy, if name.ends_with(".pdf") { "application/pdf" } else { "image/png" }, page).await
 }
+/// Manager withdrawal of a published exhibition (also one whose window has not opened yet), with a mandatory reason.
+/// Every public copy is removed; like a formal termination, comments already received still need consideration.
 async fn withdraw(
     State(state): State<AppState>,
     actor: Actor,
     Path(id): Path<i64>,
-    Json(input): Json<Revision>,
+    Json(input): Json<ReasonInput>,
 ) -> AppResult<Json<Value>> {
+    super::text("reason", &input.reason, 5000)?;
     let mut tx = write_tx(&state.db).await?;
+    close_due(&mut tx, &state.now().to_rfc3339()).await?;
     let e = load(&mut tx, id).await?;
     super::manage(&mut tx, &actor, e.case_id, &[Role::Manager]).await?;
     crate::cases::core::bump_revision(&mut tx, e.case_id, Some(input.expected_revision)).await?;
     if !matches!(e.status.as_str(), "open" | "closed") {
         return Err(AppError::conflict("Only a published exhibition can be withdrawn."));
     }
-    sqlx::query("UPDATE exhibitions SET status='withdrawn' WHERE id=?").bind(id).execute(&mut *tx).await?;
+    let reason = input.reason.trim();
+    sqlx::query(
+        "UPDATE exhibitions SET status='withdrawn',withdrawn_at=?,withdrawn_by=?,withdrawal_reason=? WHERE id=?",
+    )
+    .bind(state.now().to_rfc3339())
+    .bind(actor.user_id)
+    .bind(reason)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query("UPDATE exhibition_items SET published_blob_id=NULL WHERE exhibition_id=?")
         .bind(id)
         .execute(&mut *tx)
@@ -1096,7 +1130,7 @@ async fn withdraw(
         e.case_id,
         "documents.exhibition_withdrawn",
         Visibility::Applicant,
-        "A manager withdrew this exhibition and removed every public copy.",
+        &format!("A manager withdrew the public exhibition and removed every public copy. Reason: {reason}"),
     )
     .await?;
     tx.commit().await?;

@@ -150,6 +150,11 @@ pub async fn validate_for_module(
         if d.key.is_empty() || !documents.insert(&d.key) {
             issue(format!("documents.{i}.key"), "Document keys must be non-empty and unique.");
         }
+        if let Some(c) = &d.show_if
+            && !fields.contains(&c.field)
+        {
+            issue(format!("documents.{i}.show_if"), "Choose a field from this form.");
+        }
     }
     let steps = &def.workflow.steps;
     if steps.is_empty() {
@@ -195,12 +200,35 @@ pub async fn validate_for_module(
             );
         }
         // A building project issues only its DA/BA, a modification only modification approvals and a follow-up
-        // notice only the permission to continue; any other type could never be prepared for the role.
+        // notice only the permission to continue; any other type could never be prepared for the role. Without a
+        // role nothing links the request to the approvals it modifies, so a modification approval is unusable.
         if module == "building"
-            && def.building_role.is_some()
             && s.decision_types.iter().any(|d| !crate::documents::building::role_permits(def.building_role, d))
         {
-            issue(format!("{p}.decision_types"), "This decision type does not match the service's building role.");
+            issue(
+                format!("{p}.decision_types"),
+                if def.building_role.is_none() {
+                    "A modification approval needs the building role 'modification'."
+                } else {
+                    "This decision type does not match the service's building role."
+                },
+            );
+        }
+        // The fee assessment is the building approval route's own checkpoint: only projects and modifications
+        // have the fee rules, and the assessment is invoiced by a later payment step (an earlier payment step would
+        // try to invoice before any assessment exists).
+        if s.handler.as_deref() == Some(crate::finance::building_fees::HANDLER) {
+            if !matches!(def.building_role, Some(BuildingRole::Project | BuildingRole::Modification)) {
+                issue(
+                    format!("{p}.handler"),
+                    "Fee assessment is only available to a building project or modification service.",
+                );
+            }
+            if !steps[i + 1..].iter().any(|t| t.kind == StepKind::Payment)
+                || steps[..i].iter().any(|t| t.kind == StepKind::Payment)
+            {
+                issue(format!("{p}.handler"), "Fee assessment must come before the payment step that invoices it.");
+            }
         }
     }
     let trigger_valid = |t: &str| {
@@ -350,7 +378,11 @@ pub async fn validate_answers(
             continue;
         }
         let v = input.get(&f.key).unwrap_or(&Value::Null);
-        let empty = blank(v);
+        let v = &canonical(f, v);
+        // A group whose rows are all empty (the form's "Add row" starts with one) has no answer.
+        let empty = blank(v)
+            || v.as_array()
+                .is_some_and(|rows| f.field_type == FieldType::Group && !rows.iter().any(|r| filled_row(f, r)));
         if f.field_type == FieldType::Group {
             if empty {
                 if f.required {
@@ -383,6 +415,29 @@ pub async fn validate_answers(
     }
     Ok(Value::Object(cleaned))
 }
+/// Canonical answer shape before validation: a multiselect keeps each value once (in first-chosen order), so a
+/// repeated choice never changes rules such as "lapse date only".
+fn canonical(f: &FieldDef, v: &Value) -> Value {
+    match (f.field_type, v.as_array()) {
+        (FieldType::Multiselect, Some(values)) => {
+            let mut unique: Vec<Value> = Vec::with_capacity(values.len());
+            for value in values {
+                if !unique.contains(value) {
+                    unique.push(value.clone());
+                }
+            }
+            Value::Array(unique)
+        }
+        _ => v.clone(),
+    }
+}
+/// A group row with at least one filled-in cell (an unticked checkbox is not filled in). Rows that are not objects
+/// count as filled so they are reported as invalid.
+fn filled_row(f: &FieldDef, row: &Value) -> bool {
+    row.as_object().is_none_or(|cells| {
+        f.columns.iter().any(|c| cells.get(&c.key).is_some_and(|cell| !blank(cell) && cell != &Value::Bool(false)))
+    })
+}
 /// Validates a `group` answer row by row and returns the rows reduced to known, non-empty columns. Row problems
 /// are reported on the field and on `<field>.<row>.<column>` so the form can mark the exact cell.
 fn group_answer(f: &FieldDef, v: &Value, errors: &mut BTreeMap<String, String>) -> Option<Value> {
@@ -390,7 +445,8 @@ fn group_answer(f: &FieldDef, v: &Value, errors: &mut BTreeMap<String, String>) 
         errors.insert(f.key.clone(), "Enter a valid value for this field.".into());
         return None;
     };
-    let count = u32::try_from(rows.len()).unwrap_or(u32::MAX);
+    // Empty rows are ignored (not counted, not validated, not stored); errors keep the row's position in the form.
+    let count = u32::try_from(rows.iter().filter(|r| filled_row(f, r)).count()).unwrap_or(u32::MAX);
     let mut field_error = None;
     if let Some(min) = f.min_items.filter(|m| count < *m) {
         field_error = Some(format!("Add at least {min} rows."));
@@ -400,7 +456,7 @@ fn group_answer(f: &FieldDef, v: &Value, errors: &mut BTreeMap<String, String>) 
     }
     let mut cell_errors = false;
     let mut cleaned = Vec::with_capacity(rows.len());
-    for (i, row) in rows.iter().enumerate() {
+    for (i, row) in rows.iter().enumerate().filter(|(_, r)| filled_row(f, r)) {
         let Some(row) = row.as_object() else {
             errors.insert(format!("{}.{i}", f.key), "Enter a valid row.".into());
             cell_errors = true;

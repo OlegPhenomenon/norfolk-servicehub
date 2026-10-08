@@ -114,7 +114,7 @@ fn cost_cents(v: &Value) -> AppResult<Option<i64>> {
 /// Modification types from the B-slice multiselect, or the legacy single select of older snapshots.
 fn answer_types(a: &Value) -> Vec<String> {
     if let Some(list) = a.get("modification_types").and_then(Value::as_array) {
-        return list.iter().filter_map(Value::as_str).map(String::from).collect();
+        return unique(list.iter().filter_map(Value::as_str).map(String::from).collect());
     }
     match a.get("modification_type").and_then(Value::as_str) {
         Some("Lapse date") => vec!["lapse_date".into()],
@@ -123,6 +123,20 @@ fn answer_types(a: &Value) -> Vec<String> {
         Some("Other") => vec!["other".into()],
         _ => vec![],
     }
+}
+/// Each modification type once, in the order first given (a repeated tick is the same modification).
+fn unique(types: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(types.len());
+    for t in types {
+        if !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    out
+}
+/// The basic $250 modification: the lapse date is the only thing that changes.
+fn lapse_only(types: &[String]) -> bool {
+    !types.is_empty() && types.iter().all(|t| t == "lapse_date")
 }
 
 struct Proposal {
@@ -195,7 +209,7 @@ async fn propose(
     types: &[String],
 ) -> AppResult<Proposal> {
     let date = pricing_date(case)?;
-    if kind == Some(BuildingRole::Modification) && types.len() == 1 && types[0] == "lapse_date" {
+    if kind == Some(BuildingRole::Modification) && lapse_only(types) {
         let mut line = api::quote(tx, BASIC_ITEM, 1000, None, date).await?;
         line.calc = json!({"rule":"basic_modification","modification_types":types});
         let amount = line.amount_cents;
@@ -331,7 +345,7 @@ pub async fn record(
         Some(c) => Some(c),
         None => applied_cost,
     };
-    let types = input.modification_types.clone().unwrap_or_else(|| applied_types.clone());
+    let types = input.modification_types.clone().map(unique).unwrap_or_else(|| applied_types.clone());
     if types.iter().any(|t| !MODIFICATION_TYPES.contains(&t.as_str())) {
         return Err(AppError::field("modification_types", "Choose recorded modification types."));
     }

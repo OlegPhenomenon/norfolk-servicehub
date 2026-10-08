@@ -101,7 +101,6 @@ function ExhibitionCard({ caseId, data }: { caseId: number; data: BuildingRoute 
   const [reason, setReason] = useState('')
   const m = useAction(`/api/cases/${caseId}/exhibition-not-required`, () => setReason(''))
   const errors = isApiError(m.error) ? m.error.fields : {}
-  const open = e.exhibitions.some(x => x.status === 'open')
   return <Card title="Public exhibition" description="Either the proposal is exhibited and every public submission is considered, or staff record that exhibition is not required, with the reason.">
     {e.block && <Alert tone="warning" title="Exhibition stage not finished">{e.block}</Alert>}
     {e.not_required && <Alert tone="info" title="Exhibition not required for this request">{e.not_required.reason} — recorded{e.not_required.decided_by ? ` by ${e.not_required.decided_by}` : ''} <DateTime value={e.not_required.decided_at} />.</Alert>}
@@ -109,13 +108,14 @@ function ExhibitionCard({ caseId, data }: { caseId: number; data: BuildingRoute 
       <p className="flex flex-wrap items-center gap-2 font-semibold">{x.title} <StatusPill status={x.status} /></p>
       {x.closes_at && <p>Comments close <DateTime value={x.closes_at} /></p>}
       {x.termination_reason && <p>Terminated early: {x.termination_reason}</p>}
+      {x.withdrawal_reason && <p>Withdrawn by a manager: {x.withdrawal_reason}{x.withdrawn_at && <> (<DateTime value={x.withdrawn_at} />)</>}</p>}
       <p>{x.submissions} public submission(s), {x.pending_submissions} awaiting a consideration outcome.</p>
       {x.consideration_summary && <p>Consideration summary: {x.consideration_summary}</p>}
       {staff && <Link className="link inline-block py-2" to={`/staff/exhibitions/${x.id}`}>Open exhibition and submissions</Link>}
     </li>)}</ul>}
     {data.can_exhibit && staff && <div className="mt-4 space-y-3">
       <Link className="link inline-block" to="/staff/exhibitions">Prepare a public exhibition</Link>
-      {!open && !e.not_required && <form className="space-y-3" onSubmit={ev => { ev.preventDefault(); m.mutate(() => ({ reason, expected_revision: data.revision })) }} noValidate>
+      {!e.exhibitions.length && !e.not_required && <form className="space-y-3" onSubmit={ev => { ev.preventDefault(); m.mutate(() => ({ reason, expected_revision: data.revision })) }} noValidate>
         <Field label="Reason exhibition is not required" required error={errors.reason}><Textarea value={reason} onChange={ev => setReason(ev.target.value)} /></Field>
         {m.error && <ErrorAlert error={m.error} />}
         <Button type="submit" variant="secondary" loading={m.isPending}>Record exhibition not required</Button>

@@ -28,12 +28,26 @@ pub async fn submit_case(tx: &mut SqliteConnection, state: &AppState, actor: &Ac
         }
         return Err(AppError::conflict("This draft is no longer available."));
     }
+    // Never submit on a retired version: move the draft to the current one; its answers are re-validated below.
+    let case = match super::drafts::rebind(tx, actor, &case).await? {
+        super::drafts::Pinned::Current => case,
+        super::drafts::Pinned::Replaced { .. } => core::load_case(tx, id).await?,
+        super::drafts::Pinned::Unavailable => {
+            return Err(AppError::conflict(
+                "This service is not accepting requests at the moment. Your draft has been kept.",
+            ));
+        }
+    };
     let def = definition::load_for_case(tx, &case).await?;
     let draft: String =
         sqlx::query_scalar("SELECT answers_json FROM case_drafts WHERE case_id=?").bind(id).fetch_one(&mut *tx).await?;
     let answers = validation::validate_answers(tx, &case.module, &def, &serde_json::from_str::<Value>(&draft)?).await?;
     let mut missing = vec![];
-    for d in def.documents.iter().filter(|d| d.required) {
+    for d in def
+        .documents
+        .iter()
+        .filter(|d| d.required && d.show_if.as_ref().is_none_or(|s| s.matches(answers.get(&s.field))))
+    {
         let exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM documents d JOIN document_versions v ON v.document_id=d.id JOIN blobs b ON b.id=v.blob_id WHERE d.case_id=? AND d.requirement_key=? AND d.disposed_at IS NULL AND b.scan_status IN ('clean','not_scanned') AND v.version=(SELECT MAX(v2.version) FROM document_versions v2 WHERE v2.document_id=d.id))").bind(id).bind(&d.key).fetch_one(&mut *tx).await?;
         if !exists {
             missing.push((format!("documents.{}", d.key), format!("Upload {} before submitting.", d.label)));

@@ -361,3 +361,129 @@ async fn catalogue_upgrade_versions_seeded_services_and_keeps_staff_edits_and_ol
     servicehub::bootstrap::upgrade_catalogue(&d.state).await.unwrap();
     assert_eq!(scalar(&d, "SELECT COUNT(*) FROM service_versions").await, versions);
 }
+
+/// A development application draft with `answers` saved and every required (shown) document uploaded.
+async fn da_draft(d: &mut Driver, org: i64, def: &Value, answers: &Value) -> i64 {
+    let c = d
+        .req("ben", "POST", "/api/services/development-application/drafts", json!({"applicant_org_id":org}))
+        .await
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    d.req("ben", "PUT", &format!("/api/cases/{c}/draft"), json!({"answers":answers})).await.unwrap();
+    let pdf = servicehub::pdf::simple_document("Fictional drawing A-101", &[], &[]);
+    for doc in def["documents"].as_array().unwrap() {
+        let shown = doc.get("show_if").is_none_or(|cond| match &answers[cond["field"].as_str().unwrap()] {
+            Value::Array(selected) => selected.contains(&cond["equals"]),
+            answer => answer == &cond["equals"],
+        });
+        if doc["required"] == true && shown {
+            let fields = [
+                ("requirement_key", doc["key"].as_str().unwrap().to_string()),
+                ("title", doc["label"].as_str().unwrap().to_string()),
+            ];
+            d.upload("ben", &format!("/api/cases/{c}/documents"), &fields, &pdf).await.unwrap();
+        }
+    }
+    c
+}
+/// A deploy: the published version is retired and `definition` is published as the next version.
+async fn publish_next(d: &Driver, service: i64, definition: &Value) -> i64 {
+    sqlx::query("UPDATE service_versions SET status='retired' WHERE service_id=? AND status='published'")
+        .bind(service)
+        .execute(&d.state.db)
+        .await
+        .unwrap();
+    sqlx::query_scalar("INSERT INTO service_versions(service_id,version,status,definition_json,created_at,published_at) SELECT ?,MAX(version)+1,'published',?,'2026-10-08T00:00:00Z','2026-10-08T00:00:00Z' FROM service_versions WHERE service_id=? RETURNING id")
+        .bind(service)
+        .bind(definition.to_string())
+        .bind(service)
+        .fetch_one(&d.state.db)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn draft_on_retired_version_is_rebound_before_submission() {
+    let (mut d, _dir) = support::fixture().await;
+    let org = ben_org(&d).await;
+    let (service, old_version, old_number, current): (i64, i64, i64, String) = sqlx::query_as("SELECT s.id,v.id,v.version,v.definition_json FROM services s JOIN service_versions v ON v.service_id=s.id AND v.status='published' WHERE s.slug='development-application'")
+        .fetch_one(&d.state.db)
+        .await
+        .unwrap();
+    let (def, answers) = d.answers("ben", "development-application").await.unwrap();
+    let (submitted, _) = d.submit("ben", "development-application", json!({}), Some(org)).await.unwrap();
+    let draft = da_draft(&mut d, org, &def, &answers).await;
+    // A deploy publishes a version with a new required question.
+    let mut next: Value = serde_json::from_str(&current).unwrap();
+    next["fields"].as_array_mut().unwrap().push(
+        json!({"key":"upgrade_check","type":"text","label":"Fictional question added by the upgrade","required":true}),
+    );
+    let new_version = publish_next(&d, service, &next).await;
+    let new_number = scalar(&d, &format!("SELECT version FROM service_versions WHERE id={new_version}")).await;
+    // Reading the draft reports the update and shows the current form; nothing is written.
+    let loaded = d.req("ben", "GET", &format!("/api/cases/{draft}/draft"), json!({})).await.unwrap();
+    assert_eq!(loaded["form_updated"], true);
+    assert_eq!(loaded["version_changed_from"], old_number);
+    assert!(loaded["definition"]["fields"].as_array().unwrap().iter().any(|f| f["key"] == "upgrade_check"));
+    assert_eq!(scalar(&d, &format!("SELECT service_version_id FROM cases WHERE id={draft}")).await, old_version);
+    // Saving moves the draft onto the published version and tells the applicant.
+    let saved = d.req("ben", "PUT", &format!("/api/cases/{draft}/draft"), json!({"answers":answers})).await.unwrap();
+    assert_eq!(saved["saved"], true);
+    assert_eq!(saved["form_updated"], true);
+    assert_eq!(saved["version_changed_from"], old_number);
+    assert_eq!(saved["version"], new_number);
+    assert_eq!(scalar(&d, &format!("SELECT service_version_id FROM cases WHERE id={draft}")).await, new_version);
+    assert_eq!(scalar(&d, &format!("SELECT COUNT(*) FROM case_events WHERE case_id={draft} AND kind='draft.version_updated' AND visibility='applicant'")).await, 1);
+    assert_eq!(
+        d.req("ben", "GET", &format!("/api/cases/{draft}/draft"), json!({})).await.unwrap()["form_updated"],
+        false
+    );
+    // The old answers are re-validated against the new definition.
+    let err = d.expect("ben", "POST", &format!("/api/cases/{draft}/submit"), json!({}), 422).await.unwrap();
+    assert!(err["error"]["fields"].get("upgrade_check").is_some(), "{err}");
+    assert_eq!(scalar(&d, &format!("SELECT COUNT(*) FROM submissions WHERE case_id={draft}")).await, 0);
+    let mut fixed = answers.clone();
+    fixed["upgrade_check"] = json!("Fictional answer");
+    d.req("ben", "PUT", &format!("/api/cases/{draft}/draft"), json!({"answers":fixed})).await.unwrap();
+    d.req("ben", "POST", &format!("/api/cases/{draft}/submit"), json!({})).await.unwrap();
+    assert_eq!(scalar(&d, &format!("SELECT service_version_id FROM cases WHERE id={draft}")).await, new_version);
+    let (frozen_version, snapshot): (i64, String) =
+        sqlx::query_as("SELECT service_version_id,definition_snapshot_json FROM submissions WHERE case_id=?")
+            .bind(draft)
+            .fetch_one(&d.state.db)
+            .await
+            .unwrap();
+    assert_eq!(frozen_version, new_version);
+    assert_eq!(serde_json::from_str::<Value>(&snapshot).unwrap(), next);
+    // A case submitted before the deploy is never rebound.
+    assert_eq!(scalar(&d, &format!("SELECT service_version_id FROM cases WHERE id={submitted}")).await, old_version);
+    assert_eq!(
+        scalar(&d, &format!("SELECT service_version_id FROM submissions WHERE case_id={submitted}")).await,
+        old_version
+    );
+
+    // A service left without a published version takes no submissions; the draft is kept.
+    let second = da_draft(&mut d, org, &next, &fixed).await;
+    sqlx::query("UPDATE service_versions SET status='retired' WHERE id=?")
+        .bind(new_version)
+        .execute(&d.state.db)
+        .await
+        .unwrap();
+    d.expect("ben", "POST", &format!("/api/cases/{second}/submit"), json!({}), 409).await.unwrap();
+    assert_eq!(scalar(&d, &format!("SELECT status='draft' FROM cases WHERE id={second}")).await, 1);
+    assert_eq!(scalar(&d, &format!("SELECT COUNT(*) FROM submissions WHERE case_id={second}")).await, 0);
+    // Once a version is published again, submitting moves the draft onto it first.
+    let newest = publish_next(&d, service, &next).await;
+    d.req("ben", "POST", &format!("/api/cases/{second}/submit"), json!({})).await.unwrap();
+    assert_eq!(scalar(&d, &format!("SELECT service_version_id FROM cases WHERE id={second}")).await, newest);
+    assert_eq!(scalar(&d, &format!("SELECT service_version_id FROM submissions WHERE case_id={second}")).await, newest);
+    assert_eq!(
+        scalar(
+            &d,
+            &format!("SELECT COUNT(*) FROM case_events WHERE case_id={second} AND kind='draft.version_updated'")
+        )
+        .await,
+        1
+    );
+}

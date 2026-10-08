@@ -185,8 +185,12 @@ fn modify_approval_form(shared: Vec<Value>) -> (Vec<Value>, Vec<Value>) {
             "Section 3: a copy of the Title Search for the subject property.",
         ),
         help(
-            doc("owners_consent", "Signed consent of all landowners", true),
-            "Section 2: every landowner signs to consent to lodging this modification only. If the applicants are the only landowners, upload the signed applicant page.",
+            shown_when(
+                doc("owners_consent", "Signed consent of all landowners", true),
+                "landowners_are_applicants",
+                "no",
+            ),
+            "Section 2: every landowner signs to consent to lodging this modification only. Needed only when some landowners are not applicants.",
         ),
         help(
             doc("modification_plans", "Description of expected impacts, with relevant plans and drawings", true),
@@ -541,7 +545,8 @@ pub async fn seed(tx: &mut SqliteConnection, state: &AppState) -> AppResult<()> 
 /// Installs or upgrades the seeded catalogue. Missing services are created. A published version that still
 /// carries seed provenance and differs from the current seed is retired in favour of a new published version;
 /// a published version edited by staff is never overwritten: the seed definition becomes a draft for review.
-/// Cases keep the version they were created on and their frozen submission snapshot. Idempotent.
+/// Submitted cases keep the version they were created on and their frozen submission snapshot; drafts move to
+/// the new published version on their next save or submission (`cases::drafts::rebind`). Idempotent.
 pub async fn upgrade(tx: &mut SqliteConnection, state: &AppState) -> AppResult<Vec<CatalogueChange>> {
     sqlx::query("INSERT INTO service_synonyms VALUES ('party','hall'),('birthday','hall'),('wedding','hall'),('venue','hall'),('digger','equipment'),('excavator','equipment'),('pothole','road'),('hole','road'),('da','development'),('permit','development'),('pipe','pipeline'),('conduit','pipeline') ON CONFLICT DO NOTHING").execute(&mut *tx).await?;
     let now = time::fmt(state.now());

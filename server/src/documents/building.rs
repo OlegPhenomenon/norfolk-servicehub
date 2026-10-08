@@ -31,8 +31,9 @@ pub fn decision_ids(v: &Value) -> Option<Vec<i64>> {
 pub async fn approval_role(tx: &mut SqliteConnection, case: &CaseRow) -> AppResult<Option<BuildingRole>> {
     Ok(role_of(tx, case).await?.filter(|r| matches!(r, BuildingRole::Project | BuildingRole::Modification)))
 }
-/// The case's building role, read from its frozen definition. Definitions seeded before `building_role`
-/// existed (catalogue versions marked `seed_hash='legacy'` by migration 0803) map their seeded slug.
+/// The case's building role, read from its frozen definition. A definition without `building_role` that
+/// belongs to one of the building services seeded before the field existed (seeded or staff-edited versions
+/// published before the upgrade) keeps the role those services always had, by service slug.
 pub async fn role_of(tx: &mut SqliteConnection, case: &CaseRow) -> AppResult<Option<BuildingRole>> {
     if case.module != "building" {
         return Ok(None);
@@ -48,24 +49,29 @@ async fn role_in(
     if case.module != "building" || def.building_role.is_some() {
         return Ok(def.building_role.filter(|_| case.module == "building"));
     }
-    let legacy: Option<String> = sqlx::query_scalar("SELECT s.slug FROM service_versions v JOIN services s ON s.id=v.service_id WHERE v.id=? AND v.seed_hash='legacy'")
-        .bind(case.service_version_id).fetch_optional(&mut *tx).await?;
-    Ok(legacy.and_then(|slug| match slug.as_str() {
+    let slug: String =
+        sqlx::query_scalar("SELECT slug FROM services WHERE id=?").bind(case.service_id).fetch_one(&mut *tx).await?;
+    Ok(legacy_role(&slug))
+}
+/// Role of the building services that existed before `building_role` (their slugs were the role).
+fn legacy_role(slug: &str) -> Option<BuildingRole> {
+    match slug {
         "development-application" => Some(BuildingRole::Project),
         "modify-approval" => Some(BuildingRole::Modification),
         "building-commencement-notice" | "building-completion-notice" => Some(BuildingRole::FollowUp),
         _ => None,
-    }))
+    }
 }
 /// Decision types a building role may receive: a project its development and/or building approval (its
 /// confirmed scope decides which), a modification only a modification approval, and a follow-up notice only
-/// the written permission to continue (`service_response`).
+/// the written permission to continue (`service_response`). Without a role nothing links the request to the
+/// approvals it would modify, so a modification approval is never possible.
 pub fn role_permits(role: Option<BuildingRole>, decision_type: &str) -> bool {
     match role {
         Some(BuildingRole::Modification) => decision_type == "modification_approval",
         Some(BuildingRole::Project) => APPROVAL_TYPES.contains(&decision_type),
         Some(BuildingRole::FollowUp) => decision_type == "service_response",
-        None => true,
+        None => decision_type != "modification_approval",
     }
 }
 pub async fn on_submit(
@@ -358,6 +364,22 @@ pub(crate) async fn root_type(tx: &mut SqliteConnection, mut id: i64) -> AppResu
         }
     }
     Err(AppError::internal("Decision supersedes chain is too long."))
+}
+/// Readable labels of the approvals a submitted request names in its `original_approval` answer (validated and
+/// recorded at submission), keyed by decision id: approval type, the decision's own type and its case number.
+pub async fn original_labels(tx: &mut SqliteConnection, case_id: i64) -> AppResult<Value> {
+    let rows: Vec<(i64, String, Option<String>)> = sqlx::query_as("SELECT d.id,d.decision_type,c.number FROM building_original_approvals o JOIN decisions d ON d.id=o.decision_id JOIN cases c ON c.id=d.case_id WHERE o.case_id=? ORDER BY d.id")
+        .bind(case_id)
+        .fetch_all(&mut *tx)
+        .await?;
+    let mut out = serde_json::Map::new();
+    for (id, decision_type, number) in rows {
+        out.insert(
+            id.to_string(),
+            json!({"approval_type":root_type(tx,id).await?,"decision_type":decision_type,"case_number":number}),
+        );
+    }
+    Ok(Value::Object(out))
 }
 /// One chain per original approval: the root DA/BA and every issued modification that names it (directly or
 /// through an earlier modification). The latest approved version is current; earlier ones are superseded.

@@ -505,3 +505,277 @@ async fn builder_edits_cannot_remove_fee_payment_exhibition_or_decision_gates() 
         assert!(wrong_type.iter().any(|(p, _)| p.ends_with(".decision_types")), "{base_slug}: {wrong_type:?}");
     }
 }
+
+/// N-03: once an exhibition was prepared (draft, open, closed, withdrawn or terminated) it cannot be replaced by a
+/// "not required" record; a manager withdrawal needs a reason and, like a termination, every received comment still
+/// needs a consideration outcome before the exhibition step or a decision issue passes.
+#[tokio::test]
+async fn withdrawn_or_draft_exhibition_cannot_be_replaced_by_not_required() {
+    let (mut d, _dir) = support::fixture().await;
+    let now = d.state.now();
+    // Case A at the exhibition step: a draft blocks "not required" and the step.
+    let a = submit_da(&mut d, &["development_approval"], 60_000).await;
+    scenarios::assess_fee(&mut d, a).await.unwrap();
+    d.pay("alexey", a, false).await.unwrap();
+    scenarios::confirm_scope(&mut d, a, json!({"approvals":["development_approval"]})).await.unwrap();
+    d.action("priya", a, "advance").await.unwrap();
+    let source = d.req("priya", "GET", &format!("/api/cases/{a}/documents"), json!({})).await.unwrap()[0]["versions"]
+        [0]["id"]
+        .as_i64()
+        .unwrap();
+    let r = revision(&mut d, "priya", a).await;
+    let draft = d
+        .req(
+            "priya",
+            "POST",
+            "/api/exhibitions",
+            json!({"case_id":a,"title":"Fictional draft notice","summary":"Fictional summary.","opens_at":(now - Duration::hours(1)).to_rfc3339(),"closes_at":(now + Duration::days(14)).to_rfc3339(),"expected_revision":r}),
+        )
+        .await
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    let not_required = |r: i64| json!({"reason":"Fictional: not needed.","expected_revision":r});
+    let r = revision(&mut d, "priya", a).await;
+    let refused = d
+        .expect("priya", "POST", &format!("/api/cases/{a}/exhibition-not-required"), not_required(r), 409)
+        .await
+        .unwrap();
+    assert!(refused["error"]["message"].as_str().unwrap().contains("already been prepared"), "{refused}");
+    d.expect("priya", "POST", &format!("/api/cases/{a}/actions/advance"), json!({"expected_revision":r}), 409)
+        .await
+        .unwrap();
+    // Publish the draft (second staff member) and receive a comment.
+    let r = revision(&mut d, "priya", a).await;
+    d.req(
+        "priya",
+        "POST",
+        &format!("/api/exhibitions/{draft}/items"),
+        json!({"source_document_version_id":source,"title":"Redacted plan","redactions":[{"page":1,"x":0.05,"y":0.1,"w":0.9,"h":0.35}],"expected_revision":r}),
+    )
+    .await
+    .unwrap();
+    let r = revision(&mut d, "helen", a).await;
+    d.req("helen", "POST", &format!("/api/exhibitions/{draft}/publish"), json!({"expected_revision":r})).await.unwrap();
+    let comment = scenarios::public_comment(&mut d, draft, "Fictional objection about overlooking.").await.unwrap();
+    let held = prepare(&mut d, a, "development_approval", None).await;
+    // Withdrawal needs a reason and a manager.
+    let r = revision(&mut d, "helen", a).await;
+    let missing = d
+        .expect("helen", "POST", &format!("/api/exhibitions/{draft}/withdraw"), json!({"expected_revision":r}), 422)
+        .await
+        .unwrap();
+    assert!(missing["error"]["fields"]["reason"].is_string(), "{missing}");
+    let withdrawal = json!({"reason":"Fictional: notice showed the wrong address.","expected_revision":r});
+    d.expect("priya", "POST", &format!("/api/exhibitions/{draft}/withdraw"), withdrawal.clone(), 403).await.unwrap();
+    d.req("helen", "POST", &format!("/api/exhibitions/{draft}/withdraw"), withdrawal).await.unwrap();
+    d.expect("stranger", "GET", &format!("/api/public/exhibitions/{draft}"), json!({}), 404).await.unwrap();
+    let route = d.req("priya", "GET", &format!("/api/cases/{a}/building-route"), json!({})).await.unwrap();
+    assert_eq!(route["exhibition"]["exhibitions"][0]["status"], "withdrawn");
+    assert!(route["exhibition"]["exhibitions"][0]["withdrawal_reason"].as_str().unwrap().contains("wrong address"));
+    assert!(
+        d.detail("alexey", a).await.unwrap()["timeline"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["summary"].as_str().unwrap_or_default().contains("wrong address"))
+    );
+    // Not replaceable by "not required"; the unconsidered comment blocks the step and the decision.
+    let r = revision(&mut d, "priya", a).await;
+    d.expect("priya", "POST", &format!("/api/cases/{a}/exhibition-not-required"), not_required(r), 409).await.unwrap();
+    let blocked = d
+        .expect("priya", "POST", &format!("/api/cases/{a}/actions/advance"), json!({"expected_revision":r}), 409)
+        .await
+        .unwrap();
+    assert!(blocked["error"]["message"].as_str().unwrap().contains("consideration"), "{blocked}");
+    issue(&mut d, a, held, 409).await;
+    let r = revision(&mut d, "priya", a).await;
+    d.req(
+        "priya",
+        "POST",
+        &format!("/api/exhibitions/{draft}/submissions/{comment}/consider"),
+        json!({"outcome":"Fictional: address corrected; objection noted.","expected_revision":r}),
+    )
+    .await
+    .unwrap();
+    d.action("priya", a, "advance").await.unwrap();
+    issue(&mut d, a, held, 200).await;
+    assert_eq!(status(&mut d, a).await, "completed");
+
+    // Case B at the decision step: a published exhibition whose window has not opened yet blocks issue; withdrawal
+    // with a reason finishes it (no comments to consider) and the decision can be issued.
+    let b = submit_da(&mut d, &["development_approval"], 60_000).await;
+    to_decision(&mut d, b, json!({"approvals":["development_approval"]})).await;
+    let source = d.req("priya", "GET", &format!("/api/cases/{b}/documents"), json!({})).await.unwrap()[0]["versions"]
+        [0]["id"]
+        .as_i64()
+        .unwrap();
+    let now = d.state.now();
+    let (future, _) =
+        scenarios::publish_exhibition(&mut d, b, source, now + Duration::days(1), now + Duration::days(14))
+            .await
+            .unwrap();
+    let decision = prepare(&mut d, b, "development_approval", None).await;
+    issue(&mut d, b, decision, 409).await;
+    let r = revision(&mut d, "helen", b).await;
+    d.req(
+        "helen",
+        "POST",
+        &format!("/api/exhibitions/{future}/withdraw"),
+        json!({"reason":"Fictional: exhibition published in error.","expected_revision":r}),
+    )
+    .await
+    .unwrap();
+    let r = revision(&mut d, "priya", b).await;
+    d.expect("priya", "POST", &format!("/api/cases/{b}/exhibition-not-required"), not_required(r), 409).await.unwrap();
+    issue(&mut d, b, decision, 200).await;
+    assert_eq!(status(&mut d, b).await, "completed");
+}
+
+/// Validation issues (path, message) of `def` saved as a Builder draft of a new building service.
+async fn builder_issues(d: &mut Driver, slug: &str, def: Value) -> Vec<(String, String)> {
+    let created = d
+        .req(
+            "mark",
+            "POST",
+            "/api/admin/services",
+            json!({"slug":slug,"name":"Role probe","category":"Testing","department":"Planning","module":"building"}),
+        )
+        .await
+        .unwrap();
+    let path = format!("/api/admin/services/{}/versions/{}", created["id"], created["version_id"]);
+    d.req("mark", "PUT", &path, def).await.unwrap();
+    let r = d.req("mark", "POST", &format!("{path}/validate"), json!({})).await.unwrap();
+    r["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| (i["path"].as_str().unwrap().to_owned(), i["message"].as_str().unwrap().to_owned()))
+        .collect()
+}
+
+/// A Builder-made building service without the modification role cannot publish a modification approval (nothing
+/// would link the request to the approvals it modifies), and a fee assessment step is only accepted in a building
+/// project or modification service, before the payment step that invoices it.
+#[tokio::test]
+async fn builder_offers_modification_approval_and_fee_assessment_only_where_they_can_finish() {
+    let (mut d, _dir) = support::fixture().await;
+    let modify =
+        d.req("mark", "GET", "/api/public/services/modify-approval", json!({})).await.unwrap()["definition"].clone();
+    let step = |def: &Value, key: &str| {
+        def["workflow"]["steps"].as_array().unwrap().iter().position(|s| s["key"] == key).unwrap()
+    };
+    // The seeded modification service validates; without its role, the modification approval and the fee step do not.
+    assert_eq!(builder_issues(&mut d, "modify-copy", modify.clone()).await, vec![]);
+    let mut unlinked = modify.clone();
+    unlinked.as_object_mut().unwrap().remove("building_role");
+    let issues = builder_issues(&mut d, "modify-unlinked", unlinked.clone()).await;
+    let decision = format!("workflow.steps.{}.decision_types", step(&unlinked, "decision"));
+    assert!(
+        issues
+            .iter()
+            .any(|(p, m)| p == &decision && m == "A modification approval needs the building role 'modification'."),
+        "{issues:?}"
+    );
+    let fees = format!("workflow.steps.{}.handler", step(&unlinked, "fees"));
+    assert!(
+        issues.iter().any(|(p, m)| p == &fees
+            && m == "Fee assessment is only available to a building project or modification service."),
+        "{issues:?}"
+    );
+    // A role-less building service: no modification approval in the staff decision list either.
+    let mut generic = unlinked.clone();
+    generic["workflow"]["steps"][step(&unlinked, "decision")]["decision_types"] = json!(["service_response"]);
+    generic["workflow"]["steps"].as_array_mut().unwrap().remove(step(&unlinked, "fees"));
+    assert!(!builder_issues(&mut d, "building-generic", generic).await.iter().any(|(p, _)| p.ends_with(".handler")));
+    // Fee assessment after (or with another payment before) the payment step cannot be invoiced.
+    let mut late = modify.clone();
+    let fee_step = late["workflow"]["steps"].as_array_mut().unwrap().remove(step(&modify, "fees"));
+    let payment = step(&late, "payment");
+    late["workflow"]["steps"].as_array_mut().unwrap().insert(payment + 1, fee_step);
+    let issues = builder_issues(&mut d, "modify-late-fee", late.clone()).await;
+    assert!(
+        issues.iter().any(|(p, m)| p == &format!("workflow.steps.{}.handler", payment + 1)
+            && m == "Fee assessment must come before the payment step that invoices it."),
+        "{issues:?}"
+    );
+    let mut no_payment = modify.clone();
+    no_payment["workflow"]["steps"].as_array_mut().unwrap().remove(step(&modify, "payment"));
+    let issues = builder_issues(&mut d, "modify-no-payment", no_payment).await;
+    assert!(issues.iter().any(|(_, m)| m == "Fee assessment must come before the payment step that invoices it."));
+}
+
+/// A repeated "lapse date" tick is one modification type: the request stays a $250 basic modification for the
+/// applicant's answer and for a staff assessment. Staff read the named originals as approval type and case number.
+#[tokio::test]
+async fn repeated_lapse_date_stays_a_basic_modification_and_originals_read_as_case_numbers() {
+    let (mut d, _dir) = support::fixture().await;
+    let project = submit_da(&mut d, &["development_approval"], 50_000).await;
+    to_decision(&mut d, project, json!({"approvals":["development_approval"]})).await;
+    let da = d.decision(project, "development_approval", None).await.unwrap();
+    let c = submit_modification(&mut d, &[da], &["lapse_date", "lapse_date"]).await;
+    let detail = d.detail("olga", c).await.unwrap();
+    assert_eq!(detail["answers"]["modification_types"], json!(["lapse_date"]));
+    let number = d.detail("olga", project).await.unwrap()["case"]["number"].clone();
+    let label = &detail["decision_refs"][da.to_string()];
+    assert_eq!(label["approval_type"], "development_approval");
+    assert_eq!(label["case_number"], number);
+    assert_eq!(d.detail("alexey", c).await.unwrap()["decision_refs"][da.to_string()]["case_number"], number);
+    let fee = d.req("olga", "GET", &format!("/api/cases/{c}/building-fee"), json!({})).await.unwrap();
+    assert_eq!(fee["proposal"]["rule"], "basic_modification");
+    let assessed = assess(&mut d, c, json!({"method":"schedule","modification_types":["lapse_date","lapse_date"],"reason":"Fictional: confirmed with the applicant."})).await;
+    assert_eq!(assessed["amount_cents"], 25_000);
+    let fee = d.req("olga", "GET", &format!("/api/cases/{c}/building-fee"), json!({})).await.unwrap();
+    assert_eq!(fee["assessments"][0]["inputs"]["modification_types"], json!(["lapse_date"]));
+}
+
+/// Building services edited and published by staff before the upgrade carry no `building_role`; they keep the role
+/// their seeded slug always had: a development application still starts a project with its requested scope and a
+/// modification still links its originals and can receive its modification decision.
+#[tokio::test]
+async fn staff_published_pre_upgrade_building_versions_keep_their_role() {
+    let (mut d, _dir) = support::fixture().await;
+    for slug in ["development-application", "modify-approval"] {
+        let mut def =
+            d.req("mark", "GET", &format!("/api/public/services/{slug}"), json!({})).await.unwrap()["definition"]
+                .clone();
+        def.as_object_mut().unwrap().remove("building_role");
+        let mut tx = servicehub::db::write_tx(&d.state.db).await.unwrap();
+        let service: i64 =
+            sqlx::query_scalar("SELECT id FROM services WHERE slug=?").bind(slug).fetch_one(&mut *tx).await.unwrap();
+        sqlx::query("UPDATE service_versions SET status='retired' WHERE service_id=? AND status='published'")
+            .bind(service)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO service_versions(service_id,version,status,definition_json,source_note,created_by,created_at,published_by,published_at) SELECT ?,MAX(version)+1,'published',?,'Staff edit published before the upgrade',(SELECT id FROM users WHERE persona_key='mark'),'2026-01-05T00:00:00Z',(SELECT id FROM users WHERE persona_key='mark'),'2026-01-05T00:00:00Z' FROM service_versions WHERE service_id=?")
+            .bind(service)
+            .bind(def.to_string())
+            .bind(service)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let project = submit_da(&mut d, &["development_approval"], 50_000).await;
+    let detail = d.detail("olga", project).await.unwrap();
+    assert!(detail["definition"].get("building_role").is_none());
+    let linked: Option<i64> = sqlx::query_scalar("SELECT building_project_id FROM cases WHERE id=?")
+        .bind(project)
+        .fetch_one(&d.state.db)
+        .await
+        .unwrap();
+    assert!(linked.is_some(), "a development application on a role-less staff version starts a project");
+    let route = d.req("olga", "GET", &format!("/api/cases/{project}/building-route"), json!({})).await.unwrap();
+    assert_eq!(route["route"], "project");
+    assert_eq!(route["scope"]["approvals"], json!(["development_approval"]));
+    to_decision(&mut d, project, json!({"approvals":["development_approval"]})).await;
+    let da = d.decision(project, "development_approval", None).await.unwrap();
+    let modification = submit_modification(&mut d, &[da], &["conditions"]).await;
+    let route = d.req("olga", "GET", &format!("/api/cases/{modification}/building-route"), json!({})).await.unwrap();
+    assert_eq!(route["route"], "modification");
+    assert_eq!(route["originals"][0]["decision_id"], da);
+    to_decision(&mut d, modification, json!({"originals":[da]})).await;
+    d.decision(modification, "modification_approval", None).await.unwrap();
+    assert_eq!(status(&mut d, modification).await, "completed");
+}

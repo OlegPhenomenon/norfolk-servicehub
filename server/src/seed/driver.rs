@@ -317,7 +317,12 @@ impl Driver {
             &[("Plan", "Corrected dimensions. Private phone: SECRET-PHONE-555-0199".into())],
         );
         for doc in def["documents"].as_array().expect("documents") {
-            if doc["required"] == true {
+            // Mirror the applicant form: a document whose `show_if` does not match the answers is hidden.
+            let shown = doc.get("show_if").is_none_or(|cond| match &answers[cond["field"].as_str().unwrap()] {
+                Value::Array(selected) => selected.contains(&cond["equals"]),
+                answer => answer == &cond["equals"],
+            });
+            if doc["required"] == true && shown {
                 let key = doc["key"].as_str().unwrap();
                 let upload = self
                     .upload(

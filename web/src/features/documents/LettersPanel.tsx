@@ -3,8 +3,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, isApiError } from '@/api/client'
 import { Badge, Button, Card, DateTime, EmptyState, ErrorAlert, Field, QueryView, Textarea, TextInput, useToast } from '@/ui'
 
-interface LetterStep { step_key: string; step_label: string; letter_type: string; label: string; current: boolean; issued: boolean }
-interface IssuedLetter { id: number; letter_type: string; title: string; document_version_id: number; issued_at: string; issued_by_name: string | null }
+interface LetterStep { step_key: string; step_label: string; letter_type: string; label: string; current: boolean; reached: boolean; issued: boolean; can_issue: boolean }
+interface IssuedLetter { id: number; letter_type: string; title: string; document_version_id: number; issued_at: string; issued_by_name: string | null; step_key: string | null }
 interface Letters { revision: number; can_issue: boolean; steps: LetterStep[]; issued: IssuedLetter[] }
 
 export function LettersPanel({ caseId }: { caseId: number }) {
@@ -12,11 +12,15 @@ export function LettersPanel({ caseId }: { caseId: number }) {
   return <QueryView query={q}>{(d) => {
     const steps = d.steps.filter((s) => s.letter_type !== 'road_response')
     return <div className="space-y-5">
-      {steps.map((s) => <Card key={s.step_key} title={`Step: ${s.step_label}`} actions={s.issued ? <Badge tone="success">Issued</Badge> : s.current ? <Badge tone="warning">Waiting for this letter</Badge> : <Badge>Not yet reached</Badge>}>
-        <p>This step completes when the {s.label} letter is issued. The applicant can download it from Documents.</p>
-        {d.can_issue && !s.issued && <LetterForm caseId={caseId} revision={d.revision} step={s} />}
+      {steps.map((s) => <Card key={s.step_key} title={`Step: ${s.step_label}`} actions={s.issued ? <Badge tone="success">Issued</Badge> : s.current ? <Badge tone="warning">Waiting for this letter</Badge> : s.reached ? <Badge>Not issued</Badge> : <Badge>Not yet reached</Badge>}>
+        <p>This step completes when the {s.label} letter is issued at this step. The applicant can download it from Documents.</p>
+        {!s.current && !s.reached && <p className="mt-2 text-sm">The letter can be issued once the case reaches this step.</p>}
+        {s.can_issue && <LetterForm caseId={caseId} revision={d.revision} step={s} />}
       </Card>)}
-      <Card title="Issued letters">{d.issued.length ? <ul className="space-y-3">{d.issued.map((l) => <li key={l.id}><a className="link" href={`/api/document-versions/${l.document_version_id}/download`}>{l.title}</a> — {l.letter_type.replaceAll('_', ' ')}, <DateTime value={l.issued_at} />{l.issued_by_name && ` by ${l.issued_by_name}`}</li>)}</ul> : <EmptyState title="No letters issued yet" />}</Card>
+      <Card title="Issued letters">{d.issued.length ? <ul className="space-y-3">{d.issued.map((l) => {
+        const step = d.steps.find((s) => s.step_key === l.step_key)?.step_label
+        return <li key={l.id}><a className="link" href={`/api/document-versions/${l.document_version_id}/download`}>{l.title}</a> — {l.letter_type.replaceAll('_', ' ')}{step && ` (step: ${step})`}, <DateTime value={l.issued_at} />{l.issued_by_name && ` by ${l.issued_by_name}`}</li>
+      })}</ul> : <EmptyState title="No letters issued yet" />}</Card>
     </div>
   }}</QueryView>
 }

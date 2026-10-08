@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { Answers, AnswerValue, FieldDef, GroupRow, ServiceDefinition, ShowIf } from '@/api/types'
+import type { Answers, AnswerValue, DecisionRefLabels, FieldDef, GroupRow, ServiceDefinition, ShowIf } from '@/api/types'
 import { api } from '@/api/client'
 import { humanize } from '@/ui/status'
 import { fieldTypes } from '@/registry'
@@ -11,8 +11,8 @@ function showIfMatches(condition: ShowIf, answer: unknown): boolean {
   return Array.isArray(answer) ? (answer as unknown[]).includes(condition.equals) : answer === condition.equals
 }
 
-interface Props { definition: ServiceDefinition; answers: Answers; onChange: (answers: Answers) => void; errors?: Record<string, string>; caseId?: number; disabled?: boolean; review?: boolean; submitted?: boolean }
-export function FormRenderer({ definition, answers, onChange, errors = {}, caseId, disabled, review, submitted }: Props) {
+interface Props { definition: ServiceDefinition; answers: Answers; onChange: (answers: Answers) => void; errors?: Record<string, string>; caseId?: number; disabled?: boolean; review?: boolean; submitted?: boolean; decisionRefs?: DecisionRefLabels }
+export function FormRenderer({ definition, answers, onChange, errors = {}, caseId, disabled, review, submitted, decisionRefs }: Props) {
   // Evaluate conditions against earlier visible answers, matching the authoritative server.
   const visible: Answers = {}
   const fields = definition.fields.filter((f) => {
@@ -21,7 +21,7 @@ export function FormRenderer({ definition, answers, onChange, errors = {}, caseI
     return true
   })
   const change = (key: string, value: unknown) => onChange({ ...answers, [key]: value as AnswerValue })
-  if (review) return <div className="space-y-4">{fields.map((f) => <div key={f.key}><h3 className="font-semibold">{f.label}</h3><p className="text-muted break-words">{readable(answers[f.key], f)}</p></div>)}{!submitted && <Alert title="Before you submit">Check your details and documents. Receiving your request does not mean it is approved.</Alert>}</div>
+  if (review) return <div className="space-y-4">{fields.map((f) => <div key={f.key}><h3 className="font-semibold">{f.label}</h3><p className="text-muted break-words">{f.type === 'decision_ref' ? <DecisionRefAnswer value={answers[f.key]} labels={decisionRefs} /> : readable(answers[f.key], f)}</p></div>)}{!submitted && <Alert title="Before you submit">Check your details and documents. Receiving your request does not mean it is approved.</Alert>}</div>
   return <div className="space-y-5">{fields.map((f) => {
     const Custom = fieldTypes[f.type]
     if (Custom) return <Custom key={f.key} field={f} value={answers[f.key]} onChange={(v) => change(f.key, v)} error={errors[f.key]} disabled={disabled} />
@@ -31,7 +31,7 @@ export function FormRenderer({ definition, answers, onChange, errors = {}, caseI
     if (f.type === 'location') return <LocationField key={f.key} field={f} value={answers[f.key]} onChange={(v) => change(f.key, v)} error={errors[f.key]} disabled={disabled} />
     if (['booking_slot', 'equipment_request', 'decision_ref'].includes(f.type)) return <Alert key={f.key} tone="warning" title={f.label}>The service widget is unavailable. Reload after the service module is installed.</Alert>
     return <Field key={f.key} label={f.label} required={f.required} hint={typeof f.help === 'string' ? f.help : f.hint} error={errors[f.key]}>{f.type === 'select' ? <Select options={f.options ?? []} placeholder="Choose an option" value={String(answers[f.key] ?? '')} onChange={(e) => change(f.key, e.target.value)} disabled={disabled} /> : f.type === 'textarea' ? <Textarea value={String(answers[f.key] ?? '')} onChange={(e) => change(f.key, e.target.value)} maxLength={f.max_length} disabled={disabled} /> : <TextInput type={f.type === 'phone' ? 'tel' : ['number', 'email', 'date', 'time'].includes(f.type) ? f.type : 'text'} value={String(answers[f.key] ?? '')} onChange={(e) => change(f.key, f.type === 'number' && e.target.value !== '' ? Number(e.target.value) : e.target.value)} maxLength={f.max_length} min={f.min} max={f.max} disabled={disabled} />}</Field>
-  })}{definition.documents.length > 0 && <section aria-label="Documents to attach" className="space-y-4"><h2 className="font-serif text-xl">Supporting documents</h2>{caseId ? <DocumentSlots caseId={caseId} definition={definition} errors={errors} disabled={disabled} /> : <p className="text-muted">{definition.documents.map((d) => `${d.label}${d.required ? ' (required)' : ''}`).join('; ')}. Save the request before uploading documents.</p>}</section>}</div>
+  })}{definition.documents.length > 0 && <section aria-label="Documents to attach" className="space-y-4"><h2 className="font-serif text-xl">Supporting documents</h2>{caseId ? <DocumentSlots caseId={caseId} definition={definition} answers={visible} errors={errors} disabled={disabled} /> : <p className="text-muted">{definition.documents.filter((d) => !d.show_if || showIfMatches(d.show_if, visible[d.show_if.field])).map((d) => `${d.label}${d.required ? ' (required)' : ''}`).join('; ')}. Save the request before uploading documents.</p>}</section>}</div>
 }
 function readable(value: unknown, field: FieldDef): ReactNode {
   if (value === undefined || value === null || value === '') return 'Not provided'
@@ -47,10 +47,29 @@ function readable(value: unknown, field: FieldDef): ReactNode {
   if (field.type === 'date') return <DateTime value={String(value)} format="date" />
   return optionLabel(value)
 }
-/** Review table of a `group` answer: one row per entry, one column per configured column. */
+/** Same rule as the server: a row counts only when at least one cell is filled in (an unticked box is not). */
+function filledRow(row: GroupRow, columns: FieldDef[]): boolean {
+  return columns.some((c) => { const v = row[c.key]; return v !== undefined && v !== false && String(v).trim() !== '' })
+}
+/** Review table of a `group` answer: one row per filled-in entry, one column per configured column. */
 function GroupTable({ field, rows }: { field: FieldDef; rows: GroupRow[] }) {
   const columns = field.columns ?? []
-  return <Table caption={field.label} hideCaption dense rows={rows.map((row, i) => ({ row, i }))} rowKey={(r) => r.i} empty="Not provided" columns={[{ key: '#', header: '#', cell: (r) => r.i + 1 }, ...columns.map((c) => ({ key: c.key, header: c.label, cell: (r: { row: GroupRow }) => <span className="break-words whitespace-pre-wrap">{readable(r.row[c.key], c)}</span> }))]} />
+  return <Table caption={field.label} hideCaption dense rows={rows.filter((row) => filledRow(row, columns)).map((row, i) => ({ row, i }))} rowKey={(r) => r.i} empty="Not provided" columns={[{ key: '#', header: '#', cell: (r) => r.i + 1 }, ...columns.map((c) => ({ key: c.key, header: c.label, cell: (r: { row: GroupRow }) => <span className="break-words whitespace-pre-wrap">{readable(r.row[c.key], c)}</span> }))]} />
+}
+interface IssuedApproval { id: number; decision_type: string; approval_type: string; case_number: string | null }
+/** A `decision_ref` answer (`{decision_id}` or `{decision_ids}`) as approval type and case number. Submitted
+ * requests carry server-resolved labels; a draft under review resolves them from the applicant's own approvals. */
+function DecisionRefAnswer({ value, labels }: { value: unknown; labels?: DecisionRefLabels }) {
+  const answer = typeof value === 'object' && value !== null ? value as { decision_id?: number; decision_ids?: number[] } : {}
+  const ids = answer.decision_ids ?? (answer.decision_id ? [answer.decision_id] : [])
+  const own = useQuery({ queryKey: ['documents', 'issued-approvals'], queryFn: () => api.get<IssuedApproval[]>('/api/my/issued-approvals'), enabled: !labels && ids.length > 0 })
+  if (!ids.length) return 'Not provided'
+  const describe = (id: number) => {
+    const d = labels?.[String(id)] ?? own.data?.find((a) => a.id === id)
+    if (!d) return own.isPending && !labels ? 'Loading approval…' : 'Approval not available'
+    return `${humanize(d.approval_type)}${d.decision_type === 'modification_approval' ? ' (as modified)' : ''} — ${d.case_number ?? 'no case number'}`
+  }
+  return <>{ids.map((id, i) => <span key={id}>{i > 0 && '; '}{describe(id)}</span>)}</>
 }
 /** Repeating rows (`group`): add/remove rows; each cell is validated by the server as `<field>.<row>.<column>`. */
 function GroupField({ field, value, onChange, errors, disabled }: { field: FieldDef; value: unknown; onChange: (v: GroupRow[]) => void; errors: Record<string, string>; disabled?: boolean }) {
@@ -74,11 +93,13 @@ function LocationField({ field, value, onChange, error, disabled }: { field: Fie
   return <fieldset className="space-y-3"><legend className="font-semibold">{field.label}</legend><Field label="Road and nearest landmark" required error={error}><Textarea value={v.description} onChange={(e) => onChange({ ...v, description: e.target.value })} disabled={disabled} /></Field><div className="grid gap-3 sm:grid-cols-2"><Field label="Latitude" required><TextInput type="number" step="any" min={-90} max={90} value={v.lat} onChange={(e) => onChange({ ...v, lat: Number(e.target.value) })} disabled={disabled} /></Field><Field label="Longitude" required><TextInput type="number" step="any" min={-180} max={180} value={v.lng} onChange={(e) => onChange({ ...v, lng: Number(e.target.value) })} disabled={disabled} /></Field></div></fieldset>
 }
 interface DocumentRow { id: number; title: string; requirement_key?: string; created_at?: string; latest_version?: { id: number }; versions?: { id: number }[] }
-export function DocumentSlots({ caseId, definition, errors = {}, disabled }: { caseId: number; definition: ServiceDefinition; errors?: Record<string, string>; disabled?: boolean }) {
+export function DocumentSlots({ caseId, definition, answers = {}, errors = {}, disabled }: { caseId: number; definition: ServiceDefinition; answers?: Answers; errors?: Record<string, string>; disabled?: boolean }) {
   const client = useQueryClient()
   const [slot, setSlot] = useState<string | null>(null)
   const docs = useQuery({ queryKey: ['services', 'documents', caseId], queryFn: () => api.get<{ items: DocumentRow[] } | DocumentRow[]>(`/api/cases/${caseId}/documents`) })
   const upload = useMutation({ mutationFn: ({ key, file }: { key: string; file: File }) => api.upload(`/api/cases/${caseId}/documents`, { file, fields: { requirement_key: key } }), onSuccess: () => client.invalidateQueries({ queryKey: ['services', 'documents', caseId] }) })
   const rows = Array.isArray(docs.data) ? docs.data : docs.data?.items ?? []
-  return <div className="space-y-4">{docs.error && <ErrorAlert error={docs.error} />}{upload.error && <ErrorAlert error={upload.error} />}{definition.documents.map((d) => <div key={d.key} className="rounded-lg border border-line p-4"><Field label={d.label} required={d.required} error={errors[`documents.${d.key}`]} hint={d.help ? `${d.help} PDF, PNG or JPEG, up to 10 MB.` : 'PDF, PNG or JPEG, up to 10 MB.'}><FileInput accept={d.accept.join(',')} disabled={disabled || upload.isPending} onChange={(e) => { const file = e.target.files?.[0]; if (file) { setSlot(d.key); upload.mutate({ key: d.key, file }) } }} /></Field>{rows.filter((r) => r.requirement_key === d.key).map((r) => <p key={r.id} className="mt-2 text-sm">Attached: {r.title} {r.created_at && <DateTime value={r.created_at} />}</p>)}{upload.isPending && slot === d.key && <p role="status">Uploading…</p>}</div>)}{!definition.documents.length && <EmptyState title="No documents needed" />}<p aria-live="polite" className="text-sm text-pine">{upload.isSuccess ? 'Document attached.' : ''}</p></div>
+  // A requirement is shown (and required) only while its `show_if` matches the answers, like the server.
+  const shown = definition.documents.filter((d) => !d.show_if || showIfMatches(d.show_if, answers[d.show_if.field]))
+  return <div className="space-y-4">{docs.error && <ErrorAlert error={docs.error} />}{upload.error && <ErrorAlert error={upload.error} />}{shown.map((d) => <div key={d.key} className="rounded-lg border border-line p-4"><Field label={d.label} required={d.required} error={errors[`documents.${d.key}`]} hint={d.help ? `${d.help} PDF, PNG or JPEG, up to 10 MB.` : 'PDF, PNG or JPEG, up to 10 MB.'}><FileInput accept={d.accept.join(',')} disabled={disabled || upload.isPending} onChange={(e) => { const file = e.target.files?.[0]; if (file) { setSlot(d.key); upload.mutate({ key: d.key, file }) } }} /></Field>{rows.filter((r) => r.requirement_key === d.key).map((r) => <p key={r.id} className="mt-2 text-sm">Attached: {r.title} {r.created_at && <DateTime value={r.created_at} />}</p>)}{upload.isPending && slot === d.key && <p role="status">Uploading…</p>}</div>)}{!shown.length && <EmptyState title="No documents needed" />}<p aria-live="polite" className="text-sm text-pine">{upload.isSuccess ? 'Document attached.' : ''}</p></div>
 }

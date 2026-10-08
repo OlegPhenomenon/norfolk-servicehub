@@ -458,6 +458,10 @@ async fn accountless_letter_contains_answer_in_email_and_sms() {
     let (mut d, _dir) = support::fixture().await;
     let (_, answers) = d.answers("olga", "road-issue").await.unwrap();
     let c=req(&mut d,"olga","POST","/api/staff/intake",json!({"service":"road-issue","channel":"phone","applicant_name":"Accountless caller","applicant_email":"caller@example.invalid","applicant_phone":"+672355512","answers":answers})).await["id"].as_i64().unwrap();
+    // A response letter is accepted only at the response step.
+    d.action("olga", c, "advance").await.unwrap();
+    d.complete_task(c, "road_inspection").await.unwrap();
+    d.complete_task(c, "road_repair").await.unwrap();
     let r = rev(&mut d, "olga", c).await;
     req(&mut d,"olga","POST",&format!("/api/cases/{c}/letters"),json!({"letter_type":"road_response","title":"Your road answer","body":"The drain was inspected and cleared today.","expected_revision":r})).await;
     let rows:Vec<(String,String)>=sqlx::query_as("SELECT channel,body FROM notifications WHERE case_id=? AND subject LIKE '%response%' AND channel IN ('email','sms')").bind(c).fetch_all(&d.state.db).await.unwrap();
@@ -762,10 +766,9 @@ async fn exhibition_approver_sees_redaction_nsh_lookup_and_manager_withdraws() {
     let (x, y) = (b.width() / 2, b.height() / 4);
     assert!(b.get_pixel(x, y).0.iter().all(|p| *p < 10));
     let r = rev(&mut d, "priya", c).await;
-    d.expect("priya", "POST", &format!("/api/exhibitions/{e}/withdraw"), json!({"expected_revision":r}), 403)
-        .await
-        .unwrap();
-    req(&mut d, "helen", "POST", &format!("/api/exhibitions/{e}/withdraw"), json!({"expected_revision":r})).await;
+    let withdrawal = json!({"reason":"Published copy must be taken down.","expected_revision":r});
+    d.expect("priya", "POST", &format!("/api/exhibitions/{e}/withdraw"), withdrawal.clone(), 403).await.unwrap();
+    req(&mut d, "helen", "POST", &format!("/api/exhibitions/{e}/withdraw"), withdrawal).await;
     d.expect("stranger", "GET", &format!("/api/public/exhibitions/{e}"), json!({}), 404).await.unwrap();
     assert_eq!(
         d.raw("stranger", "GET", &format!("/api/public/exhibitions/{e}/items/{item}/file"), "text/plain", vec![], &[])
@@ -812,6 +815,9 @@ async fn document_class_retention_and_duplicate_reopened_periods() {
     )
     .await;
     let (c, _) = d.submit("alexey", "road-issue", json!({}), None).await.unwrap();
+    d.action("olga", c, "advance").await.unwrap();
+    d.complete_task(c, "road_inspection").await.unwrap();
+    d.complete_task(c, "road_repair").await.unwrap();
     let r = rev(&mut d, "olga", c).await;
     req(
         &mut d,
@@ -821,7 +827,8 @@ async fn document_class_retention_and_duplicate_reopened_periods() {
         json!({"letter_type":"road_response","title":"Closed answer","body":"Resolved","expected_revision":r}),
     )
     .await;
-    d.action("helen", c, "cancel").await.unwrap();
+    // The letter is issued at the response step and completes (closes) the case.
+    assert_eq!(d.detail("olga", c).await.unwrap()["case"]["status"], "completed");
     let until: String =
         sqlx::query_scalar("SELECT retention_until FROM documents WHERE case_id=? AND category='letter'")
             .bind(c)

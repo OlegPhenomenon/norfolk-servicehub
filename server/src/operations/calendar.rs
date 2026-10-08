@@ -296,5 +296,16 @@ pub async fn road_detail(
     if c.module != "road_issue" {
         return Err(AppError::not_found());
     }
-    Ok(Json(json!({"revision":c.revision,"can_manage":access.can_manage(),"location":c.location_text})))
+    let can_issue = access.can_manage()
+        && a.roles_for_service(c.service_id)
+            .iter()
+            .any(|r| [Role::Intake, Role::Specialist, Role::Manager].contains(r))
+        && crate::documents::api::letter_due(&mut tx, &c, "road_response").await?;
+    let issued: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM issued_letters WHERE case_id=? AND letter_type='road_response')",
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
+    Ok(Json(json!({"revision":c.revision,"can_issue":can_issue,"issued":issued,"location":c.location_text})))
 }

@@ -121,13 +121,30 @@ pub async fn list(
         .fetch_one(&mut *c)
         .await?;
     let definition: serde_json::Value = serde_json::from_str(&requirements)?;
+    // A requirement whose `show_if` does not match the case answers is not applicable (never required).
+    let answers: Option<String> = sqlx::query_scalar(
+        "SELECT answers_json FROM (SELECT answers_json, 0 AS o FROM submissions WHERE case_id=? AND id=(SELECT MAX(id) FROM submissions WHERE case_id=?) UNION ALL SELECT answers_json, 1 FROM case_drafts WHERE case_id=?) ORDER BY o LIMIT 1",
+    )
+    .bind(id)
+    .bind(id)
+    .bind(id)
+    .fetch_optional(&mut *c)
+    .await?;
+    let answers: serde_json::Value =
+        answers.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_else(|| serde_json::json!({}));
+    let mut document_requirements = definition.get("documents").cloned().unwrap_or_else(|| serde_json::json!([]));
+    for r in document_requirements.as_array_mut().into_iter().flatten() {
+        let applicable = serde_json::from_value::<crate::services::definition::ShowIf>(r["show_if"].clone())
+            .map_or(true, |s| s.matches(answers.get(&s.field)));
+        r["applicable"] = serde_json::json!(applicable);
+    }
     let role = super::building::role_of(&mut c, &case).await?;
     let allowed: Vec<&str> = crate::services::validation::decision_types(&case.module)
         .into_iter()
         .filter(|t| super::building::role_permits(role, t))
         .collect();
     Ok(Json(
-        serde_json::json!({"editable":editable,"can_upload":editable && super::uploads::writable(a).is_ok(),"can_comment":editable && can_comment,"can_prepare":can_prepare,"document_requirements":definition.get("documents").cloned().unwrap_or_else(||serde_json::json!([])),"items":rows,"authorities":authorities,"staff":a.is_staff(),"revision":case.revision,"building_project_id":case.building_project_id,"allowed_decision_types":allowed}),
+        serde_json::json!({"editable":editable,"can_upload":editable && super::uploads::writable(a).is_ok(),"can_comment":editable && can_comment,"can_prepare":can_prepare,"document_requirements":document_requirements,"items":rows,"authorities":authorities,"staff":a.is_staff(),"revision":case.revision,"building_project_id":case.building_project_id,"allowed_decision_types":allowed}),
     ))
 }
 async fn validate(tx: &mut SqliteConnection, case: &CaseRow, input: &Input) -> AppResult<Vec<i64>> {

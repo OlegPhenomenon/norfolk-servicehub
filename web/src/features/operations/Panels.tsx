@@ -551,7 +551,7 @@ export function RoadResponsePanel({ caseId }: { caseId: number }) {
   const q = useQuery({
     queryKey: ['operations', 'road-response', caseId],
     queryFn: () =>
-      api.get<{ revision: number; can_manage: boolean; location: string }>(
+      api.get<{ revision: number; can_issue: boolean; issued: boolean; location: string }>(
         `/api/cases/${caseId}/road-response`,
       ),
   })
@@ -563,7 +563,14 @@ export function RoadResponsePanel({ caseId }: { caseId: number }) {
       {(d) => (
         <Card title="Council road issue response">
           <p>{d.location}</p>
-          {d.can_manage && (
+          {!d.can_issue && (
+            <p className="mt-4 text-sm">
+              {d.issued
+                ? 'The response letter has been issued. The resident can download it from Documents.'
+                : 'The response letter can be issued once the case reaches the response step.'}
+            </p>
+          )}
+          {d.can_issue && (
             <div className="mt-4 space-y-4">
               <Field
                 label="Response for the resident"
